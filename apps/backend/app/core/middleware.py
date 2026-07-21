@@ -21,6 +21,8 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.security import validate_init_data, validate_service_token
+from app.db.redis import get_redis
+from app.services.http_rate_limiter import make_api_v1_limiter, make_internal_limiter
 
 
 logger = get_logger("auth_middleware")
@@ -167,16 +169,72 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Общий HTTP rate-limit по Redis (60/min для пользователей, 120/min для /internal).
+
+    Только для аутентифицированных эндпоинтов — health/metrics не лимитируем.
+    """
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        path = request.url.path
+
+        if path in HEALTH_PATHS:
+            return await call_next(request)
+
+        try:
+            redis = get_redis()
+            if path.startswith(PUBLIC_PREFIX):
+                tg_user = getattr(request.state, "telegram_user", None)
+                if tg_user is None:
+                    return await call_next(request)
+                subject = f"u:{tg_user.id}"
+                limiter = make_api_v1_limiter(redis)
+            elif path.startswith(INTERNAL_PREFIX):
+                caller = getattr(request.state, "caller", None)
+                if caller is None:
+                    return await call_next(request)
+                subject = f"s:{caller}"
+                limiter = make_internal_limiter(redis)
+            else:
+                return await call_next(request)
+
+            allowed, count, max_n = await limiter.check(subject)
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={"code": "rate_limited", "limit": max_n, "window_seconds": limiter._window},
+                    headers={
+                        "X-RateLimit-Limit": str(max_n),
+                        "X-RateLimit-Remaining": "0",
+                        "Retry-After": str(limiter._window),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 — fail-open: rate-limit не должен ронять прод
+            logger.warning(
+                "rate_limit_error",
+                extra={"path": path, "error": type(exc).__name__},
+            )
+            return await call_next(request)
+
+        return await call_next(request)
+
+
 def install_middlewares(app: FastAPI) -> None:
     """Устанавливает middleware в правильном порядке.
 
-    В FastAPI/Starlette middleware добавляются ПОСЛЕДНИМ — выполняются ПЕРВЫМ.
+    В FastAPI/Starlette middleware добавляются ПОСЛЕДНИМ — выполняется ПЕРВЫМ.
     Нужный порядок обработки запроса:
-        CORS preflight → Auth (401/404) → RequestContext (логи).
-    Поэтому регистрируем в обратном порядке: RequestContext → Auth → CORS.
+        CORS preflight → Auth (401/404) → RateLimit → RequestContext (логи).
+    Поэтому регистрируем в обратном порядке:
+        RequestContext → RateLimit → Auth → CORS.
     """
     settings = get_settings()
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,

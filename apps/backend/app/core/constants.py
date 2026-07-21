@@ -76,3 +76,10 @@ class PenaltyConfig:
     # Антифрод-эвристика: если один catcher ловит один и тот же violator
     # N+ раз за сезон И violator ни разу не поймал catcher'а — флаг.
     SUSPICIOUS_ASYMMETRY_THRESHOLD = 3
+
+
+class HttpRateLimitConfig:
+    """Общий HTTP rate limit (на пользователя / сервисный caller)."""
+
+    RATE_LIMIT_API_V1 = "60/60s"   # 60 запросов в минуту на /api/v1/*
+    RATE_LIMIT_INTERNAL = "120/60s"  # 120 на /internal/* (бот шлёт чаще)

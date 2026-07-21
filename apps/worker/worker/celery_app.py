@@ -4,9 +4,11 @@ from celery import Celery
 from celery.schedules import crontab
 
 from worker.config import get_settings
+from worker.logging_setup import configure_logging
 
 
 _settings = get_settings()
+configure_logging(_settings.log_level)
 
 
 def _init_observability() -> None:
