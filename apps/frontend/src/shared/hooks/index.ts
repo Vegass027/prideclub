@@ -108,3 +108,11 @@ export function useGlobalLeaderboard(tab: LeaderboardTab) {
     staleTime: 60_000,
   });
 }
+
+export function useLeaderboardOverview(tab: LeaderboardTab) {
+  return useQuery({
+    queryKey: ["leaderboard-overview", tab],
+    queryFn: () => leaderboardApi.overview(tab),
+    staleTime: 30_000,
+  });
+}

@@ -104,6 +104,19 @@ export interface LeaderboardResponse {
   items: LeaderboardEntry[];
 }
 
+export interface OverviewClub {
+  habit_id: string;
+  title: string;
+  members_count: number;
+  top: LeaderboardEntry[];
+}
+
+export interface LeaderboardOverviewResponse {
+  tab: "streak" | "catches" | "shame";
+  metric_label: string;
+  clubs: OverviewClub[];
+}
+
 export interface MarketplaceResponse {
   items: Habit[];
 }

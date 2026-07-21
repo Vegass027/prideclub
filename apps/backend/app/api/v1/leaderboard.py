@@ -34,6 +34,19 @@ class LeaderboardResponse(BaseModel):
     items: list[LeaderboardEntry]
 
 
+class OverviewClub(BaseModel):
+    habit_id: str
+    title: str
+    members_count: int
+    top: list[LeaderboardEntry]
+
+
+class LeaderboardOverviewResponse(BaseModel):
+    tab: str
+    metric_label: str
+    clubs: list[OverviewClub]
+
+
 async def _build_rows(
     session: AsyncSession,
     metrics: dict[str, int],
@@ -308,3 +321,61 @@ async def global_shame(
 ) -> LeaderboardResponse:
     rows = await _global_counts(session, column=Penalty.membership_id)
     return LeaderboardResponse(items=rows)
+
+
+async def _overview_metric(
+    session: AsyncSession,
+    *,
+    habit_id: str,
+    tab: str,
+) -> list[LeaderboardEntry]:
+    """Возвращает топ-3 (или меньше) участников клуба по выбранной метрике.
+
+    Использует уже готовые хелперы _streak_leaderboard / _catch_leaderboard /
+    _shame_leaderboard и обрезает результат до 3.
+    """
+    membership_repo = MembershipRepository(session)
+    if tab == "streak":
+        rows = await _streak_leaderboard(session, membership_repo, habit_id)
+    elif tab == "catches":
+        rows = await _catch_leaderboard(session, membership_repo, habit_id)
+    elif tab == "shame":
+        rows = await _shame_leaderboard(session, membership_repo, habit_id)
+    else:
+        raise HTTPException(400, "tab must be streak|catches|shame")
+    return rows[:3]
+
+
+@router.get("/leaderboard/{tab}/overview", response_model=LeaderboardOverviewResponse)
+async def leaderboard_overview(
+    tab: str,
+    user: TelegramUser = Depends(current_user_db),
+    session: AsyncSession = Depends(get_session),
+) -> LeaderboardOverviewResponse:
+    """Сводка лидерборда по всем клубам юзера.
+
+    Возвращает список клубов с топ-3 участников в каждом. Юзер может
+    открыть любой клуб и посмотреть детали.
+    """
+    if tab not in ("streak", "catches", "shame"):
+        raise HTTPException(400, "tab must be streak|catches|shame")
+
+    metric_label = {"streak": "дн.", "catches": "поимок", "shame": "штрафов"}[tab]
+
+    habit_repo = HabitRepository(session)
+    user_habits = await habit_repo.list_for_user(user.id)
+
+    clubs: list[OverviewClub] = []
+    for habit in user_habits:
+        top = await _overview_metric(session, habit_id=str(habit.id), tab=tab)
+        members = await MembershipRepository(session).list_for_habit(str(habit.id))
+        clubs.append(
+            OverviewClub(
+                habit_id=str(habit.id),
+                title=habit.title,
+                members_count=len(members),
+                top=top,
+            )
+        )
+
+    return LeaderboardOverviewResponse(tab=tab, metric_label=metric_label, clubs=clubs)

@@ -2,7 +2,7 @@ import { NavLink as RouterLink } from "react-router-dom";
 
 const ITEMS: { to: string; emoji: string; label: string }[] = [
   { to: "/marketplace", emoji: "🏪", label: "Клубы" },
-  { to: "/leaderboards", emoji: "🏆", label: "Лидеры" },
+  { to: "/leaderboards", emoji: "🏆", label: "Рейтинг" },
   { to: "/profile", emoji: "👤", label: "Профиль" },
 ];
 
