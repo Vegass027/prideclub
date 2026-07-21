@@ -55,7 +55,7 @@ class CheckinService:
         proof: ProofMessage,
         proof_message_id: int,
         now_utc: datetime,
-    ) -> Checkin:
+    ) -> tuple[Checkin, bool]:
         habit = await self._habit_repo.get(habit_id)
         if habit is None:
             raise HabitNotFoundError()
@@ -124,7 +124,7 @@ class CheckinService:
                 "created": created,
             },
         )
-        return checkin
+        return checkin, created
 
     async def get_today_status(
         self, *, user_id: int, habit_id: str, now_utc: datetime

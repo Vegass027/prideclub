@@ -84,12 +84,16 @@ async def test_apply_catch_happy_path() -> None:
     limiter = _NoopLimiter()
     session = _NoStreakSession()
 
+    async def no_suspicious(*_a, **_kw):
+        return False
+
     service = PenaltyService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
         redis_port=limiter,
+        suspicious_lookup=no_suspicious,
     )
 
     penalty = await service.apply_catch(
@@ -136,13 +140,17 @@ async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
     habit_repo.add(habit)
     membership_repo = FakeMembershipRepo()
     violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
-    violator.deposit_balance = 100  # меньше штрафа
+    violator.deposit_balance = 0  # депозит исчерпан — membership должен быть paused
+
+    async def no_suspicious(*_a, **_kw):
+        return False
 
     service = PenaltyService(
         session=_NoStreakSession(),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=FakeCheckinRepo(),
+        suspicious_lookup=no_suspicious,
     )
 
     with pytest.raises(PenaltyAlreadyProcessedError) as exc:

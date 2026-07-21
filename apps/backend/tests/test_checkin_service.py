@@ -145,10 +145,9 @@ async def test_checkin_window_closed() -> None:
         checkin_repo=checkin_repo,
     )
 
-    # 12:00 по Москве → вне окна
-    from datetime import datetime as _dt
-
-    now = _dt(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    # 12:00 по Москве → вне окна (8:00–9:00 МСК)
+    # msg_date оставляем "сейчас", чтобы не словить stale_message раньше окна.
+    now = datetime.now(tz=timezone.utc)
     habit.timezone = "Europe/Moscow"
 
     with pytest.raises(CheckinWindowClosedError):
@@ -157,7 +156,7 @@ async def test_checkin_window_closed() -> None:
             habit_id=str(habit.id),
             proof=_proof(msg_date=now),
             proof_message_id=1,
-            now_utc=now,
+            now_utc=now.replace(hour=12, minute=0, second=0, microsecond=0),
         )
 
 

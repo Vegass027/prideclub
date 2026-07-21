@@ -48,12 +48,14 @@ class PenaltyService:
         membership_repo: MembershipRepository,
         checkin_repo: CheckinRepository,
         redis_port: RedisPort | None = None,
+        suspicious_lookup=None,
     ) -> None:
         self._session = session
         self._habit_repo = habit_repo
         self._membership_repo = membership_repo
         self._checkin_repo = checkin_repo
         self._redis = redis_port
+        self._suspicious_lookup = suspicious_lookup
         self._logger = get_logger("penalty_service")
 
     async def apply_catch(
@@ -221,6 +223,8 @@ class PenaltyService:
     async def _is_suspicious(self, a: str | None, b: str | None) -> bool:
         if a is None or b is None or a == b:
             return False
+        if self._suspicious_lookup is not None:
+            return await self._suspicious_lookup(a, b)
         from sqlalchemy import or_, select
 
         from app.models.auxiliary import SuspiciousPair
@@ -237,8 +241,16 @@ class PenaltyService:
 
 
 def _parse_limit(spec: str) -> tuple[int, int]:
-    # Формат: "10/10s" / "5/1m"
+    """Парсит лимит вида '10/10s' → (10, 10 секунд) или '5/1m' → (5, 60 секунд).
+
+    Возвращает (max_count, window_seconds).
+    """
     count, _, ttl = spec.partition("/")
-    if not ttl.endswith("s") and not ttl.endswith("m"):
-        raise ValueError(f"Bad rate-limit spec: {spec}")
-    return int(count), int(ttl[:-1])
+    if not ttl:
+        raise ValueError(f"Bad rate-limit spec: {spec!r}")
+    unit = ttl[-1]
+    if unit not in ("s", "m"):
+        raise ValueError(f"Bad rate-limit unit in {spec!r}: expected 's' or 'm'")
+    n = int(ttl[:-1])
+    seconds = n * 60 if unit == "m" else n
+    return int(count), seconds

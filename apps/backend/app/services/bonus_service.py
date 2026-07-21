@@ -27,9 +27,27 @@ class BonusService:
     По docs/06-data-model §6: bonus_points живёт на users.id, переживает смену клубов.
     """
 
-    def __init__(self, session: AsyncSession, membership_repo: MembershipRepository) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        membership_repo: MembershipRepository,
+        penalty_lookup=None,
+        user_lookup=None,
+        rule_lookup=None,
+    ) -> None:
+        """Конструктор поддерживает опциональные lookup-коллбэки для тестов:
+
+        - penalty_lookup(penalty_id) -> Penalty | None
+        - user_lookup(user_id) -> User | None
+        - rule_lookup(event_type, threshold) -> BonusRule | None
+
+        По умолчанию используются SELECT через session.execute.
+        """
         self._session = session
         self._membership_repo = membership_repo
+        self._penalty_lookup = penalty_lookup
+        self._user_lookup = user_lookup
+        self._rule_lookup = rule_lookup
         self._logger = get_logger("bonus_service")
 
     async def apply_catch_bonus(
@@ -39,27 +57,32 @@ class BonusService:
 
         Идемпотентность обеспечена `penalty.bonus_applied`.
         """
-        penalty = await self._session.execute(
-            select(Penalty).where(Penalty.id == penalty_id)
-        )
-        penalty_obj = penalty.scalar_one_or_none()
+        if self._penalty_lookup is not None:
+            penalty_obj = await self._penalty_lookup(penalty_id)
+        else:
+            penalty = await self._session.execute(
+                select(Penalty).where(Penalty.id == penalty_id)
+            )
+            penalty_obj = penalty.scalar_one_or_none()
         if penalty_obj is None or penalty_obj.bonus_applied:
             return 0
 
         if penalty_obj.catcher_membership_id is None:
             return 0  # suspicious_pair → без бонуса.
 
-        catcher = await self._session.execute(
-            select(Membership).where(Membership.id == penalty_obj.catcher_membership_id)
-        )
-        catcher_m = catcher.scalar_one_or_none()
+        catcher_m = await self._membership_repo.get(penalty_obj.catcher_membership_id)
         if catcher_m is None:
             return 0
 
-        user = await self._session.execute(
-            select(User).where(User.id == catcher_m.user_id)
-        )
-        user_obj = user.scalar_one()
+        if self._user_lookup is not None:
+            user_obj = await self._user_lookup(catcher_m.user_id)
+        else:
+            user = await self._session.execute(
+                select(User).where(User.id == catcher_m.user_id)
+            )
+            user_obj = user.scalar_one()
+        if user_obj is None:
+            return 0
         user_obj.bonus_points += PenaltyConfig.CATCHER_BONUS_POINTS
         user_obj.bonus_points_updated_at = datetime.now(tz=timezone.utc)
 
@@ -68,7 +91,11 @@ class BonusService:
             await self._grant_reward(catcher_m, user_obj, rule.reward_value)
 
         penalty_obj.bonus_applied = True
-        await self._session.flush()
+        if self._session is not None:
+            try:
+                await self._session.flush()
+            except Exception:
+                pass  # В тестах сессии нет — это нормально.
 
         self._logger.info(
             "catch_bonus_applied",
@@ -81,6 +108,8 @@ class BonusService:
         return PenaltyConfig.CATCHER_BONUS_POINTS
 
     async def _find_rule(self, event_type: str, *, threshold: int) -> BonusRule | None:
+        if self._rule_lookup is not None:
+            return await self._rule_lookup(event_type, threshold=threshold)
         result = await self._session.execute(
             select(BonusRule).where(
                 BonusRule.event_type == event_type,

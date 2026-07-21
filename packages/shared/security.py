@@ -106,8 +106,10 @@ def validate_service_token(
             secret,
             algorithms=["HS256"],
             audience=expected_audience,
-            options={"leeway": 30},
-            required=["exp", "iat", "service", "aud", "iss"],
+            options={
+                "leeway": 30,
+                "require": ["exp", "iat", "service", "aud", "iss"],
+            },
         )
     except jwt.ExpiredSignatureError as exc:
         raise ServiceTokenExpiredError() from exc

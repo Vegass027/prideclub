@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.core.constants import ProofType
-from app.services.proof_validator import ProofMessage, ProofValidationError
+from app.services.proof_validator import ProofMessage, ProofValidationError, validate_proof_media
 
 
 def _msg(**kw) -> ProofMessage:

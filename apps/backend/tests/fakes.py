@@ -51,6 +51,12 @@ class FakeHabitRepo:
     async def list_with_member_counts(self) -> list[tuple[Habit, int]]:
         return [(h, 0) for h in self._store.values()]
 
+    async def add_to_prize_pool(self, habit_id: str, amount: int) -> None:
+        habit = self._store.get(habit_id)
+        if habit is None:
+            return
+        habit.prize_pool += amount
+
 
 def make_habit(
     *, id: str | None = None, chat_id: int = 100, proof: ProofType = ProofType.VIDEO_NOTE
@@ -64,6 +70,7 @@ def make_habit(
         timezone="Europe/Moscow",
         penalty_amount=100,
         price_month=1000,
+        prize_pool=0,
         proof_type=proof,
     )
 

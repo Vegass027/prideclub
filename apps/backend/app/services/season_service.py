@@ -131,17 +131,31 @@ class SeasonService:
 
 
 def validate_prize_rules(rules: Iterable[dict]) -> None:
-    """Сумма percentage по каждой metric должна быть 100%."""
-    totals: dict[str, float] = defaultdict(float)
+    """Валидирует правила распределения призового фонда.
+
+    Контракт (docs/06-data-model.md §7):
+    - Сумма ВСЕХ percentage по всем metrics = 100% (распределение фонда).
+    - Метрика — это просто тег группировки ('streak', 'catches', и т.п.).
+    - rank_from >= 1, rank_from <= rank_to, без перекрытий внутри одной метрики.
+    """
+    from app.core.exceptions import InvalidPrizeRulesError
+
+    seen_ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    total_pct = 0.0
     for rule in rules:
         rf, rt = rule["rank_from"], rule["rank_to"]
         if rf < 1 or rf > rt:
-            from app.core.exceptions import InvalidPrizeRulesError
-
             raise InvalidPrizeRulesError(f"invalid range {rf}-{rt}")
-        totals[rule["metric"]] += float(rule["percentage"])
-    for metric, total in totals.items():
-        if abs(total - 100.0) > 0.01:
-            from app.core.exceptions import InvalidPrizeRulesError
+        metric = rule["metric"]
+        for prev_rf, prev_rt in seen_ranges[metric]:
+            if rf <= prev_rt and prev_rf <= rt:
+                raise InvalidPrizeRulesError(
+                    f"overlapping ranges in '{metric}': [{prev_rf},{prev_rt}] and [{rf},{rt}]"
+                )
+        seen_ranges[metric].append((rf, rt))
+        total_pct += float(rule["percentage"])
 
-            raise InvalidPrizeRulesError(f"{metric} sums to {total}, expected 100")
+    if abs(total_pct - 100.0) > 0.01:
+        raise InvalidPrizeRulesError(
+            f"total percentage = {total_pct}, expected 100"
+        )

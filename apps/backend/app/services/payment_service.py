@@ -91,7 +91,12 @@ class PaymentService:
             )
         ).scalar_one_or_none()
         if m is None:
-            m = Membership(user_id=user_id, habit_id=habit_id)
+            m = Membership(
+                user_id=user_id,
+                habit_id=habit_id,
+                deposit_balance=0,
+                subscription_until=None,
+            )
             self._session.add(m)
             await self._session.flush()
 
