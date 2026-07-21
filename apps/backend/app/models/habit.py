@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from datetime import date, datetime, time
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, String, Text, Time, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.constants import ProofType
+from app.db.session import Base
+
+
+if TYPE_CHECKING:
+    from app.models.membership import Membership
+
+
+class Habit(Base):
+    __tablename__ = "habits"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid())
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+
+    checkin_window_start: Mapped[time] = mapped_column(Time, nullable=False)
+    checkin_window_end: Mapped[time] = mapped_column(Time, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="Europe/Moscow")
+
+    penalty_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_month: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    proof_type: Mapped[ProofType] = mapped_column(
+        Enum(ProofType, name="proof_type", values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
+
+    prize_pool: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    memberships: Mapped[list["Membership"]] = relationship(back_populates="habit")
+
+    def club_date(self, moment_utc: datetime) -> date:
+        local = moment_utc.astimezone(ZoneInfo(self.timezone))
+        return local.date()
+
+    def is_within_checkin_window(self, moment_utc: datetime) -> bool:
+        """Дедлайн чек-ина считается в TZ клуба, не пользователя."""
+        local = moment_utc.astimezone(ZoneInfo(self.timezone))
+        return self.checkin_window_start <= local.time() <= self.checkin_window_end

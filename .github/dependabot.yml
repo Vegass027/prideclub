@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/apps/backend"
+    schedule:
+      interval: "weekly"
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  - package-ecosystem: "pip"
+    directory: "/apps/bot"
+    schedule:
+      interval: "weekly"
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/worker"
+    schedule:
+      interval: "weekly"
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "docker"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]

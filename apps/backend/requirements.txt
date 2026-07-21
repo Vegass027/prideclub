@@ -1,0 +1,25 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+redis==5.2.1
+PyJWT==2.10.1
+aiohttp==3.11.11
+httpx==0.28.1
+structlog==24.4.0
+prometheus-client==0.21.1
+sentry-sdk[fastapi]==2.19.2
+
+# dev / test / lint
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
+ruff==0.8.6
+mypy==1.14.0
+black==24.10.0
+faker==33.1.0

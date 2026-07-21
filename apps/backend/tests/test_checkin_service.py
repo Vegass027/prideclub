@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import pytest
+
+from app.core.constants import MembershipStatus, ProofType
+from app.core.exceptions import (
+    CheckinWindowClosedError,
+    HabitNotFoundError,
+    MembershipNotActiveError,
+    MembershipNotFoundError,
+)
+from app.services.checkin_service import CheckinService
+from app.services.proof_validator import ProofMessage, ProofValidationError
+from tests.fakes import (
+    FakeCache,
+    FakeCheckinRepo,
+    FakeHabitRepo,
+    FakeMembershipRepo,
+    FakeSession,
+    make_habit,
+)
+
+
+def _proof(*, duration: int | None = 5, msg_date: datetime | None = None) -> ProofMessage:
+    return ProofMessage(
+        proof_type=ProofType.VIDEO_NOTE,
+        video_note_duration=duration,
+        photo_sizes=0,
+        message_date=msg_date or datetime.now(tz=timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkin_happy_path() -> None:
+    habit = make_habit(proof=ProofType.VIDEO_NOTE)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    cache = FakeCache()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        cache=cache,  # type: ignore[arg-type]
+    )
+
+    checkin, _ = await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=42,
+        now_utc=datetime.now(tz=timezone.utc),
+    ))
+    assert checkin.status.value == "done"
+    assert checkin.proof_message_id == 42
+    assert cache.invalidated == [(str(habit.id), str(m.id))]
+
+
+@pytest.mark.asyncio
+async def test_checkin_idempotent_same_day() -> None:
+    habit = make_habit(proof=ProofType.VIDEO_NOTE)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    session = FakeSession(checkin_repo)
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    now = datetime.now(tz=timezone.utc)
+    await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(msg_date=now),
+        proof_message_id=1,
+        now_utc=now,
+    ))
+    second, created = await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(msg_date=now),
+        proof_message_id=2,
+        now_utc=now,
+    ))
+    assert created is False
+    assert second.proof_message_id == 1  # оригинальное сообщение
+
+
+@pytest.mark.asyncio
+async def test_checkin_rejects_paused_membership() -> None:
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.PAUSED
+    )
+    checkin_repo = FakeCheckinRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    with pytest.raises(MembershipNotActiveError):
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),
+            proof_message_id=1,
+            now_utc=datetime.now(tz=timezone.utc),
+        )
+
+
+@pytest.mark.asyncio
+async def test_checkin_window_closed() -> None:
+    from datetime import time
+
+    habit = make_habit()
+    habit.checkin_window_start = time(8, 0)
+    habit.checkin_window_end = time(9, 0)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    # 12:00 по Москве → вне окна
+    from datetime import datetime as _dt
+
+    now = _dt(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    habit.timezone = "Europe/Moscow"
+
+    with pytest.raises(CheckinWindowClosedError):
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(msg_date=now),
+            proof_message_id=1,
+            now_utc=now,
+        )
+
+
+@pytest.mark.asyncio
+async def test_checkin_wrong_proof_type() -> None:
+    habit = make_habit(proof=ProofType.PHOTO)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    with pytest.raises(ProofValidationError) as exc:
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),  # video_note, но habit ждёт photo
+            proof_message_id=1,
+            now_utc=datetime.now(tz=timezone.utc),
+        )
+    assert exc.value.code == "wrong_type"
+
+
+async def _wrap(coro):
+    return await coro

@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.users import current_user, current_user_internal
+from app.core.exceptions import PenaltyAlreadyProcessedError
+from app.core.logging import get_logger
+from app.core.security import TelegramUser
+from app.db.redis import get_redis
+from app.db.session import get_session
+from app.models.habit import Habit
+from app.models.membership import Membership
+from app.repositories.checkin_repository import CheckinRepository
+from app.repositories.habit_repository import HabitRepository
+from app.repositories.membership_repository import MembershipRepository
+from app.services.catch_rate_limiter import RedisCatchRateLimiter
+from app.services.penalty_service import PenaltyService
+from redis.asyncio import Redis
+
+
+router = APIRouter()
+
+
+class MemberRowOut(BaseModel):
+    membership_id: str
+    user_id: int
+    first_name: str
+    username: str | None
+    status: str
+    streak_days: int
+    can_catch: bool
+
+
+class MembersResponse(BaseModel):
+    items: list[MemberRowOut]
+
+
+class CatchRequest(BaseModel):
+    violator_membership_id: str
+
+
+class CatchResponse(BaseModel):
+    ok: bool
+    code: str | None = None
+    amount: int | None = None
+
+
+@router.get("/habits/{habit_id}/members", response_model=MembersResponse)
+async def list_members(
+    habit_id: str,
+    user: TelegramUser = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> MembersResponse:
+    habit_repo = HabitRepository(session)
+    membership_repo = MembershipRepository(session)
+    checkin_repo = CheckinRepository(session)
+
+    habit = await habit_repo.get(habit_id)
+    if habit is None:
+        raise HTTPException(404, "habit_not_found")
+
+    memberships = await membership_repo.list_for_habit(habit_id)
+    members: list[MemberRowOut] = []
+    club_date = habit.club_date(datetime.now(tz=timezone.utc))
+
+    # Хак: достаём user.first_name из БД. В шаге 6 добавим UserRepository.
+    user_id_to_name = await _user_names(session, [m.user_id for m in memberships])
+
+    for m in memberships:
+        existing = await checkin_repo.get_for_date(str(m.id), club_date)
+        if existing is not None:
+            status = existing.status.value
+        else:
+            status = "pending" if habit.is_within_checkin_window(datetime.now(tz=timezone.utc)) else "missed"
+
+        members.append(
+            MemberRowOut(
+                membership_id=str(m.id),
+                user_id=m.user_id,
+                first_name=user_id_to_name.get(m.user_id, "—"),
+                username=None,
+                status=status,
+                streak_days=0,
+                can_catch=user.id != m.user_id and status == "missed",
+            )
+        )
+
+    return MembersResponse(items=members)
+
+
+async def _user_names(session: AsyncSession, user_ids: list[int]) -> dict[int, str]:
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    if not user_ids:
+        return {}
+    result = await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
+    return {row[0]: row[1] for row in result.all()}
+
+
+@router.post("/habits/{habit_id}/catch", response_model=CatchResponse)
+async def catch_violator(
+    habit_id: str,
+    payload: CatchRequest,
+    user: TelegramUser = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> CatchResponse:
+    habit_repo = HabitRepository(session)
+    membership_repo = MembershipRepository(session)
+    checkin_repo = CheckinRepository(session)
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        redis_port=RedisCatchRateLimiter(redis),
+    )
+
+    catcher_membership = await membership_repo.get_for_user_in_habit(user.id, habit_id)
+    club_date = (await habit_repo.get(habit_id)).club_date(datetime.now(tz=timezone.utc))  # type: ignore[union-attr]
+
+    try:
+        penalty = await service.apply_catch(
+            catcher_user_id=user.id,
+            violator_membership_id=payload.violator_membership_id,
+            club_date=club_date,
+            catcher_membership_id=str(catcher_membership.id) if catcher_membership else None,
+        )
+        await session.commit()
+        return CatchResponse(ok=True, amount=penalty.amount)
+    except PenaltyAlreadyProcessedError as exc:
+        await session.rollback()
+        return CatchResponse(ok=False, code=exc.code)
+    except Exception as exc:
+        await session.rollback()
+        from app.core.exceptions import DomainError
+
+        if isinstance(exc, DomainError):
+            return CatchResponse(ok=False, code=exc.code)
+        raise

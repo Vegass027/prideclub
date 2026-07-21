@@ -1,0 +1,1 @@
+# Common types between backend / bot / worker
