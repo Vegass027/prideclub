@@ -1,20 +1,25 @@
-import { NavLink as RouterLink } from "react-router-dom";
+import { NavLink as RouterLink, useParams } from "react-router-dom";
 
-const ITEMS: { to: string; emoji: string; label: string }[] = [
-  { to: "/marketplace", emoji: "🏪", label: "Клубы" },
-  { to: "/balance", emoji: "💰", label: "Баланс" },
-  { to: "/profile", emoji: "👤", label: "Профиль" },
-];
+interface HabitNavProps {
+  habitId: string;
+}
 
-export function BottomNav() {
+export function HabitNav({ habitId }: HabitNavProps) {
+  const items: { to: string; emoji: string; label: string }[] = [
+    { to: `/today/${habitId}`, emoji: "📅", label: "Сегодня" },
+    { to: `/members/${habitId}`, emoji: "👥", label: "Участники" },
+    { to: `/leaderboard/${habitId}`, emoji: "🏆", label: "Лидеры" },
+    { to: "/profile", emoji: "👤", label: "Профиль" },
+  ];
+
   return (
     <nav
       className="sticky bottom-0 left-0 right-0 -mx-4 mt-4 border-t border-white/5 bg-canvas/95 px-2 py-2 backdrop-blur"
       role="navigation"
-      aria-label="Главная навигация"
+      aria-label="Навигация клуба"
     >
-      <ul className="grid grid-cols-3 gap-1">
-        {ITEMS.map((item) => (
+      <ul className="grid grid-cols-4 gap-1">
+        {items.map((item) => (
           <li key={item.to}>
             <RouterLink
               to={item.to}
@@ -44,10 +49,11 @@ interface NavOutletProps {
 }
 
 export function NavOutlet({ children }: NavOutletProps) {
+  const { habitId } = useParams<{ habitId: string }>();
   return (
     <>
       {children}
-      <BottomNav />
+      {habitId && <HabitNav habitId={habitId} />}
     </>
   );
 }

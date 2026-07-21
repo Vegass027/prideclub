@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMarketplace } from "@/shared/hooks";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { Button } from "@/shared/ui/Button";
@@ -33,6 +34,7 @@ export function OnboardingPage() {
           }
         />
       )}
+      <BottomNav />
     </main>
   );
 }

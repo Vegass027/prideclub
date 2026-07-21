@@ -2,6 +2,7 @@ import { getUser } from "@/shared/telegram/tma";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { BottomNav } from "@/shared/ui/BottomNav";
+import { HabitNav } from "@/shared/ui/HabitNav";
 import { useMarketplace } from "@/shared/hooks";
 
 export function ProfilePage() {
@@ -11,7 +12,7 @@ export function ProfilePage() {
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <PageHeader title="Профиль" back />
+      <PageHeader title="Профиль" />
 
       {tgUser ? (
         <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
@@ -35,16 +36,6 @@ export function ProfilePage() {
       )}
 
       <section className="mt-5 rounded-card border border-white/5 bg-surface p-4">
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
-          Навигация
-        </h2>
-        <nav className="space-y-1">
-          <NavLink href="/balance" label="💰 Баланс" />
-          <NavLink href="/marketplace" label="🏪 Маркетплейс клубов" />
-        </nav>
-      </section>
-
-      <section className="mt-5 rounded-card border border-white/5 bg-surface p-4">
         <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
           О приложении
         </h2>
@@ -56,19 +47,7 @@ export function ProfilePage() {
         <p className="mt-3 text-[10px] text-muted">v0.1.0 · soft-launch</p>
       </section>
 
-      {firstHabitId && <BottomNav habitId={firstHabitId} />}
+      {firstHabitId ? <HabitNav habitId={firstHabitId} /> : <BottomNav />}
     </main>
-  );
-}
-
-function NavLink({ href, label }: { href: string; label: string }) {
-  return (
-    <a
-      href={href}
-      className="flex items-center justify-between rounded-md px-3 py-2.5 text-sm text-text transition hover:bg-surface"
-    >
-      <span>{label}</span>
-      <span className="text-muted" aria-hidden="true">→</span>
-    </a>
   );
 }

@@ -2,9 +2,9 @@ import { useNavigate } from "react-router-dom";
 import { useJoinHabit, useMarketplace } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import type { Habit } from "@/shared/types";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
-import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
 
@@ -27,10 +27,14 @@ export function MarketplacePage() {
   if (isLoading) {
     return (
       <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Маркетплейс" subtitle="Загрузка..." />
+        <header className="mb-4">
+          <h1 className="text-2xl font-bold">Маркетплейс</h1>
+          <p className="text-sm text-muted">Загрузка...</p>
+        </header>
         <div className="space-y-3">
           <Skeleton className="h-28 w-full" rows={3} />
         </div>
+        <BottomNav />
       </main>
     );
   }
@@ -38,13 +42,16 @@ export function MarketplacePage() {
   if (isError) {
     return (
       <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Маркетплейс" />
+        <header className="mb-4">
+          <h1 className="text-2xl font-bold">Маркетплейс</h1>
+        </header>
         <EmptyState
           icon="⚠️"
           title="Не удалось загрузить клубы"
           description={String(error)}
           action={<Button onClick={() => refetch()}>Повторить</Button>}
         />
+        <BottomNav />
       </main>
     );
   }
@@ -53,7 +60,10 @@ export function MarketplacePage() {
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <PageHeader title="Маркетплейс" subtitle="Выберите клуб — дисциплина начинается сейчас" />
+      <header className="mb-4">
+        <h1 className="text-2xl font-bold">Маркетплейс</h1>
+        <p className="text-sm text-muted">Выберите клуб — дисциплина начинается сейчас</p>
+      </header>
       {items.length === 0 ? (
         <EmptyState
           icon="🌱"
@@ -73,6 +83,7 @@ export function MarketplacePage() {
           ))}
         </ul>
       )}
+      <BottomNav />
     </main>
   );
 }

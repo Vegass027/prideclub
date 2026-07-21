@@ -1,5 +1,6 @@
 import { useBalance } from "@/shared/hooks";
 import { formatDateTime, formatKopecks, transactionTypeLabel } from "@/shared/utils/format";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -11,8 +12,9 @@ export function BalancePage() {
   if (isLoading) {
     return (
       <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Баланс" back />
+        <PageHeader title="Баланс" />
         <Skeleton className="h-32 w-full" />
+        <BottomNav />
       </main>
     );
   }
@@ -20,15 +22,16 @@ export function BalancePage() {
   if (isError || !data) {
     return (
       <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Баланс" back />
+        <PageHeader title="Баланс" />
         <EmptyState icon="⚠️" title="Не удалось загрузить" description={String(error ?? "")} />
+        <BottomNav />
       </main>
     );
   }
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <PageHeader title="Баланс" back />
+      <PageHeader title="Баланс" />
 
       <section className="rounded-card border border-white/5 bg-surface p-6 shadow-card">
         <p className="mb-1 text-xs uppercase tracking-wide text-muted">Депозит на всех клубах</p>
@@ -51,6 +54,8 @@ export function BalancePage() {
           </ul>
         )}
       </section>
+
+      <BottomNav />
     </main>
   );
 }
