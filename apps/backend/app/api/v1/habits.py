@@ -120,3 +120,36 @@ async def today(
             deadline_at=None,
         ),
     )
+
+
+@router.get("/me/habits", response_model=MarketplaceResponse)
+async def my_habits(
+    session: AsyncSession = Depends(get_session),
+    user: TelegramUser = Depends(current_user_db),
+) -> MarketplaceResponse:
+    """Список клубов, в которых состоит пользователь.
+
+    Используется в глобальном habit picker'е: если клубов >1 — редиректим
+    на /my-habits, если 1 — Today откроется напрямую.
+    """
+    repo = HabitRepository(session)
+    rows = await repo.list_for_user(user.id)
+    items = [
+        HabitOut(
+            id=str(h.id),
+            title=h.title,
+            description=h.description,
+            chat_id=h.chat_id,
+            checkin_window_start=h.checkin_window_start.isoformat(),
+            checkin_window_end=h.checkin_window_end.isoformat(),
+            timezone=h.timezone,
+            penalty_amount=h.penalty_amount,
+            price_month=h.price_month,
+            proof_type=h.proof_type.value,
+            prize_pool=h.prize_pool,
+            members_count=0,
+            is_active=h.is_active,
+        )
+        for h in rows
+    ]
+    return MarketplaceResponse(items=items)

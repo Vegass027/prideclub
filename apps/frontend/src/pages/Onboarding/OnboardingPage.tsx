@@ -1,40 +1,44 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMarketplace } from "@/shared/hooks";
+import { useMyHabits } from "@/shared/hooks";
 import { BottomNav } from "@/shared/ui/BottomNav";
-import { PageHeader } from "@/shared/ui/PageHeader";
+import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
-import { Button } from "@/shared/ui/Button";
-import { EmptyState } from "@/shared/ui/EmptyState";
 
 export function OnboardingPage() {
   const navigate = useNavigate();
-  const { data, isLoading } = useMarketplace();
+  const { data, isLoading } = useMyHabits();
 
   useEffect(() => {
-    if (data && data.items.length > 0) {
-      navigate("/marketplace", { replace: true });
+    if (!data) return;
+    if (data.items.length === 1) {
+      navigate(`/habits/${data.items[0].id}/today`, { replace: true });
+    } else if (data.items.length > 1) {
+      navigate("/my-habits", { replace: true });
     }
   }, [data, navigate]);
 
   return (
-    <main className="mx-auto max-w-md px-4 py-6">
-      <PageHeader title="Добро пожаловать" />
+    <ScreenLayout>
       {isLoading ? (
         <Skeleton className="h-32 w-full" />
       ) : (
-        <EmptyState
-          icon="🎉"
-          title="Это Habit Club"
-          description="Закрытые клубы дисциплины: подтверждай привычку каждый день, не пропускай — деньги в призовом фонде клуба."
-          action={
-            <Button onClick={() => navigate("/marketplace")}>
-              Выбрать клуб
-            </Button>
-          }
-        />
+        <div className="flex flex-col items-center justify-center pt-16 text-center">
+          <span className="text-5xl" aria-hidden="true">🎉</span>
+          <h1 className="mt-4 text-2xl font-bold">Добро пожаловать</h1>
+          <p className="mt-2 max-w-xs text-sm text-muted">
+            Закрытые клубы дисциплины: подтверждай привычку каждый день,
+            не пропускай — деньги в призовом фонде клуба.
+          </p>
+          <button
+            onClick={() => navigate("/marketplace")}
+            className="mt-6 inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-canvas transition hover:bg-primary/90"
+          >
+            Выбрать клуб
+          </button>
+        </div>
       )}
       <BottomNav />
-    </main>
+    </ScreenLayout>
   );
 }

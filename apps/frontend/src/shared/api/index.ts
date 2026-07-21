@@ -19,6 +19,7 @@ export const habitsApi = {
     apiClient.post<{ ok: boolean }>(`/habits/${habitId}/join`).then((r) => r.data),
   leave: (habitId: string) =>
     apiClient.post<{ ok: boolean }>(`/habits/${habitId}/leave`).then((r) => r.data),
+  mine: () => apiClient.get<MarketplaceResponse>("/me/habits").then((r) => r.data),
 };
 
 export const membersApi = {
@@ -48,6 +49,10 @@ export const leaderboardApi = {
   shame: (habitId: string) =>
     apiClient
       .get<LeaderboardResponse>(`/habits/${habitId}/leaderboard/shame`)
+      .then((r) => r.data),
+  global: (tab: "streak" | "catches" | "shame") =>
+    apiClient
+      .get<LeaderboardResponse>(`/leaderboard/${tab}`)
       .then((r) => r.data),
 };
 

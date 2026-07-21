@@ -1,9 +1,10 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { MarketplacePage } from "@/pages/Marketplace/MarketplacePage";
+import { MyHabitsPage } from "@/pages/MyHabits/MyHabitsPage";
 import { TodayPage } from "@/pages/Today/TodayPage";
 import { MembersPage } from "@/pages/Members/MembersPage";
 import { LeaderboardPage } from "@/pages/Leaderboard/LeaderboardPage";
-import { BalancePage } from "@/pages/Balance/BalancePage";
+import { GlobalLeaderboardPage } from "@/pages/GlobalLeaderboard/GlobalLeaderboardPage";
 import { ProfilePage } from "@/pages/Profile/ProfilePage";
 import { OnboardingPage } from "@/pages/Onboarding/OnboardingPage";
 
@@ -13,10 +14,11 @@ export function AppRouter() {
       <Route path="/" element={<Navigate to="/marketplace" replace />} />
       <Route path="/onboarding" element={<OnboardingPage />} />
       <Route path="/marketplace" element={<MarketplacePage />} />
-      <Route path="/today/:habitId" element={<TodayPage />} />
-      <Route path="/members/:habitId" element={<MembersPage />} />
-      <Route path="/leaderboard/:habitId" element={<LeaderboardPage />} />
-      <Route path="/balance" element={<BalancePage />} />
+      <Route path="/my-habits" element={<MyHabitsPage />} />
+      <Route path="/habits/:habitId/today" element={<TodayPage />} />
+      <Route path="/habits/:habitId/members" element={<MembersPage />} />
+      <Route path="/habits/:habitId/leaderboard" element={<LeaderboardPage />} />
+      <Route path="/leaderboards" element={<GlobalLeaderboardPage />} />
       <Route path="/profile" element={<ProfilePage />} />
       <Route path="*" element={<Navigate to="/marketplace" replace />} />
     </Routes>

@@ -2,18 +2,18 @@ import { NavLink as RouterLink } from "react-router-dom";
 
 const ITEMS: { to: string; emoji: string; label: string }[] = [
   { to: "/marketplace", emoji: "🏪", label: "Клубы" },
-  { to: "/balance", emoji: "💰", label: "Баланс" },
+  { to: "/leaderboards", emoji: "🏆", label: "Лидеры" },
   { to: "/profile", emoji: "👤", label: "Профиль" },
 ];
 
 export function BottomNav() {
   return (
     <nav
-      className="sticky bottom-0 left-0 right-0 -mx-4 mt-4 border-t border-white/5 bg-canvas/95 px-2 py-2 backdrop-blur"
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-white/5 bg-canvas/95 px-2 pb-[env(safe-area-inset-bottom)] pt-2 backdrop-blur"
       role="navigation"
       aria-label="Главная навигация"
     >
-      <ul className="grid grid-cols-3 gap-1">
+      <ul className="mx-auto grid max-w-md grid-cols-3 gap-1">
         {ITEMS.map((item) => (
           <li key={item.to}>
             <RouterLink
@@ -36,18 +36,5 @@ export function BottomNav() {
         ))}
       </ul>
     </nav>
-  );
-}
-
-interface NavOutletProps {
-  children: React.ReactNode;
-}
-
-export function NavOutlet({ children }: NavOutletProps) {
-  return (
-    <>
-      {children}
-      <BottomNav />
-    </>
   );
 }

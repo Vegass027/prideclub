@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.api.v1.users import current_user_db
 from app.core.security import TelegramUser
@@ -185,4 +186,125 @@ async def shame(
     rows = await _shame_leaderboard(
         session, MembershipRepository(session), habit_id
     )
+    return LeaderboardResponse(items=rows)
+
+
+async def _global_streak(session: AsyncSession, user_id: int) -> list[LeaderboardEntry]:
+    """Глобальные серии: сумма streak_days по всем активным клубам пользователя."""
+    rows = (
+        await session.execute(
+            select(Checkin.date, Checkin.membership_id, Membership.user_id)
+            .join(Membership, Membership.id == Checkin.membership_id)
+            .where(Membership.status == "active", Checkin.status == "done")
+        )
+    ).all()
+
+    # group by (user_id, membership_id) → set of dates
+    dates_by_member: dict[tuple[int, str], set[date]] = defaultdict(set)
+    member_to_user: dict[str, int] = {}
+    for d, m_id, u_id in rows:
+        dates_by_member[(u_id, str(m_id))].add(d)
+        member_to_user[str(m_id)] = u_id
+
+    metrics_per_user: dict[int, int] = defaultdict(int)
+    for (u_id, _m_id), days in dates_by_member.items():
+        streak = 0
+        cur = max(days)
+        from datetime import timedelta
+
+        while cur in days:
+            streak += 1
+            cur = cur - timedelta(days=1)
+        metrics_per_user[u_id] += streak
+
+    if not metrics_per_user:
+        return []
+    user_ids = list(metrics_per_user.keys())
+    name_rows = (
+        await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
+    ).all()
+    names = {u_id: name for u_id, name in name_rows}
+
+    sorted_rows = sorted(metrics_per_user.items(), key=lambda kv: kv[1], reverse=True)
+    return [
+        LeaderboardEntry(
+            rank=rank,
+            membership_id=f"u:{u_id}",
+            first_name=names.get(u_id, "—"),
+            metric_value=value,
+        )
+        for rank, (u_id, value) in enumerate(sorted_rows, start=1)
+        if value > 0
+    ]
+
+
+async def _global_counts(
+    session: AsyncSession,
+    *,
+    column,
+) -> list[LeaderboardEntry]:
+    """Глобальные ловцы / позор: COUNT(penalty) GROUP BY user_id.
+
+    column — Penalty.catcher_membership_id (ловцы) или Penalty.membership_id (позор).
+    Считаем user_id нарушителя/ловца через join на Membership.
+    """
+    catcher_membership = aliased(Membership)
+    rows = (
+        await session.execute(
+            select(catcher_membership.user_id, func.count(Penalty.id))
+            .join(catcher_membership, catcher_membership.id == column)
+            .where(catcher_membership.status == "active")
+            .group_by(catcher_membership.user_id)
+        )
+    ).all()
+
+    metrics: dict[int, int] = defaultdict(int)
+    for u_id, count in rows:
+        metrics[u_id] += int(count)
+
+    if not metrics:
+        return []
+    user_ids = list(metrics.keys())
+    name_rows = (
+        await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
+    ).all()
+    names = {u_id: name for u_id, name in name_rows}
+
+    sorted_rows = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)
+    return [
+        LeaderboardEntry(
+            rank=rank,
+            membership_id=f"u:{u_id}",
+            first_name=names.get(u_id, "—"),
+            metric_value=value,
+        )
+        for rank, (u_id, value) in enumerate(sorted_rows, start=1)
+        if value > 0
+    ]
+
+
+@router.get("/leaderboard/streak", response_model=LeaderboardResponse)
+async def global_streak(
+    user: TelegramUser = Depends(current_user_db),
+    session: AsyncSession = Depends(get_session),
+) -> LeaderboardResponse:
+    rows = await _global_streak(session, user.id)
+    return LeaderboardResponse(items=rows)
+
+
+@router.get("/leaderboard/catches", response_model=LeaderboardResponse)
+async def global_catches(
+    _: TelegramUser = Depends(current_user_db),
+    session: AsyncSession = Depends(get_session),
+) -> LeaderboardResponse:
+    rows = await _global_counts(session, column=Penalty.catcher_membership_id)
+    return LeaderboardResponse(items=rows)
+
+
+@router.get("/leaderboard/shame", response_model=LeaderboardResponse)
+async def global_shame(
+    _: TelegramUser = Depends(current_user_db),
+    session: AsyncSession = Depends(get_session),
+) -> LeaderboardResponse:
+    rows = await _global_counts(session, column=Penalty.membership_id)
     return LeaderboardResponse(items=rows)

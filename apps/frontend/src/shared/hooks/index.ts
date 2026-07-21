@@ -92,3 +92,19 @@ export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab)
     staleTime: 60_000,
   });
 }
+
+export function useMyHabits() {
+  return useQuery({
+    queryKey: ["my-habits"],
+    queryFn: habitsApi.mine,
+    staleTime: 30_000,
+  });
+}
+
+export function useGlobalLeaderboard(tab: LeaderboardTab) {
+  return useQuery({
+    queryKey: ["global-leaderboard", tab],
+    queryFn: () => leaderboardApi.global(tab),
+    staleTime: 60_000,
+  });
+}

@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
-import { useCatch, useMembers } from "@/shared/hooks";
-import { NavOutlet } from "@/shared/ui/BottomNav";
+import { useNavigate, useParams } from "react-router-dom";
+import { useCatch, useMembers, useMyHabits } from "@/shared/hooks";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
+import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
@@ -21,9 +23,16 @@ const CATCH_ERROR_LABELS: Record<string, string> = {
 
 export function MembersPage() {
   const { habitId } = useParams<{ habitId: string }>();
+  const navigate = useNavigate();
   const { data, isLoading, isError, error, refetch } = useMembers(habitId);
   const catchMutation = useCatch(habitId);
+  const { data: myHabits } = useMyHabits();
+  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
   const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const headerRight = showSwitcher ? (
+    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
+  ) : undefined;
 
   const handleCatch = (m: MemberRow) => {
     if (!m.can_catch) return;
@@ -32,16 +41,10 @@ export function MembersPage() {
       onSuccess: (res: CatchResponse) => {
         if (res.ok) {
           hapticNotify("success");
-          setCatchMessage({
-            ok: true,
-            text: `+1 поинт. Штраф списан в фонд клуба.`,
-          });
+          setCatchMessage({ ok: true, text: `+1 поинт. Штраф списан в фонд клуба.` });
         } else {
           hapticNotify("warning");
-          setCatchMessage({
-            ok: false,
-            text: CATCH_ERROR_LABELS[res.code as CatchCode] ?? "Не удалось поймать",
-          });
+          setCatchMessage({ ok: false, text: CATCH_ERROR_LABELS[res.code as CatchCode] ?? "Не удалось поймать" });
         }
         refetch();
         setTimeout(() => setCatchMessage(null), 3000);
@@ -55,23 +58,21 @@ export function MembersPage() {
 
   if (isLoading) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Участники" back />
+      <ScreenLayout>
+        <PageHeader title="Участники" right={headerRight} />
         <Skeleton className="h-16 w-full" rows={4} />
-      </main>
+        <HabitNav habitId={habitId!} />
+      </ScreenLayout>
     );
   }
 
   if (isError) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Участники" back />
-        <EmptyState
-          icon="⚠️"
-          title="Не удалось загрузить список"
-          description={String(error)}
-        />
-      </main>
+      <ScreenLayout>
+        <PageHeader title="Участники" right={headerRight} />
+        <EmptyState icon="⚠️" title="Не удалось загрузить список" description={String(error)} />
+        <BottomNav />
+      </ScreenLayout>
     );
   }
 
@@ -80,8 +81,8 @@ export function MembersPage() {
   const others = items.filter((m) => !violators.includes(m));
 
   return (
-    <main className="mx-auto max-w-md px-4 py-6">
-      <PageHeader title="Участники" back subtitle={`${items.length} в клубе`} />
+    <ScreenLayout>
+      <PageHeader title="Участники" subtitle={`${items.length} в клубе`} right={headerRight} />
 
       {catchMessage && (
         <div
@@ -132,10 +133,8 @@ export function MembersPage() {
         )}
       </section>
 
-      <NavOutlet>
-        <div />
-      </NavOutlet>
-    </main>
+      <HabitNav habitId={habitId!} />
+    </ScreenLayout>
   );
 }
 

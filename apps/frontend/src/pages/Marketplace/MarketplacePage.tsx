@@ -5,6 +5,7 @@ import type { Habit } from "@/shared/types";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
+import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
 
@@ -18,7 +19,7 @@ export function MarketplacePage() {
     joinMutation.mutate(habit.id, {
       onSuccess: () => {
         hapticNotify("success");
-        navigate(`/today/${habit.id}`);
+        navigate(`/habits/${habit.id}/today`);
       },
       onError: () => hapticNotify("error"),
     });
@@ -26,7 +27,7 @@ export function MarketplacePage() {
 
   if (isLoading) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
+      <ScreenLayout>
         <header className="mb-4">
           <h1 className="text-2xl font-bold">Маркетплейс</h1>
           <p className="text-sm text-muted">Загрузка...</p>
@@ -35,13 +36,13 @@ export function MarketplacePage() {
           <Skeleton className="h-28 w-full" rows={3} />
         </div>
         <BottomNav />
-      </main>
+      </ScreenLayout>
     );
   }
 
   if (isError) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
+      <ScreenLayout>
         <header className="mb-4">
           <h1 className="text-2xl font-bold">Маркетплейс</h1>
         </header>
@@ -52,17 +53,17 @@ export function MarketplacePage() {
           action={<Button onClick={() => refetch()}>Повторить</Button>}
         />
         <BottomNav />
-      </main>
+      </ScreenLayout>
     );
   }
 
   const items = data?.items ?? [];
 
   return (
-    <main className="mx-auto max-w-md px-4 py-6">
+    <ScreenLayout>
       <header className="mb-4">
-        <h1 className="text-2xl font-bold">Маркетплейс</h1>
-        <p className="text-sm text-muted">Выберите клуб — дисциплина начинается сейчас</p>
+        <h1 className="text-2xl font-bold">Клубы</h1>
+        <p className="text-sm text-muted">Выбери клуб — дисциплина начинается сейчас</p>
       </header>
       {items.length === 0 ? (
         <EmptyState
@@ -84,7 +85,7 @@ export function MarketplacePage() {
         </ul>
       )}
       <BottomNav />
-    </main>
+    </ScreenLayout>
   );
 }
 

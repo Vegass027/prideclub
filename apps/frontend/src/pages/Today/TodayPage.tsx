@@ -1,10 +1,12 @@
-import { useParams } from "react-router-dom";
-import { useToday } from "@/shared/hooks";
+import { useNavigate, useParams } from "react-router-dom";
+import { useMyHabits, useToday } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
-import { NavOutlet } from "@/shared/ui/BottomNav";
+import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact } from "@/shared/telegram/tma";
@@ -29,7 +31,10 @@ const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string 
 
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
+  const navigate = useNavigate();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
+  const { data: myHabits } = useMyHabits();
+  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -39,27 +44,35 @@ export function TodayPage() {
 
   if (isLoading) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Сегодня" back />
+      <ScreenLayout>
+        <PageHeader
+          title="Сегодня"
+          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
+        />
         <Skeleton className="h-24 w-full" />
         <div className="mt-4">
           <Skeleton className="h-40 w-full" />
         </div>
-      </main>
+        <HabitNav habitId={habitId!} />
+      </ScreenLayout>
     );
   }
 
   if (isError || !data) {
     return (
-      <main className="mx-auto max-w-md px-4 py-6">
-        <PageHeader title="Сегодня" back />
+      <ScreenLayout>
+        <PageHeader
+          title="Сегодня"
+          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
+        />
         <EmptyState
           icon="⚠️"
           title="Не удалось загрузить статус"
           description={String(error ?? "Неизвестная ошибка")}
           action={<Button onClick={() => refetch()}>Повторить</Button>}
         />
-      </main>
+        <BottomNav />
+      </ScreenLayout>
     );
   }
 
@@ -67,13 +80,31 @@ export function TodayPage() {
   const proofCfg = PROOF_LABELS[habit.proof_type] ?? PROOF_LABELS.text;
 
   return (
-    <main className="mx-auto max-w-md px-4 py-6">
+    <ScreenLayout>
       <PageHeader
         title={habit.title}
         subtitle={habit.timezone}
-        back
-        right={<StatusBadge status={checkin.status} />}
+        right={
+          <div className="flex items-center gap-2">
+            <StatusBadge status={checkin.status} />
+            {showSwitcher && (
+              <button
+                onClick={() => navigate("/my-habits")}
+                className="text-xs text-primary"
+                aria-label="Сменить клуб"
+              >
+                Сменить
+              </button>
+            )}
+          </div>
+        }
       />
+
+      {habit.description && (
+        <section className="mb-3 rounded-card border border-white/5 bg-surface p-3 text-xs text-muted">
+          {habit.description}
+        </section>
+      )}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
         <div className="mb-3 flex items-baseline justify-between">
@@ -120,9 +151,7 @@ export function TodayPage() {
         </section>
       )}
 
-      <NavOutlet>
-        <div />
-      </NavOutlet>
-    </main>
+      <HabitNav habitId={habit.id} />
+    </ScreenLayout>
   );
 }

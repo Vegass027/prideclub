@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useLeaderboard, useMyHabits, type LeaderboardTab } from "@/shared/hooks";
+import { useGlobalLeaderboard, type LeaderboardTab } from "@/shared/hooks";
+import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
-import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -14,24 +13,16 @@ const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "shame", label: "Позор", emoji: "💀" },
 ];
 
-export function LeaderboardPage() {
-  const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
+export function GlobalLeaderboardPage() {
   const [tab, setTab] = useState<LeaderboardTab>("streak");
-  const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
+  const { data, isLoading, isError, error } = useGlobalLeaderboard(tab);
 
   const metricLabel = (t: LeaderboardTab): string =>
     t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
 
-  const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
-  ) : undefined;
-
   return (
     <ScreenLayout>
-      <PageHeader title="Лидеры клуба" right={headerRight} />
+      <PageHeader title="Лидеры" subtitle="Суммарно по всем твоим клубам" />
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
@@ -44,8 +35,8 @@ export function LeaderboardPage() {
       {!isLoading && !isError && (data?.items.length ?? 0) === 0 && (
         <EmptyState
           icon="📊"
-          title="Пока никто не отметился"
-          description="Будь первым — открой клуб и сделай чек-ин."
+          title="Пока никого нет"
+          description="Будь первым — вступи в клуб и начни серию."
         />
       )}
 
@@ -80,7 +71,7 @@ export function LeaderboardPage() {
         </ol>
       )}
 
-      <HabitNav habitId={habitId!} />
+      <BottomNav />
     </ScreenLayout>
   );
 }

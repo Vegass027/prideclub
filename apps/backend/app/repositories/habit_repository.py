@@ -36,6 +36,20 @@ class HabitRepository:
         )
         return [(h, c) for h, c in (await self._session.execute(stmt)).all()]
 
+    async def list_for_user(self, user_id: int) -> list[Habit]:
+        """Клубы, в которых состоит пользователь (active memberships)."""
+        stmt = (
+            select(Habit)
+            .join(Membership, Membership.habit_id == Habit.id)
+            .where(
+                Membership.user_id == user_id,
+                Membership.status == "active",
+                Habit.is_active.is_(True),
+            )
+            .order_by(Habit.created_at)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def add_to_prize_pool(self, habit_id: str, amount: int) -> None:
         habit = await self.get(habit_id)
         if habit is None:
