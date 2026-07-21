@@ -29,6 +29,7 @@ export function MembersPage() {
   const catchMutation = useCatch(habitId);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
+  const backTo = showSwitcher ? "/my-habits" : "/profile";
   const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const headerRight = showSwitcher ? (
@@ -60,7 +61,7 @@ export function MembersPage() {
   if (isLoading) {
     return (
       <ScreenLayout>
-        <PageHeader title="Участники" right={headerRight} />
+        <PageHeader title="Участники" back backTo={backTo} right={headerRight} />
         <Skeleton className="h-16 w-full" rows={4} />
         <HabitNav habitId={habitId!} />
       </ScreenLayout>
@@ -70,7 +71,7 @@ export function MembersPage() {
   if (isError) {
     return (
       <ScreenLayout>
-        <PageHeader title="Участники" right={headerRight} />
+        <PageHeader title="Участники" back backTo={backTo} right={headerRight} />
         <EmptyState icon="⚠️" title="Не удалось загрузить список" description={String(error)} />
         <BottomNav />
       </ScreenLayout>
@@ -83,7 +84,7 @@ export function MembersPage() {
 
   return (
     <ScreenLayout>
-      <PageHeader title="Участники" subtitle={`${items.length} в клубе`} right={headerRight} />
+      <PageHeader title="Участники" subtitle={`${items.length} в клубе`} back backTo={backTo} right={headerRight} />
 
       {catchMessage && (
         <div

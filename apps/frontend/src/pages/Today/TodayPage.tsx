@@ -35,6 +35,7 @@ export function TodayPage() {
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
+  const backTo = showSwitcher ? "/my-habits" : "/profile";
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -47,6 +48,8 @@ export function TodayPage() {
       <ScreenLayout>
         <PageHeader
           title="Сегодня"
+          back
+          backTo={backTo}
           right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
         />
         <Skeleton className="h-24 w-full" />
@@ -63,6 +66,8 @@ export function TodayPage() {
       <ScreenLayout>
         <PageHeader
           title="Сегодня"
+          back
+          backTo={backTo}
           right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
         />
         <EmptyState
@@ -84,6 +89,8 @@ export function TodayPage() {
       <PageHeader
         title={habit.title}
         subtitle={habit.timezone}
+        back
+        backTo={backTo}
         right={
           <div className="flex items-center gap-2">
             <StatusBadge status={checkin.status} />

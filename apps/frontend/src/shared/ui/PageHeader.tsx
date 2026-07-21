@@ -1,16 +1,24 @@
 import type { ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 
 interface PageHeaderProps {
   title: string;
   subtitle?: string;
   back?: boolean;
+  backTo?: string;
   right?: ReactNode;
 }
 
-export function PageHeader({ title, subtitle, back, right }: PageHeaderProps) {
+export function PageHeader({ title, subtitle, back, backTo, right }: PageHeaderProps) {
+  const navigate = useNavigate();
+
   const handleBack = () => {
+    if (backTo) {
+      navigate(backTo);
+      return;
+    }
     if (window.history.length > 1) window.history.back();
-    else window.location.href = "/marketplace";
+    else navigate("/marketplace");
   };
 
   return (

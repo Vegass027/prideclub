@@ -21,6 +21,7 @@ export function LeaderboardPage() {
   const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
+  const backTo = showSwitcher ? "/my-habits" : "/profile";
 
   const metricLabel = (t: LeaderboardTab): string =>
     t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
@@ -31,7 +32,7 @@ export function LeaderboardPage() {
 
   return (
     <ScreenLayout>
-      <PageHeader title="Лидеры клуба" right={headerRight} />
+      <PageHeader title="Лидеры клуба" back backTo={backTo} right={headerRight} />
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
