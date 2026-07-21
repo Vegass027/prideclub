@@ -138,7 +138,7 @@ jobs:
       - name: Run worker tests
         working-directory: apps/worker
         env:
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           REDIS_URL: redis://localhost:6379/0
           BOT_TOKEN: test-bot-token
           SERVICE_SECRET: test-service-secret
