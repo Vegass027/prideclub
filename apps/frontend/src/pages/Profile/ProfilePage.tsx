@@ -50,9 +50,13 @@ export function ProfilePage() {
       )}
 
       <section className="mt-4 rounded-card border border-white/5 bg-surface p-4 shadow-card">
-        <div className="mb-3 flex items-start justify-between">
+        <ul className="mb-3 space-y-1 text-xs text-muted">
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span>Депозит покрывает штрафы в клубах</span></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span>Если депозит пуст — ты выбываешь из клуба <span aria-hidden="true">☹️</span></span></li>
+        </ul>
+        <div className="flex items-start justify-between border-t border-white/5 pt-3">
           <div>
-            <p className="mb-1 text-xs uppercase tracking-wide text-muted">Депозит</p>
+            <p className="mb-1 text-xs uppercase tracking-wide text-muted">Сейчас на депозите</p>
             {balanceLoading ? (
               <Skeleton className="h-8 w-32" />
             ) : (
@@ -63,9 +67,6 @@ export function ProfilePage() {
             + Пополнить
           </Button>
         </div>
-        <p className="text-xs text-muted">
-          Покрывает штрафы в клубах. Если депозит пуст — ты выбываешь из клуба.
-        </p>
       </section>
 
       <section className="mt-4">
@@ -73,12 +74,9 @@ export function ProfilePage() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">
             Мои клубы
           </h2>
-          <button
-            onClick={() => navigate("/marketplace")}
-            className="text-xs text-primary"
-          >
+          <Button onClick={() => navigate("/marketplace")} variant="ghost" className="min-h-0 px-3 py-1.5 text-xs">
             Все клубы →
-          </button>
+          </Button>
         </div>
 
         {myHabitsLoading ? (
@@ -94,21 +92,23 @@ export function ProfilePage() {
           <ul className="space-y-2">
             {myHabits!.items.map((h) => (
               <li key={h.id}>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/habits/${h.id}/today`)}
-                  className="block w-full rounded-card border border-white/5 bg-surface p-3 text-left shadow-card transition hover:border-primary/30"
-                >
-                  <div className="flex items-center justify-between gap-3">
+                <div className="rounded-card border border-white/5 bg-surface p-3 shadow-card">
+                  <div className="mb-2 flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <h3 className="truncate text-sm font-semibold text-text">{h.title}</h3>
                       {h.description && (
                         <p className="mt-0.5 line-clamp-1 text-xs text-muted">{h.description}</p>
                       )}
                     </div>
-                    <span className="shrink-0 text-xs text-primary">Открыть →</span>
                   </div>
-                </button>
+                  <Button
+                    onClick={() => navigate(`/habits/${h.id}/today`)}
+                    variant="secondary"
+                    className="min-h-0 w-full px-3 py-1.5 text-xs"
+                  >
+                    Открыть клуб →
+                  </Button>
+                </div>
               </li>
             ))}
           </ul>
