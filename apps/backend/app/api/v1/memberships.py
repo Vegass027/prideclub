@@ -30,8 +30,10 @@ async def join(
     habit_id: str,
     user: TelegramUser = Depends(current_user_db),
     service: MembershipService = Depends(get_membership_service),
+    session: AsyncSession = Depends(get_session),
 ) -> MembershipOut:
     m = await service.join(user_id=user.id, habit_id=habit_id)
+    await session.commit()
     return MembershipOut.model_validate(m)
 
 
@@ -40,6 +42,8 @@ async def leave(
     habit_id: str,
     user: TelegramUser = Depends(current_user_db),
     service: MembershipService = Depends(get_membership_service),
+    session: AsyncSession = Depends(get_session),
 ) -> MembershipOut:
     m = await service.leave(user_id=user.id, habit_id=habit_id)
+    await session.commit()
     return MembershipOut.model_validate(m)
