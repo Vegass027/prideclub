@@ -788,6 +788,18 @@ class CharacterConfig:
   - Добавлено **«что есть на проде / что нужно»** в таблице Фазы B — раньше
     статус «частично» был не виден, теперь отмечен 🟡 явно.
 
+> **Подтверждение корректности статуса (21.07.2026 23:55 CEST):**
+> - `ls apps/backend/app/models/` — нет `user_stats.py`, `user_status.py`
+>   (только `auxiliary/checkin/habit/membership/penalty/season/transaction/user.py`).
+> - `ls apps/backend/app/services/` — нет `character_service.py`.
+> - `grep -r "CharacterConfig\|user_stats\|user_statuses" apps/backend` — 0 совпадений.
+> - `alembic/versions/` — последняя `008_character_and_club_fields.py`, миграций 009/010 нет.
+> - `docker exec habit-postgres psql ... \\dt` на проде — 16 таблиц, ни одной `user_stat*`.
+> - `alembic_version` на проде = `008_character_and_club_fields`.
+>
+> То есть Фаза B на проде: ровно одна миграция (расширение `habits`),
+> самих таблиц и сервисов для характеристик нет. Шаги 2–5 — не начаты.
+
 - **v2.1 (21.07.2026 22:30 CEST)** — актуализация статуса после деплоя Фазы A на прод:
   - Раздел 10 переписан в табличный формат с реальным статусом ✅/🔲.
   - Фаза A полностью завершена на backend + проде: миграции накатаны (`006_suspicious_pairs_index`, `007_habit_admin_fields`, `008_character_and_club_fields`), owner-auth работает (smoke curl через `jq` подтвердил все 7 admin-эндпоинтов + 3 public gate), `OWNER_TELEGRAM_ID=7295309649` сконфигурирован. UI админки отложен.
