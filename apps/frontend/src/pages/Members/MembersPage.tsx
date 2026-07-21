@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useCatch, useMembers, useMyHabits } from "@/shared/hooks";
+import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
@@ -147,9 +148,7 @@ interface MemberRowItemProps {
 function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
   return (
     <article className="flex items-center gap-3 rounded-card border border-white/5 bg-surface p-3">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-base font-semibold text-primary">
-        {row.first_name.charAt(0).toUpperCase()}
-      </div>
+      <Avatar src={null} fallback={row.first_name} size="md" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-semibold text-text">{row.first_name}</span>

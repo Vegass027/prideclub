@@ -15,6 +15,7 @@ declare global {
             username?: string;
             language_code?: string;
             is_premium?: boolean;
+            photo_url?: string;
           };
         };
         ready: () => void;
@@ -58,6 +59,10 @@ export function getInitData(): string {
 
 export function getUser() {
   return window.Telegram?.WebApp?.initDataUnsafe?.user;
+}
+
+export function getUserPhoto(): string | null {
+  return window.Telegram?.WebApp?.initDataUnsafe?.user?.photo_url ?? null;
 }
 
 export function hapticImpact(style: "light" | "medium" | "heavy" = "light"): void {
