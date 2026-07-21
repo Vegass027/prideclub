@@ -1,27 +1,40 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useJoinHabit, useMarketplace } from "@/shared/hooks";
+import { useJoinHabit, useMarketplace, useMyHabits } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import type { Habit } from "@/shared/types";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
+import { PaymentModal } from "@/shared/ui/PaymentModal";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
 
 export function MarketplacePage() {
   const { data, isLoading, isError, error, refetch } = useMarketplace();
+  const { data: myHabits } = useMyHabits();
   const navigate = useNavigate();
   const joinMutation = useJoinHabit();
+  const [payingHabit, setPayingHabit] = useState<Habit | null>(null);
+
+  const joinedIds = new Set((myHabits?.items ?? []).map((h) => h.id));
 
   const handleJoin = (habit: Habit) => {
     hapticImpact("medium");
+    setPayingHabit(habit);
+  };
+
+  const handlePaymentSuccess = (habit: Habit) => {
     joinMutation.mutate(habit.id, {
       onSuccess: () => {
         hapticNotify("success");
         navigate(`/habits/${habit.id}/today`);
       },
-      onError: () => hapticNotify("error"),
+      onError: () => {
+        hapticNotify("error");
+        alert("Не удалось зачислить подписку. Попробуй ещё раз.");
+      },
     });
   };
 
@@ -29,7 +42,7 @@ export function MarketplacePage() {
     return (
       <ScreenLayout>
         <header className="mb-4">
-          <h1 className="text-2xl font-bold">Маркетплейс</h1>
+          <h1 className="text-2xl font-bold">Клубы</h1>
           <p className="text-sm text-muted">Загрузка...</p>
         </header>
         <div className="space-y-3">
@@ -44,7 +57,7 @@ export function MarketplacePage() {
     return (
       <ScreenLayout>
         <header className="mb-4">
-          <h1 className="text-2xl font-bold">Маркетплейс</h1>
+          <h1 className="text-2xl font-bold">Клубы</h1>
         </header>
         <EmptyState
           icon="⚠️"
@@ -73,17 +86,26 @@ export function MarketplacePage() {
         />
       ) : (
         <ul className="flex flex-col gap-3">
-          {items.map((h) => (
-            <li key={h.id}>
-              <HabitListItem
-                habit={h}
-                busy={joinMutation.isPending && joinMutation.variables === h.id}
-                onJoin={() => handleJoin(h)}
-              />
-            </li>
-          ))}
+          {items.map((h) => {
+            const isJoined = joinedIds.has(h.id);
+            return (
+              <li key={h.id}>
+                <HabitListItem
+                  habit={h}
+                  isJoined={isJoined}
+                  busy={joinMutation.isPending && joinMutation.variables === h.id}
+                  onJoin={() => handleJoin(h)}
+                />
+              </li>
+            );
+          })}
         </ul>
       )}
+      <PaymentModal
+        habit={payingHabit}
+        onClose={() => setPayingHabit(null)}
+        onSuccess={handlePaymentSuccess}
+      />
       <BottomNav />
     </ScreenLayout>
   );
@@ -91,11 +113,12 @@ export function MarketplacePage() {
 
 interface HabitListItemProps {
   habit: Habit;
+  isJoined: boolean;
   busy: boolean;
   onJoin: () => void;
 }
 
-function HabitListItem({ habit, busy, onJoin }: HabitListItemProps) {
+function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
   return (
     <article className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
       <header className="mb-2 flex items-start justify-between gap-3">
@@ -115,9 +138,19 @@ function HabitListItem({ habit, busy, onJoin }: HabitListItemProps) {
         <Stat label="Окно" value={`${habit.checkin_window_start}–${habit.checkin_window_end}`} />
         <Stat label="Призовой фонд" value={formatKopecks(habit.prize_pool)} success />
       </dl>
-      <Button onClick={onJoin} loading={busy} className="w-full" variant="primary">
-        Вступить
-      </Button>
+      {isJoined ? (
+        <Button
+          onClick={() => (window.location.href = `/habits/${habit.id}/today`)}
+          variant="secondary"
+          className="w-full"
+        >
+          Открыть клуб →
+        </Button>
+      ) : (
+        <Button onClick={onJoin} loading={busy} className="w-full" variant="primary">
+          Вступить
+        </Button>
+      )}
     </article>
   );
 }
