@@ -1,9 +1,13 @@
 import { getUser } from "@/shared/telegram/tma";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
+import { BottomNav } from "@/shared/ui/BottomNav";
+import { useMarketplace } from "@/shared/hooks";
 
 export function ProfilePage() {
   const tgUser = getUser();
+  const { data: marketplace } = useMarketplace();
+  const firstHabitId = marketplace?.items?.[0]?.id;
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
@@ -51,6 +55,8 @@ export function ProfilePage() {
         </p>
         <p className="mt-3 text-[10px] text-muted">v0.1.0 · soft-launch</p>
       </section>
+
+      {firstHabitId && <BottomNav habitId={firstHabitId} />}
     </main>
   );
 }

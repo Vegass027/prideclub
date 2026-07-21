@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
+import { NavOutlet } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -70,6 +71,10 @@ export function LeaderboardPage() {
           ))}
         </ol>
       )}
+
+      <NavOutlet>
+        <div />
+      </NavOutlet>
     </main>
   );
 }

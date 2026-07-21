@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useCatch, useMembers } from "@/shared/hooks";
+import { NavOutlet } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -130,6 +131,10 @@ export function MembersPage() {
           </ul>
         )}
       </section>
+
+      <NavOutlet>
+        <div />
+      </NavOutlet>
     </main>
   );
 }

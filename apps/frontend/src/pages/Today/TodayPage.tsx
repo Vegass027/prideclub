@@ -3,6 +3,7 @@ import { useToday } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
+import { NavOutlet } from "@/shared/ui/BottomNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
@@ -118,6 +119,10 @@ export function TodayPage() {
           </span>
         </section>
       )}
+
+      <NavOutlet>
+        <div />
+      </NavOutlet>
     </main>
   );
 }
