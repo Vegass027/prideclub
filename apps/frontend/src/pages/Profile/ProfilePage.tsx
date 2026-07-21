@@ -74,7 +74,7 @@ export function ProfilePage() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">
             Мои клубы
           </h2>
-          <Button onClick={() => navigate("/marketplace")} variant="ghost" className="min-h-0 px-3 py-1.5 text-xs">
+          <Button onClick={() => navigate("/marketplace")} variant="secondary" className="min-h-0 px-3 py-1.5 text-xs">
             Все клубы →
           </Button>
         </div>
