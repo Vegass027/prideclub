@@ -5,7 +5,6 @@ import { formatDateTime, formatKopecks, transactionTypeLabel } from "@/shared/ut
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
-import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -19,7 +18,6 @@ export function ProfilePage() {
   const navigate = useNavigate();
   const { data: balance, isLoading: balanceLoading } = useBalance();
   const { data: myHabits, isLoading: myHabitsLoading } = useMyHabits();
-  const firstHabitId = myHabits?.items?.[0]?.id;
   const [topUpOpen, setTopUpOpen] = useState(false);
 
   return (
@@ -154,7 +152,7 @@ export function ProfilePage() {
         currentBalance={balance?.deposit_balance ?? 0}
       />
 
-      {firstHabitId ? <HabitNav habitId={firstHabitId} /> : <BottomNav />}
+      <BottomNav />
     </ScreenLayout>
   );
 }
