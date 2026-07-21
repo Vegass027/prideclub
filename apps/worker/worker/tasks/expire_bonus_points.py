@@ -9,13 +9,15 @@ from app.core.logging import get_logger
 from app.models.user import User
 
 
-async def run() -> dict:
+async def _process(*, session_factory=None) -> dict:
     log = get_logger("worker.expire_bonus_points")
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=PenaltyConfig.BONUS_POINTS_EXPIRY_DAYS)
     expired = 0
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
-    async with async_session_factory() as session:  # type: ignore[name-defined]
+    factory = session_factory if session_factory is not None else async_session_factory
+
+    async with factory() as session:
         result = await session.execute(
             select(User).where(
                 User.bonus_points > 0,
@@ -40,9 +42,9 @@ except ImportError:
 if celery_app is not None:
 
     @celery_app.task(name="worker.tasks.expire_bonus_points.run")
-    def run_celery() -> dict:  # type: ignore[no-redef]
+    def run() -> dict:
         import asyncio
 
-        return asyncio.run(run())
-
-    run = run_celery
+        return asyncio.run(_process())
+else:
+    run = _process

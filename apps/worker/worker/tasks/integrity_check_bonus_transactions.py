@@ -10,13 +10,15 @@ from app.models.penalty import Penalty
 from app.models.transaction import Transaction
 
 
-async def run() -> dict:
+async def _process(*, session_factory=None) -> dict:
     log = get_logger("worker.integrity_bonus")
     """Алерт если penalty.bonus_applied=true без связанной транзакции."""
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
+    factory = session_factory if session_factory is not None else async_session_factory
+
     orphans = 0
-    async with async_session_factory() as session:  # type: ignore[name-defined]
+    async with factory() as session:
         penalties = (
             await session.execute(
                 select(Penalty).where(Penalty.bonus_applied.is_(True))
@@ -45,9 +47,9 @@ except ImportError:
 if celery_app is not None:
 
     @celery_app.task(name="worker.tasks.integrity_check_bonus_transactions.run")
-    def run_celery() -> dict:  # type: ignore[no-redef]
+    def run() -> dict:
         import asyncio
 
-        return asyncio.run(run())
-
-    run = run_celery
+        return asyncio.run(_process())
+else:
+    run = _process

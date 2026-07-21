@@ -21,7 +21,7 @@ async def test_close_window_creates_penalty_for_missing_checkin(worker_db):
 
     from app.models.penalty import Penalty
     from app.models.transaction import Transaction
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=100, first_name="Alex")
@@ -41,7 +41,7 @@ async def test_close_window_creates_penalty_for_missing_checkin(worker_db):
         club_date.year, club_date.month, club_date.day, 12, 0, tzinfo=ZoneInfo("UTC")
     )
 
-    result = await run_for_active_habits()
+    result = await _process()
 
     assert result["summary"] == [
         {"habit_id": habit.id, "penalized": 1}
@@ -69,7 +69,7 @@ async def test_close_window_skips_member_with_checkin(worker_db):
     from sqlalchemy import select
 
     from app.models.penalty import Penalty
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=101)
@@ -84,7 +84,7 @@ async def test_close_window_skips_member_with_checkin(worker_db):
         )
         await session.commit()
 
-    result = await run_for_active_habits()
+    result = await _process()
     assert result["summary"] == [{"habit_id": habit.id, "penalized": 0}]
 
     async with worker_db.session_factory() as session:
@@ -98,7 +98,7 @@ async def test_close_window_idempotent_second_run(worker_db):
     from sqlalchemy import select, func
 
     from app.models.penalty import Penalty
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=102)
@@ -110,8 +110,8 @@ async def test_close_window_idempotent_second_run(worker_db):
         )
         await session.commit()
 
-    await run_for_active_habits()
-    await run_for_active_habits()
+    await _process()
+    await _process()
 
     async with worker_db.session_factory() as session:
         count = (
@@ -127,7 +127,7 @@ async def test_close_window_skips_inactive_membership(worker_db):
 
     from app.core.constants import MembershipStatus
     from app.models.penalty import Penalty
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         u1 = await worker_db.add_user(session, id=103)
@@ -153,7 +153,7 @@ async def test_close_window_skips_inactive_membership(worker_db):
         )
         await session.commit()
 
-    result = await run_for_active_habits()
+    result = await _process()
     assert result["summary"] == [{"habit_id": habit.id, "penalized": 1}]
 
     async with worker_db.session_factory() as session:
@@ -167,7 +167,7 @@ async def test_close_window_skips_inactive_habit(worker_db):
     from sqlalchemy import select
 
     from app.models.penalty import Penalty
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=106)
@@ -181,7 +181,7 @@ async def test_close_window_skips_inactive_habit(worker_db):
         )
         await session.commit()
 
-    result = await run_for_active_habits()
+    result = await _process()
     assert result["summary"] == []
 
     async with worker_db.session_factory() as session:
@@ -196,7 +196,7 @@ async def test_close_window_pauses_membership_when_deposit_zero(worker_db):
 
     from app.core.constants import MembershipStatus
     from app.models.membership import Membership
-    from worker.tasks.close_catch_window import run_for_active_habits
+    from worker.tasks.close_catch_window import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=107)
@@ -213,7 +213,7 @@ async def test_close_window_pauses_membership_when_deposit_zero(worker_db):
         )
         await session.commit()
 
-    await run_for_active_habits()
+    await _process()
 
     async with worker_db.session_factory() as session:
         m = (

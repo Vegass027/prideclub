@@ -51,7 +51,7 @@ async def test_process_checkin_happy_path(worker_db) -> None:
         "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
         "duration_seconds": 5,
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert "checkin_id" in result
     assert result["created"] is True
@@ -98,7 +98,7 @@ async def test_process_checkin_duplicate_idempotent(worker_db) -> None:
         "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
         "duration_seconds": 5,
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert result.get("duplicate") is True
 
@@ -139,11 +139,11 @@ async def test_process_checkin_window_closed(worker_db) -> None:
         "chat_id": habit.chat_id,
         "proof_type": "video_note",
         "message_id": 100502,
-        # MSK 23:00 — вне окна 07:00-10:00 MSK
-        "message_sent_at": datetime(2026, 7, 21, 20, 0, tzinfo=timezone.utc).isoformat(),
+        # "Сейчас" в UTC — окно 07-10 MSK (= 04-07 UTC) закрыто в любое другое время UTC.
+        "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
         "duration_seconds": 5,
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is False
     assert result.get("code") == "checkin_window_closed"
 
@@ -172,7 +172,7 @@ async def test_process_checkin_wrong_proof_type(worker_db) -> None:
         "message_id": 100503,
         "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is False
     assert result.get("code") == "wrong_type"
 
@@ -205,7 +205,7 @@ async def test_process_checkin_membership_inactive(worker_db) -> None:
         "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
         "duration_seconds": 5,
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is False
     assert result.get("code") == "membership_not_active"
 
@@ -232,6 +232,6 @@ async def test_process_checkin_membership_not_found(worker_db) -> None:
         "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
         "duration_seconds": 5,
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is False
     assert result.get("code") == "membership_not_found"

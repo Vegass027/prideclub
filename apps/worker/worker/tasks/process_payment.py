@@ -5,15 +5,19 @@ from app.services.payment_service import PaymentService
 from db.session import async_session_factory  # type: ignore[import-not-found]
 
 
-async def _process(payload: dict) -> dict:
+async def _process(payload: dict, *, session_factory=None) -> dict:
     """Идемпотентное подтверждение платежа через Telegram Payments.
 
     Идемпотентность обеспечивается UNIQUE-индексом
     `transactions.idempotency_key` (== charge_id). Дубль charge_id → идемпотентный
     no-op с возвратом существующей транзакции.
+
+    DI: session_factory (опциональный) — позволяет тестам инжектить свой
+    in-memory engine, не патча глобальный модуль.
     """
     log = get_logger("worker.process_payment")
-    async with async_session_factory() as session:  # type: ignore[name-defined]
+    factory = session_factory if session_factory is not None else async_session_factory
+    async with factory() as session:
         try:
             service = PaymentService(session)
             if payload["kind"] == "subscription":
@@ -70,6 +74,6 @@ if celery_app is not None:
     def run(self, payload: dict) -> dict:  # type: ignore[no-redef]
         import asyncio
 
-        return asyncio.run(_process(payload))
+        return asyncio.run(_process(payload, session_factory=async_session_factory))
 else:
     run = _process

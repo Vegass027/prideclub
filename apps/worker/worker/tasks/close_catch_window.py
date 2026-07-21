@@ -54,7 +54,7 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
     return {"habit_id": str(habit.id), "penalized": penalized}
 
 
-async def run_for_active_habits() -> dict:
+async def _process() -> dict:
     log = get_logger("worker.close_catch_window")
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
@@ -79,9 +79,9 @@ except ImportError:
 if celery_app is not None:
 
     @celery_app.task(name="worker.tasks.close_catch_window.run_for_active_habits")
-    def run_for_active_habits_celery() -> dict:  # type: ignore[no-redef]
+    def run_for_active_habits() -> dict:
         import asyncio
 
-        return asyncio.run(run_for_active_habits())
-
-    run_for_active_habits = run_for_active_habits_celery
+        return asyncio.run(_process())
+else:
+    run_for_active_habits = _process

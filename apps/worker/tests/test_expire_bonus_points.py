@@ -15,7 +15,7 @@ from sqlalchemy import select
 @pytest.mark.asyncio
 async def test_expire_zeroes_old_bonus_points(worker_db):
     """Пользователь с bonus_points_updated_at старше 90 дней → обнуляется."""
-    from worker.tasks.expire_bonus_points import run
+    from worker.tasks.expire_bonus_points import _process
 
     now = datetime.now(tz=timezone.utc)
     stale = now - timedelta(days=91)
@@ -29,7 +29,7 @@ async def test_expire_zeroes_old_bonus_points(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
 
     assert result == {"expired": 1}
 
@@ -46,7 +46,7 @@ async def test_expire_zeroes_old_bonus_points(worker_db):
 @pytest.mark.asyncio
 async def test_expire_keeps_fresh_bonus_points(worker_db):
     """Пользователь с свежим bonus_points_updated_at → НЕ трогается."""
-    from worker.tasks.expire_bonus_points import run
+    from worker.tasks.expire_bonus_points import _process
 
     now = datetime.now(tz=timezone.utc)
     fresh = now - timedelta(days=10)
@@ -60,7 +60,7 @@ async def test_expire_keeps_fresh_bonus_points(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
 
     assert result == {"expired": 0}
 
@@ -79,7 +79,7 @@ async def test_expire_keeps_fresh_bonus_points(worker_db):
 @pytest.mark.asyncio
 async def test_expire_skips_users_with_zero_bonus(worker_db):
     """bonus_points = 0 → не считается за stale, даже если updated_at старый."""
-    from worker.tasks.expire_bonus_points import run
+    from worker.tasks.expire_bonus_points import _process
 
     now = datetime.now(tz=timezone.utc)
     stale = now - timedelta(days=200)
@@ -93,14 +93,14 @@ async def test_expire_skips_users_with_zero_bonus(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"expired": 0}
 
 
 @pytest.mark.asyncio
 async def test_expire_handles_mixed_batch(worker_db):
     """Смесь пользователей: stale+fresh, fresh+zero, stale+active — корректный счёт."""
-    from worker.tasks.expire_bonus_points import run
+    from worker.tasks.expire_bonus_points import _process
 
     now = datetime.now(tz=timezone.utc)
     stale = now - timedelta(days=91)
@@ -129,7 +129,7 @@ async def test_expire_handles_mixed_batch(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"expired": 3}
 
     async with worker_db.session_factory() as session:

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 
 from sqlalchemy.sql.compiler import SQLCompiler
 
@@ -62,6 +62,32 @@ def _compile_current_date(_cls, _elem, **_kw):
 
 def _compile_now(_cls, _elem, **_kw):
     return "CURRENT_TIMESTAMP"
+
+
+def _rewrite_sql_for_sqlite(statement: str, parameters, _uuid_seq: list[int]):
+    """SQLite не умеет `gen_random_uuid()` / `now()` / `CURRENT_DATE`.
+
+    Подменяем функции в финальном SQL перед отправкой в БД — это работает для
+    всех clauses (INSERT, UPDATE, RETURNING, ...). В проде (Postgres) этот код
+    не выполняется: listener регистрируется только на тестовом engine.
+    """
+    import re
+    import uuid
+
+    def _repl_uuid(_m: re.Match) -> str:
+        _uuid_seq[0] += 1
+        return f"'{uuid.uuid4()}'"
+
+    def _repl_now(_m: re.Match) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    def _repl_date(_m: re.Match) -> str:
+        return "CURRENT_DATE"
+
+    statement = re.sub(r"gen_random_uuid\s*\(\s*\)", _repl_uuid, statement, flags=re.IGNORECASE)
+    statement = re.sub(r"\bnow\s*\(\s*\)", _repl_now, statement, flags=re.IGNORECASE)
+    statement = re.sub(r"\bcurrent_date\b", _repl_date, statement, flags=re.IGNORECASE)
+    return statement, parameters
 
 
 SQLCompiler.visit_gen_random_uuid = _compile_gen_random_uuid  # type: ignore[attr-defined]
@@ -147,13 +173,28 @@ async def worker_db(monkeypatch):
     from app.models.user import User
     from datetime import date, datetime
     from uuid import uuid4
+    import os
+    import tempfile
 
+    # File-based SQLite с NullPool даёт полную изоляцию между тестами:
+    # каждый тест получает свой файл, который удаляется после teardown.
+    # :memory: + StaticPool вёл к phantom state в pytest-asyncio auto-mode.
+    tmp_dir = tempfile.mkdtemp(prefix="hc_worker_test_")
+    db_path = os.path.join(tmp_dir, "test.db")
     test_engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
+        f"sqlite+aiosqlite:///{db_path}",
         future=True,
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        poolclass=NullPool,
     )
+
+    from sqlalchemy import event as _sa_event
+
+    _uuid_seq: list[int] = [0]
+
+    @_sa_event.listens_for(test_engine.sync_engine, "before_cursor_execute", retval=True)
+    def _patch_sqlite_sql(conn, cursor, statement, parameters, context, executemany):
+        return _rewrite_sql_for_sqlite(statement, parameters, _uuid_seq)
 
     tables = [
         User.__table__,
@@ -176,6 +217,17 @@ async def worker_db(monkeypatch):
 
     factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
+    # Worker-таски импортируют `async_session_factory` через
+    # `from db.session import async_session_factory`. Это биндит `_FactoryProxy`-инстанс
+    # в namespace модуля таски. Чтобы тестовая фабрика реально использовалась, нужно
+    # подменить внутренние `_get_session_factory` / `_session_factory` модуля db.session —
+    # `_FactoryProxy.__call__` обращается именно к ним через `_get_session_factory()`.
+    def _fake_get_session_factory() -> async_sessionmaker[AsyncSession]:
+        return factory
+
+    monkeypatch.setattr(_worker_db_session, "_get_session_factory", _fake_get_session_factory)
+    monkeypatch.setattr(_worker_db_session, "_session_factory", factory)
+    monkeypatch.setattr(_worker_db_session, "_engine", test_engine)
     monkeypatch.setattr(_worker_db_session, "async_session_factory", factory)
     monkeypatch.setattr(_worker_db_session, "engine", test_engine)
 
@@ -405,3 +457,6 @@ async def worker_db(monkeypatch):
     yield _Fixture()
 
     await test_engine.dispose()
+    import shutil
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -102,8 +102,12 @@ class PenaltyService:
         amount = min(habit.penalty_amount, violator.deposit_balance)
         if amount <= 0:
             # Депозит исчерпан — membership переходит в paused.
+            # НЕ flush'им до raise — rollback откатит изменение. Worker-таска
+            # обязана обработать "deposit_exhausted" в отдельной транзакции
+            # (см. worker/tasks/process_penalty.py: ловит этот код и ставит
+            # membership в PAUSED отдельным коммитом).
             violator.status = MembershipStatus.PAUSED
-            raise PenaltyAlreadyProcessedError("deposit_exhausted")
+            raise PenaltyAlreadyProcessedError("deposit_exhausted", code="deposit_exhausted")
 
         violator.deposit_balance -= amount
         await self._habit_repo.add_to_prize_pool(str(habit.id), amount)

@@ -17,7 +17,7 @@ async def test_apply_bonus_increments_user_points(worker_db):
 
     from app.core.constants import PenaltyConfig
     from app.models.user import User
-    from worker.tasks.apply_catch_bonus import run
+    from worker.tasks.apply_catch_bonus import _process
 
     async with worker_db.session_factory() as session:
         catcher_user = await worker_db.add_user(session, id=400, bonus_points=0)
@@ -43,7 +43,7 @@ async def test_apply_bonus_increments_user_points(worker_db):
         await session.commit()
         penalty_id = penalty.id
 
-    result = await run(
+    result = await _process(
         {
             "catcher_membership_id": catcher_m.id,
             "penalty_id": penalty_id,
@@ -68,7 +68,7 @@ async def test_apply_bonus_idempotent_second_call(worker_db):
     from app.core.constants import PenaltyConfig
     from app.models.user import User
     from app.models.penalty import Penalty
-    from worker.tasks.apply_catch_bonus import run
+    from worker.tasks.apply_catch_bonus import _process
 
     async with worker_db.session_factory() as session:
         catcher = await worker_db.add_user(session, id=410, bonus_points=0)
@@ -94,8 +94,8 @@ async def test_apply_bonus_idempotent_second_call(worker_db):
         await session.commit()
         penalty_id = p.id
 
-    first = await run({"catcher_membership_id": cm.id, "penalty_id": penalty_id})
-    second = await run({"catcher_membership_id": cm.id, "penalty_id": penalty_id})
+    first = await _process({"catcher_membership_id": cm.id, "penalty_id": penalty_id}, session_factory=worker_db.session_factory)
+    second = await _process({"catcher_membership_id": cm.id, "penalty_id": penalty_id}, session_factory=worker_db.session_factory)
 
     assert first["applied"] == PenaltyConfig.CATCHER_BONUS_POINTS
     assert second["applied"] == 0  # идемпотентно
@@ -115,7 +115,7 @@ async def test_apply_bonus_idempotent_second_call(worker_db):
 @pytest.mark.asyncio
 async def test_apply_bonus_returns_zero_when_no_catcher(worker_db):
     """Если penalty без catcher (window_closed_no_catch) → бонус не начисляется."""
-    from worker.tasks.apply_catch_bonus import run
+    from worker.tasks.apply_catch_bonus import _process
 
     async with worker_db.session_factory() as session:
         violator = await worker_db.add_user(session, id=420)
@@ -137,6 +137,6 @@ async def test_apply_bonus_returns_zero_when_no_catcher(worker_db):
         await session.commit()
         penalty_id = p.id
 
-    result = await run({"catcher_membership_id": vm.id, "penalty_id": penalty_id})
+    result = await _process({"catcher_membership_id": vm.id, "penalty_id": penalty_id}, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert result["applied"] == 0

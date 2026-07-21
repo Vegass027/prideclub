@@ -29,6 +29,7 @@ async def _process(
     payload: dict,
     *,
     cache: CachePort | None = None,
+    session_factory=None,
 ) -> dict:
     """Чистая async-функция для тестов и для Celery-обёртки.
 
@@ -38,13 +39,17 @@ async def _process(
     Транзакция: одна на всю таску. Service.flush() пишет строку, затем commit().
     При IntegrityError (дубль чек-ина) — rollback + идемпотентный ok-ответ.
 
-    DI: cache (опциональный) передаётся снаружи — это позволяет тестам
-    не тащить redis. Прод-обёртка ниже создаёт настоящий RedisTodayCache.
+    DI: cache (опциональный) и session_factory (опциональный) передаются
+    снаружи. Это позволяет тестам не поднимать ни Redis, ни Postgres/SQLite —
+    достаточно передать свою фабрику сессий. Прод-обёртка ниже создаёт
+    настоящие Redis-клиент и фабрику по умолчанию.
     """
     log = get_logger("worker.checkin")
     from sqlalchemy.exc import IntegrityError
 
-    async with async_session_factory() as session:  # type: ignore[name-defined]
+    factory = session_factory if session_factory is not None else async_session_factory
+
+    async with factory() as session:
         try:
             proof = ProofMessage(
                 proof_type=ProofType(payload["proof_type"]),
@@ -77,7 +82,12 @@ async def _process(
                     "habit_id": payload["habit_id"],
                 },
             )
-            return {"ok": True, "checkin_id": str(checkin.id), "created": created}
+            return {
+                "ok": True,
+                "checkin_id": str(checkin.id),
+                "created": created,
+                "duplicate": not created,
+            }
         except CheckinAlreadyExistsError:
             await session.rollback()
             log.info("worker_checkin_duplicate", extra={"user_id": payload["user_id"]})
@@ -147,6 +157,6 @@ if celery_app is not None:
         import asyncio
 
         cache = _build_production_cache()
-        return asyncio.run(_process(payload, cache=cache))
+        return asyncio.run(_process(payload, cache=cache, session_factory=async_session_factory))
 else:
     run = _process

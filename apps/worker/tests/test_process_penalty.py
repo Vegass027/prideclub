@@ -43,7 +43,7 @@ async def test_process_penalty_happy_path(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert "penalty_id" in result
 
@@ -117,7 +117,7 @@ async def test_process_penalty_duplicate_idempotent(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert result.get("duplicate") is True
 
@@ -150,7 +150,7 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
             checkin_window_end_hour=23,
         )
         violator = await worker_db.add_membership(
-            session, user_id=violator_user.id, habit_id=habit.id, deposit_balance=100
+            session, user_id=violator_user.id, habit_id=habit.id, deposit_balance=0
         )
         catcher = await worker_db.add_membership(
             session, user_id=catcher_user.id, habit_id=habit.id
@@ -163,11 +163,11 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     # Депозит исчерпан — PenaltyService кидает PenaltyAlreadyProcessedError("deposit_exhausted")
     assert result["ok"] is True
     assert result.get("duplicate") is True
-    assert result.get("code") == "penalty_already_processed"
+    assert result.get("code") == "deposit_exhausted"
 
     async with worker_db.session_factory() as session:
         from sqlalchemy import select
@@ -180,7 +180,7 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
             )
         ).scalar_one()
         assert v.status == MembershipStatus.PAUSED
-        assert v.deposit_balance == 100
+        assert v.deposit_balance == 0
 
 
 @pytest.mark.asyncio
@@ -212,6 +212,6 @@ async def test_process_penalty_violator_inactive(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload)
+    result = await _process(payload, session_factory=worker_db.session_factory)
     # Неактивный membership → MembershipNotActiveError → ok=False
     assert result["ok"] is False

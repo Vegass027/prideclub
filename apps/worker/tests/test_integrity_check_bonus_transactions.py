@@ -14,7 +14,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_integrity_no_orphans_returns_zero(worker_db):
     """Когда все bonus_applied=true имеют связанные транзакции → orphans=0."""
-    from worker.tasks.integrity_check_bonus_transactions import run
+    from worker.tasks.integrity_check_bonus_transactions import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=300)
@@ -41,14 +41,14 @@ async def test_integrity_no_orphans_returns_zero(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"orphans": 0}
 
 
 @pytest.mark.asyncio
 async def test_integrity_detects_orphan_penalty(worker_db):
     """penalty с bonus_applied=true без связанной transaction → orphans=1."""
-    from worker.tasks.integrity_check_bonus_transactions import run
+    from worker.tasks.integrity_check_bonus_transactions import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=301)
@@ -68,14 +68,14 @@ async def test_integrity_detects_orphan_penalty(worker_db):
         # намеренно без transaction
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"orphans": 1}
 
 
 @pytest.mark.asyncio
 async def test_integrity_ignores_penalties_without_bonus_applied(worker_db):
     """penalty с bonus_applied=false → не orphan (бонус ещё не начислен)."""
-    from worker.tasks.integrity_check_bonus_transactions import run
+    from worker.tasks.integrity_check_bonus_transactions import _process
 
     async with worker_db.session_factory() as session:
         user = await worker_db.add_user(session, id=302)
@@ -94,14 +94,14 @@ async def test_integrity_ignores_penalties_without_bonus_applied(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"orphans": 0}
 
 
 @pytest.mark.asyncio
 async def test_integrity_counts_multiple_orphans(worker_db):
     """Несколько orphan'ов → корректный счёт."""
-    from worker.tasks.integrity_check_bonus_transactions import run
+    from worker.tasks.integrity_check_bonus_transactions import _process
 
     async with worker_db.session_factory() as session:
         for i in range(3):
@@ -125,5 +125,5 @@ async def test_integrity_counts_multiple_orphans(worker_db):
             )
         await session.commit()
 
-    result = await run()
+    result = await _process(session_factory=worker_db.session_factory)
     assert result == {"orphans": 3}

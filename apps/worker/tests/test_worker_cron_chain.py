@@ -21,11 +21,11 @@ async def test_daily_cron_chain_full_day(worker_db):
     from app.models.penalty import Penalty
     from app.models.transaction import Transaction
     from app.models.user import User
-    from worker.tasks.apply_catch_bonus import run as apply_bonus
-    from worker.tasks.close_catch_window import run_for_active_habits
-    from worker.tasks.expire_bonus_points import run as expire_bonus
+    from worker.tasks.apply_catch_bonus import _process as apply_bonus
+    from worker.tasks.close_catch_window import _process as run_for_active_habits
+    from worker.tasks.expire_bonus_points import _process as expire_bonus
     from worker.tasks.integrity_check_bonus_transactions import (
-        run as integrity_check,
+        _process as integrity_check,
     )
 
 
@@ -84,7 +84,7 @@ async def test_daily_cron_chain_full_day(worker_db):
     # 2) apply_catch_bonus — начисляем +1 охотнику и пишем bonus_catch транзакцию
     bonus_result = await apply_bonus(
         {"catcher_membership_id": catcher_m_id, "penalty_id": penalty_id}
-    )
+    , session_factory=worker_db.session_factory)
     assert bonus_result["ok"] is True
     assert bonus_result["applied"] == PenaltyConfig.CATCHER_BONUS_POINTS
 
@@ -99,7 +99,7 @@ async def test_daily_cron_chain_full_day(worker_db):
     assert integrity == {"orphans": 0}
 
     # 4) expire_bonus_points — свежие бонусы НЕ сгорают
-    expire_result = await expire_bonus()
+    expire_result = await expire_bonus(session_factory=worker_db.session_factory)
     assert expire_result == {"expired": 0}
 
     async with worker_db.session_factory() as session:

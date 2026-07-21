@@ -18,7 +18,7 @@ async def test_close_season_distributes_prize_by_snapshot_rules(worker_db):
     from app.core.constants import SeasonStatus
     from app.models.season import Season
     from app.models.transaction import Transaction
-    from worker.tasks.close_season import run
+    from worker.tasks.close_season import _close_expired as _process
 
     today = date(2026, 7, 21)
     ends_at = today - timedelta(days=1)
@@ -64,7 +64,7 @@ async def test_close_season_distributes_prize_by_snapshot_rules(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process()
 
     assert result == {"closed": 1}
 
@@ -94,7 +94,7 @@ async def test_close_season_skips_active_seasons(worker_db):
     """Seasons с ends_at > today → НЕ закрываются."""
     from app.core.constants import SeasonStatus
     from app.models.season import Season
-    from worker.tasks.close_season import run
+    from worker.tasks.close_season import _close_expired as _process
 
     today = date(2026, 7, 21)
     ends_in_future = today + timedelta(days=10)
@@ -127,7 +127,7 @@ async def test_close_season_skips_active_seasons(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process()
     assert result == {"closed": 0}
 
     async with worker_db.session_factory() as session:
@@ -143,7 +143,7 @@ async def test_close_season_skips_active_seasons(worker_db):
 async def test_close_season_skips_already_closed(worker_db):
     """Seasons в статусе closed/paid_out → пропускаются."""
     from app.models.transaction import Transaction
-    from worker.tasks.close_season import run
+    from worker.tasks.close_season import _close_expired as _process
 
     today = date(2026, 7, 21)
     ends_at = today - timedelta(days=5)
@@ -177,7 +177,7 @@ async def test_close_season_skips_already_closed(worker_db):
         )
         await session.commit()
 
-    result = await run()
+    result = await _process()
     assert result == {"closed": 0}
 
     async with worker_db.session_factory() as session:
@@ -193,7 +193,7 @@ async def test_close_season_skips_already_closed(worker_db):
 async def test_close_season_validates_rules_sum_100_percent(worker_db):
     """Если snapshot правил некорректный (sum != 100%) → InvalidPrizeRulesError."""
     from app.core.exceptions import InvalidPrizeRulesError
-    from worker.tasks.close_season import run
+    from worker.tasks.close_season import _close_expired as _process
 
     today = date(2026, 7, 21)
     ends_at = today - timedelta(days=1)
@@ -228,4 +228,4 @@ async def test_close_season_validates_rules_sum_100_percent(worker_db):
         await session.commit()
 
     with pytest.raises(InvalidPrizeRulesError):
-        await run()
+        await _process()

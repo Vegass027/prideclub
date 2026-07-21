@@ -8,11 +8,13 @@ from app.services.bonus_service import BonusService
 from app.repositories.habit_repository import HabitRepository
 
 
-async def _process(payload: dict) -> dict:
+async def _process(payload: dict, *, session_factory=None) -> dict:
     log = get_logger("worker.bonus")
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
-    async with async_session_factory() as session:  # type: ignore[name-defined]
+    factory = session_factory if session_factory is not None else async_session_factory
+
+    async with factory() as session:
         try:
             service = BonusService(
                 session=session,
@@ -41,6 +43,6 @@ if celery_app is not None:
     def run(payload: dict) -> dict:
         import asyncio
 
-        return asyncio.run(_process(payload))
+        return asyncio.run(_process(payload, session_factory=async_session_factory))
 else:
     run = _process
