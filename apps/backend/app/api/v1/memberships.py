@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import current_user_db
+from app.core.exceptions import HabitArchivedError, HabitInactiveError
 from app.core.security import TelegramUser
 from app.db.session import get_session
 from app.repositories.habit_repository import HabitRepository
@@ -25,6 +26,15 @@ async def get_membership_service(
     )
 
 
+async def _ensure_joinable(habit_repo: HabitRepository, habit_id: str) -> None:
+    """Гейт TZ §3.6.6: join запрещён для архивных и неактивных клубов."""
+    habit = await habit_repo.get(habit_id)
+    if habit is None or habit.archived_at is not None:
+        raise HabitArchivedError()
+    if not habit.is_active:
+        raise HabitInactiveError()
+
+
 @router.post("/habits/{habit_id}/join")
 async def join(
     habit_id: str,
@@ -32,6 +42,8 @@ async def join(
     service: MembershipService = Depends(get_membership_service),
     session: AsyncSession = Depends(get_session),
 ) -> MembershipOut:
+    habit_repo = HabitRepository(session)
+    await _ensure_joinable(habit_repo, habit_id)
     m = await service.join(user_id=user.id, habit_id=habit_id)
     await session.commit()
     return MembershipOut.model_validate(m)

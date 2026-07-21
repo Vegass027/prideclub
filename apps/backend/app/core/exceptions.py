@@ -95,3 +95,23 @@ class TooManyCatchAttemptsError(DomainError):
 class InvalidPrizeRulesError(DomainError):
     status_code = 400
     code = "invalid_prize_rules"
+
+
+class NotOwnerError(DomainError):
+    status_code = 403
+    code = "not_owner"
+
+
+class HabitValidationError(DomainError):
+    status_code = 400
+    code = "habit_validation"
+
+
+class HabitInactiveError(DomainError):
+    status_code = 409
+    code = "habit_inactive"
+
+
+class HabitArchivedError(DomainError):
+    status_code = 404
+    code = "habit_archived"

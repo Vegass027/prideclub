@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import current_user, current_user_db
 from app.core.config import get_settings
+from app.core.exceptions import HabitArchivedError
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
 from app.db.session import get_session

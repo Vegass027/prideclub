@@ -17,6 +17,7 @@ from app.core.exceptions import (
     InvalidServiceTokenError,
     MissingInitDataError,
     MissingServiceTokenError,
+    NotOwnerError,
     ServiceTokenExpiredError,
 )
 from app.core.logging import get_logger
@@ -30,6 +31,7 @@ logger = get_logger("auth_middleware")
 
 INTERNAL_PREFIX = "/internal/"
 PUBLIC_PREFIX = "/api/v1/"
+ADMIN_PREFIX = "/admin/v1/"
 HEALTH_PATHS = {"/health", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc"}
 
 
@@ -83,6 +85,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
                 request.state.telegram_user = tg_user
 
+            elif path.startswith(ADMIN_PREFIX):
+                if not settings.owner_telegram_id:
+                    return JSONResponse(
+                        status_code=503,
+                        content={"code": "admin_disabled"},
+                    )
+                init_data = request.headers.get("X-Telegram-Init-Data")
+                if not init_data:
+                    raise MissingInitDataError()
+                tg_user = validate_init_data(
+                    init_data,
+                    settings.bot_token,
+                    max_age_seconds=settings.init_data_max_age_seconds,
+                )
+                if tg_user.id != settings.owner_telegram_id:
+                    logger.warning(
+                        "admin_auth_rejected",
+                        extra={
+                            "path": path,
+                            "ip": _client_ip(request),
+                            "reason": "not_owner",
+                            "user_id": tg_user.id,
+                        },
+                    )
+                    raise NotOwnerError()
+                request.state.telegram_user = tg_user
+
             else:
                 return JSONResponse(
                     status_code=404, content={"code": "not_found"}
@@ -131,6 +160,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except ServiceTokenExpiredError:
             return JSONResponse(
                 status_code=401, content={"code": "service_token_expired"}
+            )
+        except NotOwnerError:
+            return JSONResponse(
+                status_code=403, content={"code": "not_owner"}
             )
 
         return await call_next(request)
@@ -187,7 +220,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         try:
             redis = get_redis()
-            if path.startswith(PUBLIC_PREFIX):
+            if path.startswith(PUBLIC_PREFIX) or path.startswith(ADMIN_PREFIX):
                 tg_user = getattr(request.state, "telegram_user", None)
                 if tg_user is None:
                     return await call_next(request)
@@ -240,7 +273,7 @@ def install_middlewares(app: FastAPI) -> None:
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
         allow_headers=[
             "X-Telegram-Init-Data",
             "X-Service-Token",

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
 
     admin_telegram_chat_id: str = ""
+    owner_telegram_id: int = 0  # 0 = не задан, /admin/v1/* будет отвечать 503
+    bot_token_admin: str = ""  # токен @PrideClubAdminBot, опционально в .env
 
     @property
     def cors_origins_list(self) -> list[str]:

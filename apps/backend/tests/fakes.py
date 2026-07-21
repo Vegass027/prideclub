@@ -48,14 +48,72 @@ class FakeHabitRepo:
                 return h
         return None
 
+    async def list_active(self) -> list[Habit]:
+        return [
+            h for h in self._store.values()
+            if h.is_active and h.archived_at is None
+        ]
+
+    async def list_including_archived(self) -> list[Habit]:
+        return list(self._store.values())
+
     async def list_with_member_counts(self) -> list[tuple[Habit, int]]:
-        return [(h, 0) for h in self._store.values()]
+        return [
+            (h, 0)
+            for h in self._store.values()
+            if h.is_active and h.archived_at is None
+        ]
+
+    async def list_for_user(self, user_id: int) -> list[Habit]:
+        return [
+            h for h in self._store.values()
+            if h.is_active and h.archived_at is None
+        ]
 
     async def add_to_prize_pool(self, habit_id: str, amount: int) -> None:
         habit = self._store.get(habit_id)
         if habit is None:
             return
         habit.prize_pool += amount
+
+    async def count_active_members(self, habit_id: str) -> int:
+        return 0
+
+    async def create(self, *, fields: dict) -> Habit:
+        from datetime import time as _time
+
+        defaults = {
+            "id": str(uuid4()),
+            "title": "",
+            "chat_id": 0,
+            "checkin_window_start": _time(0, 0),
+            "checkin_window_end": _time(23, 59),
+            "timezone": "Europe/Moscow",
+            "penalty_amount": 0,
+            "price_month": 0,
+            "prize_pool": 0,
+            "is_active": False,
+            "proof_type": ProofType.VIDEO_NOTE,
+        }
+        merged = {**defaults, **fields}
+        habit = Habit(**merged)
+        self._store[str(habit.id)] = habit
+        return habit
+
+    async def update(self, habit: Habit, *, fields: dict) -> Habit:
+        for k, v in fields.items():
+            setattr(habit, k, v)
+        return habit
+
+    async def archive(self, habit: Habit, *, archived_at) -> None:
+        habit.is_active = False
+        habit.archived_at = archived_at
+
+    async def restore(self, habit: Habit) -> None:
+        habit.archived_at = None
+
+    async def set_active(self, habit: Habit, *, is_active: bool) -> None:
+        habit.is_active = is_active
 
 
 def make_habit(

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import current_user_db, current_user_internal
-from app.core.exceptions import PenaltyAlreadyProcessedError
+from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
 from app.core.logging import get_logger
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
@@ -61,8 +61,8 @@ async def list_members(
     checkin_repo = CheckinRepository(session)
 
     habit = await habit_repo.get(habit_id)
-    if habit is None:
-        raise HTTPException(404, "habit_not_found")
+    if habit is None or habit.archived_at is not None:
+        raise HabitArchivedError()
 
     memberships = await membership_repo.list_for_habit(habit_id)
     members: list[MemberRowOut] = []

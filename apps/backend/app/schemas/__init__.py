@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,3 +68,96 @@ class InternalCheckinResult(BaseModel):
     checkin_id: str | None
     accepted: bool
     code: str  # ok | checkin_already_exists | checkin_window_closed | membership_not_active | invalid_proof | habit_not_found
+
+
+class AdminHabitCreateRequest(BaseModel):
+    """POST /admin/v1/habits — создание клуба (TZ §3.6.4).
+
+    `is_active` намеренно отсутствует: при создании всегда False.
+    """
+
+    title: str = Field(min_length=3, max_length=128)
+    description: str | None = None
+    photo_url: str | None = Field(default=None, max_length=512)
+    telegram_invite_link: str | None = Field(default=None, max_length=512)
+    stat_name: str = Field(min_length=1, max_length=64)
+    stat_icon: str | None = Field(default=None, max_length=16)
+    chat_id: int
+    checkin_window_start: time
+    checkin_window_end: time
+    timezone: str = Field(min_length=1, max_length=64)
+    proof_type: str = Field(pattern="^(video_note|photo|text)$")
+    price_month: int = Field(gt=0)
+    penalty_amount: int = Field(gt=0)
+    stat_gain_per_checkin: int = Field(default=2, gt=0)
+    stat_loss_per_miss: int = Field(default=1, gt=0)
+    member_limit: int | None = Field(default=None, gt=0)
+    curator_id: int | None = None
+
+
+class AdminHabitUpdateRequest(BaseModel):
+    """PATCH /admin/v1/habits/{id} — частичное обновление.
+
+    Любые поля опциональны. Финансовые поля замораживаются после первого вступления
+    (TZ §3.6.7) — сервис бросит HabitValidationError если в клубе уже есть участники.
+    """
+
+    title: str | None = Field(default=None, min_length=3, max_length=128)
+    description: str | None = None
+    photo_url: str | None = Field(default=None, max_length=512)
+    telegram_invite_link: str | None = Field(default=None, max_length=512)
+    stat_name: str | None = Field(default=None, min_length=1, max_length=64)
+    stat_icon: str | None = Field(default=None, max_length=16)
+    checkin_window_start: time | None = None
+    checkin_window_end: time | None = None
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    proof_type: str | None = Field(default=None, pattern="^(video_note|photo|text)$")
+    price_month: int | None = Field(default=None, gt=0)
+    penalty_amount: int | None = Field(default=None, gt=0)
+    stat_gain_per_checkin: int | None = Field(default=None, gt=0)
+    stat_loss_per_miss: int | None = Field(default=None, gt=0)
+    member_limit: int | None = Field(default=None, gt=0)
+    curator_id: int | None = None
+
+
+class AdminHabitToggleRequest(BaseModel):
+    is_active: bool
+
+
+class AdminHabitOut(BaseModel):
+    """Полная карточка клуба для админки."""
+
+    id: str
+    title: str
+    description: str | None
+    chat_id: int
+    checkin_window_start: str
+    checkin_window_end: str
+    timezone: str
+    penalty_amount: int
+    price_month: int
+    proof_type: str
+    prize_pool: int
+    is_active: bool
+    photo_url: str | None
+    telegram_invite_link: str | None
+    stat_name: str
+    stat_icon: str | None
+    stat_gain_per_checkin: int
+    stat_loss_per_miss: int
+    member_limit: int | None
+    curator_id: int | None
+    archived_at: datetime | None
+    created_at: datetime
+    active_members_count: int = 0
+
+
+class AdminHabitsListResponse(BaseModel):
+    items: list[AdminHabitOut]
+
+
+class AdminHabitActionResponse(BaseModel):
+    ok: bool
+    habit_id: str
+    is_active: bool | None = None
+    archived_at: datetime | None = None

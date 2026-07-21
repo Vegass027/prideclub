@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.admin import api_router as admin_api_router
 from app.api.v1 import (
     admin_suspicious_pairs,
     balance,
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(
         admin_suspicious_pairs.router, prefix="/api/v1", tags=["admin"]
     )
+    app.include_router(admin_api_router, prefix="/admin/v1", tags=["admin"])
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

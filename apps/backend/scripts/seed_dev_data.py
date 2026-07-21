@@ -43,6 +43,10 @@ async def _create_club(session: AsyncSession) -> Habit:
         checkin_window_end=time(11, 0),
         proof_type=ProofType.VIDEO_NOTE,
         is_active=True,
+        stat_name="Дисциплина",
+        stat_icon="🔥",
+        stat_gain_per_checkin=2,
+        stat_loss_per_miss=1,
     )
     session.add(habit)
     await session.commit()
@@ -73,6 +77,10 @@ async def _create_reading_club(session: AsyncSession) -> Habit:
         checkin_window_end=time(23, 59),
         proof_type=ProofType.PHOTO,
         is_active=True,
+        stat_name="Интеллект",
+        stat_icon="📚",
+        stat_gain_per_checkin=3,
+        stat_loss_per_miss=1,
     )
     session.add(habit)
     await session.commit()

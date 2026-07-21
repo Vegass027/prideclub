@@ -39,6 +39,26 @@ class Habit(Base):
     prize_pool: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
+    photo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    telegram_invite_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    stat_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="Дисциплина"
+    )
+    stat_icon: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    stat_gain_per_checkin: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2"
+    )
+    stat_loss_per_miss: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    member_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    curator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

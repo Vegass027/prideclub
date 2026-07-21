@@ -6,6 +6,7 @@ from typing import Protocol
 from app.core.exceptions import (
     CheckinAlreadyExistsError,
     CheckinWindowClosedError,
+    HabitArchivedError,
     HabitNotFoundError,
     MembershipNotFoundError,
     MembershipNotActiveError,
@@ -131,8 +132,8 @@ class CheckinService:
     ) -> tuple[Habit, Membership, str, int]:
         """Возвращает (habit, membership, status, streak_days)."""
         habit = await self._habit_repo.get(habit_id)
-        if habit is None:
-            raise HabitNotFoundError()
+        if habit is None or habit.archived_at is not None:
+            raise HabitArchivedError()
         membership = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
         if membership is None:
             raise MembershipNotFoundError()

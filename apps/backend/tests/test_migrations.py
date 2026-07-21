@@ -132,6 +132,54 @@ def _assert_critical_invariants(sync_url):
         f"Missing partial index on users(deleted_at). Got: {idx_names}"
     )
 
+    rows = _run_sql(
+        sync_url,
+        ("SELECT indexname FROM pg_indexes "
+            "WHERE schemaname='public' AND tablename='habits'"),
+    )
+    idx_names = {r[0] for r in rows}
+    assert "ix_habits_active" in idx_names, (
+        f"Missing partial index ix_habits_active on habits(is_active) "
+        f"WHERE is_active=true AND archived_at IS NULL. Got: {idx_names}"
+    )
+    assert "ix_habits_curator" in idx_names, (
+        f"Missing partial index ix_habits_curator on habits(curator_id). Got: {idx_names}"
+    )
+
+    rows = _run_sql(
+        sync_url,
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='habits'
+        """,
+    )
+    col_names = {r[0] for r in rows}
+    expected_new = {
+        "archived_at",
+        "photo_url",
+        "telegram_invite_link",
+        "stat_name",
+        "stat_icon",
+        "stat_gain_per_checkin",
+        "stat_loss_per_miss",
+        "member_limit",
+        "curator_id",
+    }
+    missing = expected_new - col_names
+    assert not missing, f"Missing habits columns: {missing}. Got: {sorted(col_names)}"
+
+    rows = _run_sql(
+        sync_url,
+        """
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'habits'::regclass AND contype = 'c'
+        """,
+    )
+    check_names = {r[0] for r in rows}
+    assert {"habits_stat_loss_positive", "habits_stat_gain_positive", "habits_member_limit_positive"} <= check_names, (
+        f"Missing CHECK constraints on habits. Got: {check_names}"
+    )
+
     rows = _run_sql(sync_url, "SELECT extname FROM pg_extension")
     ext_names = {r[0] for r in rows}
     assert "pgcrypto" in ext_names, f"pgcrypto extension missing. Got: {ext_names}"
