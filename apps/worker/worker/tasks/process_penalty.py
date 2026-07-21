@@ -1,25 +1,40 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import os
+from datetime import date
+from typing import Protocol
 
-from app.core.exceptions import PenaltyAlreadyProcessedError
 from app.core.logging import get_logger
+from app.core.exceptions import PenaltyAlreadyProcessedError
+from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
-from app.repositories.checkin_repository import CheckinRepository
-from app.services.catch_rate_limiter import RedisCatchRateLimiter
 from app.services.penalty_service import PenaltyService
+from db.session import async_session_factory  # type: ignore[import-not-found]
 
 
-async def _process(payload: dict) -> dict:
+class RedisPort(Protocol):
+    """Тот же протокол, что в PenaltyService — единый контракт."""
+
+    async def incr_catch(self, catcher_user_id: int) -> int: ...
+
+
+async def _process(
+    payload: dict,
+    *,
+    redis_port: RedisPort | None = None,
+) -> dict:
+    """Чистая async-функция для тестов и для Celery-обёртки.
+
+    Транзакция: одна на всю таску.
+    Идемпотентность: уникальный индекс (membership_id, date, reason) в `penalties`
+    + `PenaltyAlreadyProcessedError` → идемпотентный ok-ответ.
+
+    DI: redis_port (опциональный) передаётся снаружи. Без него rate-limit
+    отключён (полезно для тестов).
+    """
     log = get_logger("worker.process_penalty")
-    import os
-    import redis.asyncio as aioredis
-
-    redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
-    limiter = RedisCatchRateLimiter(redis)
-
-    from db.session import async_session_factory  # type: ignore[import-not-found]
+    from sqlalchemy.exc import IntegrityError
 
     async with async_session_factory() as session:  # type: ignore[name-defined]
         try:
@@ -28,7 +43,7 @@ async def _process(payload: dict) -> dict:
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),
                 checkin_repo=CheckinRepository(session),
-                redis_port=limiter,
+                redis_port=redis_port,
             )
             penalty = await service.apply_catch(
                 catcher_user_id=payload["catcher_user_id"],
@@ -36,15 +51,28 @@ async def _process(payload: dict) -> dict:
                 club_date=date.fromisoformat(payload["club_date"]),
                 catcher_membership_id=payload.get("catcher_membership_id"),
             )
-            log.info("penalty_applied", extra={"penalty_id": str(penalty.id)})
+            await session.commit()
+            log.info(
+                "worker_penalty_ok",
+                extra={
+                    "penalty_id": str(penalty.id),
+                    "violator_membership_id": payload["violator_membership_id"],
+                    "amount": penalty.amount,
+                },
+            )
             return {"ok": True, "penalty_id": str(penalty.id)}
         except PenaltyAlreadyProcessedError as exc:
-            return {"ok": False, "code": exc.code}
+            await session.rollback()
+            log.info("worker_penalty_duplicate", extra={"code": exc.code})
+            return {"ok": True, "duplicate": True, "code": exc.code}
+        except IntegrityError as exc:
+            await session.rollback()
+            log.info("worker_penalty_integrity", extra={"err": str(exc)})
+            return {"ok": True, "duplicate": True}
         except Exception as exc:  # noqa: BLE001
-            log.error("penalty_failed", extra={"err": str(exc)})
+            await session.rollback()
+            log.error("worker_penalty_failed", extra={"err": str(exc)})
             return {"ok": False, "err": str(exc)}
-        finally:
-            await redis.aclose()
 
 
 try:
@@ -52,12 +80,35 @@ try:
 except ImportError:
     celery_app = None  # type: ignore
 
+
+def _build_production_redis_port() -> RedisPort | None:
+    """Создаёт production-Redis-клиент для rate-limit."""
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+    import redis.asyncio as aioredis
+
+    from app.services.catch_rate_limiter import RedisCatchRateLimiter
+
+    return RedisCatchRateLimiter(aioredis.from_url(redis_url, decode_responses=True))
+
+
 if celery_app is not None:
 
-    @celery_app.task(name="worker.tasks.process_penalty.run", bind=True, max_retries=3)
+    @celery_app.task(
+        name="worker.tasks.process_penalty.run",
+        bind=True,
+        max_retries=3,
+        autoretry_for=(Exception,),
+        dont_autoretry_for=(PenaltyAlreadyProcessedError,),
+        retry_backoff=True,
+        retry_backoff_max=60,
+        retry_jitter=True,
+    )
     def run(self, payload: dict) -> dict:  # type: ignore[no-redef]
         import asyncio
 
-        return asyncio.run(_process(payload))
+        redis_port = _build_production_redis_port()
+        return asyncio.run(_process(payload, redis_port=redis_port))
 else:
     run = _process

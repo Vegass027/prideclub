@@ -11,7 +11,20 @@ from app.repositories.membership_repository import MembershipRepository
 from app.services.penalty_service import PenaltyService
 
 
-async def _close_for_habit(session, habit: Habit, club_date: date) -> dict:
+async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
+    """Штрафует участников без чек-ина за club_date(now).
+
+    Защита от раннего срабатывания: если окно чек-ина в TZ клуба ещё не закрылось,
+    пропускаем (сегодня ещё не пропущено — рано штрафовать).
+    """
+    if habit.is_within_checkin_window(now_utc):
+        return {
+            "habit_id": str(habit.id),
+            "skipped": "window_open",
+            "penalized": 0,
+        }
+
+    club_date = habit.club_date(now_utc)
     membership_repo = MembershipRepository(session)
     habit_repo = HabitRepository(session)
     checkin_repo = __import__(
@@ -51,8 +64,7 @@ async def run_for_active_habits() -> dict:
         habits = await habit_repo.list_active()
         now_utc = datetime.now(tz=timezone.utc)
         for habit in habits:
-            club_date = habit.club_date(now_utc)
-            result = await _close_for_habit(session, habit, club_date)
+            result = await _close_for_habit(session, habit, now_utc)
             summary.append(result)
         await session.commit()
     log.info("close_catch_window_done", extra={"summary": summary})

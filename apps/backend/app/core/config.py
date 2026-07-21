@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     database_url: str
     database_url_sync: str = ""
     redis_url: str
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
 
     log_level: str = "INFO"
     sentry_dsn: str = ""

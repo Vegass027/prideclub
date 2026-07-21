@@ -1,37 +1,51 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Protocol
 
-import redis.asyncio as aioredis
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.core.constants import ProofType
+from app.core.exceptions import (
+    CheckinAlreadyExistsError,
+    CheckinWindowClosedError,
+    MembershipNotActiveError,
+    MembershipNotFoundError,
+)
 from app.core.logging import get_logger
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.services.checkin_service import CheckinService
-from app.services.catch_rate_limiter import RedisCatchRateLimiter
-from app.services.proof_validator import ProofMessage
-from app.services.today_cache import RedisTodayCache
+from app.services.proof_validator import ProofMessage, ProofValidationError
 from db.session import async_session_factory  # type: ignore[import-not-found]
 
 
-try:
-    from worker.celery_app import celery_app
-except ImportError:
-    celery_app = None  # type: ignore
+class CachePort(Protocol):
+    """Тот же протокол, что в CheckinService — единый контракт между слоями."""
+
+    async def invalidate_today(self, habit_id: str, membership_id: str) -> None: ...
 
 
-async def _process(payload: dict) -> dict:
+async def _process(
+    payload: dict,
+    *,
+    cache: CachePort | None = None,
+) -> dict:
+    """Чистая async-функция для тестов и для Celery-обёртки.
+
+    Идемпотентность обеспечивается UNIQUE-индексом
+    `uq_checkins_membership_date (membership_id, date)` в БД.
+
+    Транзакция: одна на всю таску. Service.flush() пишет строку, затем commit().
+    При IntegrityError (дубль чек-ина) — rollback + идемпотентный ok-ответ.
+
+    DI: cache (опциональный) передаётся снаружи — это позволяет тестам
+    не тащить redis. Прод-обёртка ниже создаёт настоящий RedisTodayCache.
+    """
     log = get_logger("worker.checkin")
-    settings_payload = _load_settings()
-    redis = aioredis.from_url(settings_payload["REDIS_URL"], decode_responses=True)
-    limiter = RedisCatchRateLimiter(redis)
+    from sqlalchemy.exc import IntegrityError
 
     async with async_session_factory() as session:  # type: ignore[name-defined]
         try:
-            from app.core.constants import ProofType
-
             proof = ProofMessage(
                 proof_type=ProofType(payload["proof_type"]),
                 text=payload.get("text"),
@@ -44,40 +58,95 @@ async def _process(payload: dict) -> dict:
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),
                 checkin_repo=CheckinRepository(session),
-                cache=RedisTodayCache(redis),
+                cache=cache,
             )
-            checkin = await service.process_checkin(
+            checkin, created = await service.process_checkin(
                 user_id=payload["user_id"],
                 habit_id=payload["habit_id"],
                 proof=proof,
                 proof_message_id=payload["message_id"],
                 now_utc=datetime.now(tz=timezone.utc),
             )
-            log.info("worker_checkin_ok", extra={"checkin_id": str(checkin.id)})
-            return {"ok": True, "checkin_id": str(checkin.id)}
+            await session.commit()
+            log.info(
+                "worker_checkin_ok",
+                extra={
+                    "checkin_id": str(checkin.id),
+                    "created": created,
+                    "user_id": payload["user_id"],
+                    "habit_id": payload["habit_id"],
+                },
+            )
+            return {"ok": True, "checkin_id": str(checkin.id), "created": created}
+        except CheckinAlreadyExistsError:
+            await session.rollback()
+            log.info("worker_checkin_duplicate", extra={"user_id": payload["user_id"]})
+            return {"ok": True, "duplicate": True}
+        except (
+            ProofValidationError,
+            CheckinWindowClosedError,
+            MembershipNotActiveError,
+            MembershipNotFoundError,
+        ) as exc:
+            await session.rollback()
+            log.warning(
+                "worker_checkin_rejected",
+                extra={"code": getattr(exc, "code", "rejected"), "err": str(exc)},
+            )
+            return {"ok": False, "code": getattr(exc, "code", "rejected")}
+        except IntegrityError as exc:
+            await session.rollback()
+            log.warning("worker_checkin_integrity", extra={"err": str(exc)})
+            return {"ok": True, "duplicate": True}
         except Exception as exc:  # noqa: BLE001
+            await session.rollback()
             log.error("worker_checkin_failed", extra={"err": str(exc)})
             return {"ok": False, "err": str(exc)}
-        finally:
-            await redis.aclose()
 
 
-def _load_settings() -> dict:
+try:
+    from worker.celery_app import celery_app
+except ImportError:
+    celery_app = None  # type: ignore
+
+
+def _build_production_cache() -> CachePort | None:
+    """Создаёт production-Redis-клиент. Lazy import чтобы не тянуть redis
+    при юнит-тестах."""
     import os
 
-    return {
-        "DATABASE_URL": os.getenv("DATABASE_URL", ""),
-        "REDIS_URL": os.getenv("REDIS_URL", "redis://redis:6379/0"),
-    }
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+    import redis.asyncio as aioredis
+
+    from app.services.today_cache import RedisTodayCache
+
+    return RedisTodayCache(aioredis.from_url(redis_url, decode_responses=True))
 
 
-# Если Celery подключён — регистрируем таску.
 if celery_app is not None:
 
-    @celery_app.task(name="worker.tasks.process_checkin.run", bind=True, max_retries=3)
+    @celery_app.task(
+        name="worker.tasks.process_checkin.run",
+        bind=True,
+        max_retries=3,
+        autoretry_for=(Exception,),
+        dont_autoretry_for=(
+            CheckinAlreadyExistsError,
+            ProofValidationError,
+            CheckinWindowClosedError,
+            MembershipNotActiveError,
+            MembershipNotFoundError,
+        ),
+        retry_backoff=True,
+        retry_backoff_max=60,
+        retry_jitter=True,
+    )
     def run(self, payload: dict) -> dict:  # type: ignore[no-redef]
         import asyncio
 
-        return asyncio.run(_process(payload))
+        cache = _build_production_cache()
+        return asyncio.run(_process(payload, cache=cache))
 else:
     run = _process

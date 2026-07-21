@@ -28,7 +28,7 @@ logger = get_logger("auth_middleware")
 
 INTERNAL_PREFIX = "/internal/"
 PUBLIC_PREFIX = "/api/v1/"
-HEALTH_PATHS = {"/health", "/ready", "/docs", "/openapi.json", "/redoc"}
+HEALTH_PATHS = {"/health", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc"}
 
 
 def _client_ip(request: Request) -> str:
@@ -168,9 +168,16 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
 
 def install_middlewares(app: FastAPI) -> None:
+    """Устанавливает middleware в правильном порядке.
+
+    В FastAPI/Starlette middleware добавляются ПОСЛЕДНИМ — выполняются ПЕРВЫМ.
+    Нужный порядок обработки запроса:
+        CORS preflight → Auth (401/404) → RequestContext (логи).
+    Поэтому регистрируем в обратном порядке: RequestContext → Auth → CORS.
+    """
     settings = get_settings()
-    app.add_middleware(AuthMiddleware)
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(AuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,

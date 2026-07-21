@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,7 +27,9 @@ class Season(Base):
     starts_at: Mapped[date] = mapped_column(Date, nullable=False)
     ends_at: Mapped[date] = mapped_column(Date, nullable=False)
     prize_pool: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    prize_rules_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    prize_rules_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True
+    )
 
     status: Mapped[SeasonStatus] = mapped_column(
         Enum(SeasonStatus, name="season_status", values_callable=lambda x: [e.value for e in x]),

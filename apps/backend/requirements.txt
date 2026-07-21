@@ -14,6 +14,7 @@ httpx==0.28.1
 structlog==24.4.0
 prometheus-client==0.21.1
 sentry-sdk[fastapi]==2.19.2
+celery==5.4.0  # producer-only: backend кладёт задачи в очередь через send_task
 
 # dev / test / lint
 pytest==8.3.4
@@ -23,3 +24,6 @@ ruff==0.8.6
 mypy==1.14.0
 black==24.10.0
 faker==33.1.0
+fakeredis==2.26.1
+lupa==2.2  # Lua runtime для fakeredis (EVAL/EVALSHA в rate-limiter тестах)
+aiosqlite==0.20.0

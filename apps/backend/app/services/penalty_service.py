@@ -49,13 +49,17 @@ class PenaltyService:
         checkin_repo: CheckinRepository,
         redis_port: RedisPort | None = None,
         suspicious_lookup=None,
+        suspicious_service: Any | None = None,
     ) -> None:
+        """suspicious_service: Optional[SuspiciousPairsService] — для авто-flag
+        по асимметрии ловов. Если None — флагование не выполняется (для тестов)."""
         self._session = session
         self._habit_repo = habit_repo
         self._membership_repo = membership_repo
         self._checkin_repo = checkin_repo
         self._redis = redis_port
         self._suspicious_lookup = suspicious_lookup
+        self._suspicious_service = suspicious_service
         self._logger = get_logger("penalty_service")
 
     async def apply_catch(
@@ -107,6 +111,21 @@ class PenaltyService:
         # Применяется ли кэтчер-бонус — отдельная проверка suspicious_pairs (см. apply_catch_bonus).
         grant_catcher_bonus = not await self._is_suspicious(catcher_membership_id, violator_membership_id)
 
+        # Авто-flag по асимметрии ловов (после записи пенальти, чтобы счётчик видел этот catch).
+        if self._suspicious_service is not None and catcher_membership_id is not None:
+            try:
+                await self._suspicious_service.evaluate_after_catch(
+                    catcher_membership_id=catcher_membership_id,
+                    violator_membership_id=violator_membership_id,
+                    club_date=club_date,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Антифрод-эвристика не должна ломать основной catch-flow.
+                self._logger.warning(
+                    "suspicious_evaluate_failed",
+                    extra={"err": str(exc)},
+                )
+
         penalty = Penalty(
             id=str(uuid4()),
             membership_id=violator_membership_id,
@@ -119,6 +138,13 @@ class PenaltyService:
             bonus_applied=False,
         )
         self._session.add(penalty)
+
+        # Flush penalty ПЕРЕД добавлением transaction — Postgres FK
+        # `transactions.related_penalty_id → penalties.id` проверяется
+        # per-statement, и INSERT transaction в той же flush() видит ещё
+        # не зафиксированный penalty → ForeignKeyViolationError.
+        # Сначала flush'им penalty (INSERT + RETURNING), затем transaction.
+        await self._session.flush()
 
         transaction = Transaction(
             id=str(uuid4()),
@@ -194,6 +220,8 @@ class PenaltyService:
             bonus_applied=False,
         )
         self._session.add(penalty)
+        # Flush перед transaction — см. apply_catch().
+        await self._session.flush()
 
         transaction = Transaction(
             id=str(uuid4()),

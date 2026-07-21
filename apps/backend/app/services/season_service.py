@@ -87,8 +87,14 @@ class SeasonService:
     async def _rank_by_metric(
         self, season_id: str, metric: str, *, rank_from: int, rank_to: int
     ) -> list[dict]:
-        # Минимальная реализация: streak и catches. Shame — отдельная таблица.
+        """Минимальная реализация: streak и catches. Shame — отдельная таблица.
+
+        Возвращает список dict'ов с `membership_id` и `user_id` (нужно для
+        записи `Transaction` в `close_season`).
+        """
         if metric in ("streak", "catches"):
+            from app.models.membership import Membership
+
             stat_field = (
                 SeasonStats.streak_days
                 if metric == "streak"
@@ -98,35 +104,28 @@ class SeasonService:
                 await self._session.execute(
                     select(
                         SeasonStats.membership_id,
+                        Membership.user_id,
                         stat_field.label("metric_value"),
                     )
+                    .join(Membership, Membership.id == SeasonStats.membership_id)
                     .where(SeasonStats.season_id == season_id)
                     .order_by(stat_field.desc())
                 )
             ).all()
-
-            from sqlalchemy import desc
 
             sorted_rows = sorted(rows, key=lambda r: r.metric_value or 0, reverse=True)
             sliced = sorted_rows[rank_from - 1 : rank_to]
             if not sliced:
                 return []
 
-            membership_ids = [str(r.membership_id) for r in sliced]
-            user_rows = (
-                await self._session.execute(
-                    select(SeasonStats.membership_id, SeasonStats.season_id)
-                    .where(SeasonStats.season_id == season_id)
-                )
-            ).all()
             return [
                 {
                     "membership_id": str(r.membership_id),
-                    "user_id": None,
+                    "user_id": int(r.user_id),
                     "metric_value": int(r.metric_value or 0),
                 }
                 for r in sliced
-            ]
+        ]
         return []
 
 

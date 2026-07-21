@@ -6,4 +6,5 @@ from . import (  # noqa: F401
     integrity_check_bonus_transactions,
     process_checkin,
     process_penalty,
+    process_payment,
 )

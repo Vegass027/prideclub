@@ -72,3 +72,7 @@ class PenaltyConfig:
     # Сгорание бонусных поинтов.
     BONUS_POINTS_EXPIRY_DAYS = 90
     BONUS_POINTS_EXPIRY_NOTIFY_DAYS = 7
+
+    # Антифрод-эвристика: если один catcher ловит один и тот же violator
+    # N+ раз за сезон И violator ни разу не поймал catcher'а — флаг.
+    SUSPICIOUS_ASYMMETRY_THRESHOLD = 3

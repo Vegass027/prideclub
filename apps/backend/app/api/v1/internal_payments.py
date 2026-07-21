@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import current_user_internal
+from app.core.logging import get_logger
 from app.db.session import get_session
-from app.services.payment_service import PaymentService
+from app.repositories.habit_repository import HabitRepository
+from app.services.celery_producer import send_task
 
 
 router = APIRouter()
@@ -15,45 +17,62 @@ router = APIRouter()
 class PaymentConfirmRequest(BaseModel):
     charge_id: str
     user_id: int
-    habit_id: str
-    amount_kopecks: int
+    chat_id: int
+    amount_kopecks: int = Field(gt=0)
     kind: str  # subscription | deposit_topup
     months: int = 1
 
 
 class PaymentConfirmResponse(BaseModel):
     ok: bool
-    transaction_id: str | None = None
+    task_id: str | None = None
     code: str | None = None
 
 
 @router.post("/payments/confirm", response_model=PaymentConfirmResponse)
-async def confirm_payment(
+async def enqueue_payment_confirm(
     payload: PaymentConfirmRequest,
     session: AsyncSession = Depends(get_session),
     _: str = Depends(current_user_internal),
 ) -> PaymentConfirmResponse:
-    service = PaymentService(session)
-    try:
-        if payload.kind == "subscription":
-            tx = await service.confirm_subscription(
-                charge_id=payload.charge_id,
-                user_id=payload.user_id,
-                habit_id=payload.habit_id,
-                amount_kopecks=payload.amount_kopecks,
-                months=payload.months,
-            )
-        elif payload.kind == "deposit_topup":
-            tx = await service.confirm_deposit_topup(
-                charge_id=payload.charge_id,
-                user_id=payload.user_id,
-                habit_id=payload.habit_id,
-                amount_kopecks=payload.amount_kopecks,
-            )
-        else:
-            return PaymentConfirmResponse(ok=False, code="unknown_kind")
-        await session.commit()
-        return PaymentConfirmResponse(ok=True, transaction_id=str(tx.id))
-    except Exception as exc:  # noqa: BLE001
-        await session.rollback()
-        return PaymentConfirmResponse(ok=False, code=f"internal:{type(exc).__name__}")
+    """Internal endpoint: Telegram Payments webhook → backend → Celery worker.
+
+    НИКАКОГО списания/зачисления здесь. Идемпотентность обеспечивается в worker-таске
+    `process_payment.run` через `Transaction.idempotency_key = charge_id` — это
+    UNIQUE-индекс на таблице transactions, поэтому дубль charge_id не пройдёт.
+
+    Возвращаем task_id — бот может использовать для трекинга результата через
+    `celery_result_backend`.
+
+    Auth: X-Service-Token (уже проверен middleware).
+    """
+    log = get_logger("payment_enqueue")
+
+    habit = await HabitRepository(session).get_by_chat_id(payload.chat_id)
+    if habit is None:
+        return PaymentConfirmResponse(ok=False, code="habit_not_found")
+
+    task_id = send_task(
+        "payment",
+        {
+            "charge_id": payload.charge_id,
+            "user_id": payload.user_id,
+            "habit_id": str(habit.id),
+            "amount_kopecks": payload.amount_kopecks,
+            "kind": payload.kind,
+            "months": payload.months,
+        },
+    )
+
+    log.info(
+        "payment_enqueued",
+        extra={
+            "task_id": task_id,
+            "charge_id": payload.charge_id,
+            "user_id": payload.user_id,
+            "habit_id": str(habit.id),
+            "kind": payload.kind,
+            "amount_kopecks": payload.amount_kopecks,
+        },
+    )
+    return PaymentConfirmResponse(ok=True, task_id=task_id)

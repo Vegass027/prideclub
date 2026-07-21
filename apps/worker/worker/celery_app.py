@@ -8,6 +8,27 @@ from worker.config import get_settings
 
 _settings = get_settings()
 
+
+def _init_observability() -> None:
+    """Sentry init для worker. No-op если SENTRY_DSN пуст."""
+    if not _settings.sentry_dsn:
+        return
+    import sentry_sdk
+
+    from sentry_sdk.integrations.celery import CeleryIntegration
+
+    sentry_sdk.init(
+        dsn=_settings.sentry_dsn,
+        environment=_settings.environment if hasattr(_settings, "environment") else "production",
+        integrations=[CeleryIntegration()],
+        traces_sample_rate=0.1,
+        server_name="habit-club-worker",
+    )
+
+
+_init_observability()
+
+
 celery_app = Celery(
     "habit_club",
     broker=_settings.celery_broker_url,
@@ -16,6 +37,7 @@ celery_app = Celery(
         "worker.tasks.process_checkin",
         "worker.tasks.close_catch_window",
         "worker.tasks.process_penalty",
+        "worker.tasks.process_payment",
         "worker.tasks.apply_catch_bonus",
         "worker.tasks.expire_bonus_points",
         "worker.tasks.close_season",
@@ -37,7 +59,9 @@ celery_app.conf.update(
 celery_app.conf.beat_schedule = {
     "close_catch_window_hourly": {
         "task": "worker.tasks.close_catch_window.run_for_active_habits",
-        "schedule": crontab(minute=0),
+        # Каждый час в :05 — после типичного окончания окон чек-ина.
+        # Сама таска skip'ает клубы с ещё-открытым окном (защита от раннего штрафа).
+        "schedule": crontab(minute=5),
     },
     "expire_bonus_points_daily": {
         "task": "worker.tasks.expire_bonus_points.run",

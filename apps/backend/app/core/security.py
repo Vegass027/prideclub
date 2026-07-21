@@ -1,13 +1,38 @@
 from __future__ import annotations
 
-from security import (
+import os
+import sys
+
+# Подключаем монорепо-пакет `packages/shared` без необходимости pip-install.
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+)
+_SHARED_PARENT = os.path.join(_REPO_ROOT, "packages")
+_SHARED = os.path.join(_REPO_ROOT, "packages", "shared")
+for _p in (_SHARED_PARENT, _SHARED):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from security import (  # noqa: E402  (sys.path настраивается выше)
     InitDataExpiredError as _InitDataExpiredError,
+)
+from security import (
     InvalidInitDataError as _InvalidInitDataError,
+)
+from security import (
     InvalidServiceTokenError as _InvalidServiceTokenError,
+)
+from security import (
     ServiceTokenExpiredError as _ServiceTokenExpiredError,
+)
+from security import (
     TelegramUser,
     generate_service_token,
+)
+from security import (
     validate_init_data as _validate_init_data,
+)
+from security import (
     validate_service_token as _validate_service_token,
 )
 

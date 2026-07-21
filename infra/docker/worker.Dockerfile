@@ -28,4 +28,4 @@ ENV PYTHONPATH=/app:/app/apps/backend:/app/apps/worker
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app
 USER app
 
-CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=INFO", "--pool=solo", "--without-mingle", "--without-gossip", "--without-heartbeat"]

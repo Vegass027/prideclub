@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
-    MembershipStatus,
     PenaltyConfig,
-    PenaltyReason,
     TransactionType,
 )
 from app.core.logging import get_logger
@@ -34,12 +32,14 @@ class BonusService:
         penalty_lookup=None,
         user_lookup=None,
         rule_lookup=None,
+        suspicious_blocker=None,
     ) -> None:
         """Конструктор поддерживает опциональные lookup-коллбэки для тестов:
 
         - penalty_lookup(penalty_id) -> Penalty | None
         - user_lookup(user_id) -> User | None
         - rule_lookup(event_type, threshold) -> BonusRule | None
+        - suspicious_blocker(catcher_id, violator_id) -> bool — True = бонус НЕ начислять
 
         По умолчанию используются SELECT через session.execute.
         """
@@ -48,6 +48,7 @@ class BonusService:
         self._penalty_lookup = penalty_lookup
         self._user_lookup = user_lookup
         self._rule_lookup = rule_lookup
+        self._suspicious_blocker = suspicious_blocker
         self._logger = get_logger("bonus_service")
 
     async def apply_catch_bonus(
@@ -70,6 +71,27 @@ class BonusService:
         if penalty_obj.catcher_membership_id is None:
             return 0  # suspicious_pair → без бонуса.
 
+        # Доп. проверка: даже если penalty.catcher_membership_id выставлен,
+        # бонус не начислится, если пара сейчас в flagged/banned.
+        if self._suspicious_blocker is not None:
+            try:
+                if await self._suspicious_blocker(
+                    penalty_obj.catcher_membership_id, penalty_obj.membership_id
+                ):
+                    self._logger.info(
+                        "catch_bonus_blocked_by_suspicious_pair",
+                        extra={
+                            "catcher_membership_id": penalty_obj.catcher_membership_id,
+                            "violator_membership_id": penalty_obj.membership_id,
+                        },
+                    )
+                    return 0
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning(
+                    "suspicious_blocker_failed",
+                    extra={"err": str(exc)},
+                )
+
         catcher_m = await self._membership_repo.get(penalty_obj.catcher_membership_id)
         if catcher_m is None:
             return 0
@@ -84,7 +106,21 @@ class BonusService:
         if user_obj is None:
             return 0
         user_obj.bonus_points += PenaltyConfig.CATCHER_BONUS_POINTS
-        user_obj.bonus_points_updated_at = datetime.now(tz=timezone.utc)
+        user_obj.bonus_points_updated_at = datetime.now(tz=UTC)
+
+        # Финансовый инвариант (docs/06 §6): penalty.bonus_applied=true → matching
+        # transactions row с type=bonus_catch. Без этой записи integrity_check
+        # будет ругаться каждый день.
+        if self._session is not None:
+            bonus_transaction = Transaction(
+                id=str(uuid4()),
+                user_id=user_obj.id,
+                type=TransactionType.BONUS_CATCH.value,
+                amount=0,
+                related_penalty_id=penalty_obj.id,
+                related_membership_id=penalty_obj.catcher_membership_id,
+            )
+            self._session.add(bonus_transaction)
 
         rule = await self._find_rule("catch", threshold=5)
         if rule is not None and user_obj.bonus_points % rule.threshold == 0:

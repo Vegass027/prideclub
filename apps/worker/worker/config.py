@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     service_secret: str = ""
     log_level: str = "INFO"
     sentry_dsn: str = ""
+    environment: str = "production"
 
 
 @lru_cache(maxsize=1)
