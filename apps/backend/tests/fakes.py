@@ -34,6 +34,7 @@ class FakeUserRepo:
 class FakeHabitRepo:
     def __init__(self) -> None:
         self._store: dict[str, Habit] = {}
+        self._member_counts: dict[str, int] = {}
 
     def add(self, habit: Habit) -> Habit:
         self._store[str(habit.id)] = habit
@@ -53,6 +54,12 @@ class FakeHabitRepo:
             h for h in self._store.values()
             if h.is_active and h.archived_at is None
         ]
+
+    async def iter_active(self):
+        """Async generator — зеркалит прод-репозиторий для тестов стриминга."""
+        for h in self._store.values():
+            if h.is_active and h.archived_at is None:
+                yield h
 
     async def list_including_archived(self) -> list[Habit]:
         return list(self._store.values())
@@ -76,8 +83,18 @@ class FakeHabitRepo:
             return
         habit.prize_pool += amount
 
+    async def lock_for_update(self, habit_id: str) -> Habit | None:
+        """Зеркалит прод-репозиторий: SELECT ... FOR UPDATE на habit.
+        В фейке блокировка не нужна — возвращаем объект как есть."""
+        return self._store.get(habit_id)
+
     async def count_active_members(self, habit_id: str) -> int:
-        return 0
+        """В фейке — статический счётчик, который тест может обновлять
+        через `set_active_member_count(habit_id, n)`. В проде — COUNT из БД."""
+        return self._member_counts.get(habit_id, 0)
+
+    def set_active_member_count(self, habit_id: str, n: int) -> None:
+        self._member_counts[habit_id] = n
 
     async def create(self, *, fields: dict) -> Habit:
         from datetime import time as _time
@@ -170,6 +187,24 @@ class FakeMembershipRepo:
         if m is None:
             raise KeyError(membership_id)
         return m
+
+    async def create(self, user_id: int, habit_id: str) -> Membership:
+        """Зеркалит прод-сигнатуру: id генерируется в репо, не в сервисе."""
+        m = Membership(
+            id=str(uuid4()),
+            user_id=user_id,
+            habit_id=habit_id,
+            status=MembershipStatus.ACTIVE,
+            deposit_balance=0,
+        )
+        self._store[str(m.id)] = m
+        return m
+
+    async def iter_for_habit(self, habit_id: str):
+        """Async generator — зеркалит прод-репозиторий для тестов стриминга."""
+        for m in self._store.values():
+            if str(m.habit_id) == habit_id:
+                yield m
 
 
 class FakeCheckinRepo:

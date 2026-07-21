@@ -16,8 +16,30 @@ from app.models.season import Season, SeasonStats
 from app.models.transaction import Transaction
 
 
+# Basis points: 10000 = 100.00%. Допускает доли процента до 0.01%.
+# Все money-арифметики с процентами — только int, никакого float (см. AGENTS.md).
+BASIS_POINTS_TOTAL = 10_000
+
+
+def _to_basis_points(percentage_bp: int) -> int:
+    """Контракт входа: percentage_bp — int в диапазоне [0, 10_000] (0%..100%)."""
+    if not 0 <= percentage_bp <= BASIS_POINTS_TOTAL:
+        raise ValueError(
+            f"percentage_bp={percentage_bp} вне [0, {BASIS_POINTS_TOTAL}]"
+        )
+    return percentage_bp
+
+
 class SeasonService:
-    """Сезоны и распределение призового фонда (см. docs/06-data-model §7)."""
+    """Сезоны и распределение призового фонда (см. docs/06-data-model §7).
+
+    Контракт правил (`prize_rules_snapshot`):
+      `{"rules": [{"metric": str, "rank_from": int, "rank_to": int,
+                   "percentage_bp": int}, ...]}`
+    где `percentage_bp` — basis points (10000 = 100%, 3333 = 33.33%).
+    Все арифметики — целочисленные, чтобы распределение было бит-в-бит
+    воспроизводимым и не зависело от float-представления.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -39,10 +61,20 @@ class SeasonService:
         return season
 
     async def close_season(self, *, season_id: str) -> dict:
-        season = await self._session.execute(
-            select(Season).where(Season.id == season_id)
-        )
-        season_obj = season.scalar_one()
+        """Закрытие сезона и распределение призового фонда (атомарно).
+
+        Идемпотентность: SELECT ... FOR UPDATE на строке Season.
+        Конкурентный вызов (cron + ручной retry, или два worker'а одновременно)
+        сериализуется на этой блокировке — второй worker ждёт, читает
+        уже CLOSED, выходит с distributed=0.
+
+        Без FOR UPDATE оба worker'а прочитали бы ACTIVE, оба создали бы
+        Transaction'ы с PRIZE, итого участники получили бы приз дважды
+        → реальные потери денег.
+        """
+        season_obj = await self._session.get(Season, season_id, with_for_update=True)
+        if season_obj is None:
+            raise ValueError(f"Season {season_id} not found")
         if season_obj.status != SeasonStatus.ACTIVE:
             return {"distributed": 0}
 
@@ -54,7 +86,7 @@ class SeasonService:
             metric = rule["metric"]
             rank_from = rule["rank_from"]
             rank_to = rule["rank_to"]
-            percentage = float(rule["percentage"])
+            percentage_bp = _to_basis_points(int(rule["percentage_bp"]))
 
             ranked = await self._rank_by_metric(
                 season_id, metric, rank_from=rank_from, rank_to=rank_to
@@ -62,7 +94,11 @@ class SeasonService:
             if not ranked:
                 continue
 
-            per_member_pool = int(season_obj.prize_pool * percentage / 100)
+            # Целочисленная арифметика: prize_pool * percent_bp // 10_000.
+            # Никакого float — точно воспроизводимо.
+            per_member_pool = (
+                season_obj.prize_pool * percentage_bp // BASIS_POINTS_TOTAL
+            )
             share = per_member_pool // len(ranked)
 
             for entry in ranked:
@@ -130,21 +166,31 @@ class SeasonService:
 
 
 def validate_prize_rules(rules: Iterable[dict]) -> None:
-    """Валидирует правила распределения призового фонда.
+    """Валидирует правила распределения призового фонда (целочисленно).
 
-    Контракт (docs/06-data-model.md §7):
-    - Сумма ВСЕХ percentage по всем metrics = 100% (распределение фонда).
-    - Метрика — это просто тег группировки ('streak', 'catches', и т.п.).
+    Контракт:
+    - Каждое правило содержит `percentage_bp: int` в `[0, 10_000]`.
+    - Сумма `percentage_bp` по всем правилам = ровно `10_000` (100%).
     - rank_from >= 1, rank_from <= rank_to, без перекрытий внутри одной метрики.
+    - Метрика — просто тег группировки ('streak', 'catches', и т.п.).
     """
     from app.core.exceptions import InvalidPrizeRulesError
 
     seen_ranges: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    total_pct = 0.0
+    total_bp = 0
     for rule in rules:
         rf, rt = rule["rank_from"], rule["rank_to"]
         if rf < 1 or rf > rt:
             raise InvalidPrizeRulesError(f"invalid range {rf}-{rt}")
+
+        # percentage_bp — int в basis points; не пускаем float/Decimal в арифметику.
+        try:
+            bp = _to_basis_points(int(rule["percentage_bp"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidPrizeRulesError(
+                f"percentage_bp отсутствует или не int: {rule!r}"
+            ) from exc
+
         metric = rule["metric"]
         for prev_rf, prev_rt in seen_ranges[metric]:
             if rf <= prev_rt and prev_rf <= rt:
@@ -152,9 +198,9 @@ def validate_prize_rules(rules: Iterable[dict]) -> None:
                     f"overlapping ranges in '{metric}': [{prev_rf},{prev_rt}] and [{rf},{rt}]"
                 )
         seen_ranges[metric].append((rf, rt))
-        total_pct += float(rule["percentage"])
+        total_bp += bp
 
-    if abs(total_pct - 100.0) > 0.01:
+    if total_bp != BASIS_POINTS_TOTAL:
         raise InvalidPrizeRulesError(
-            f"total percentage = {total_pct}, expected 100"
+            f"total percentage_bp = {total_bp}, expected {BASIS_POINTS_TOTAL} (100%)"
         )

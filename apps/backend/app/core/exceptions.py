@@ -115,3 +115,8 @@ class HabitInactiveError(DomainError):
 class HabitArchivedError(DomainError):
     status_code = 404
     code = "habit_archived"
+
+
+class HabitMemberLimitReachedError(DomainError):
+    status_code = 409
+    code = "habit_member_limit_reached"

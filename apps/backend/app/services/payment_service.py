@@ -12,16 +12,32 @@ from app.core.constants import MembershipStatus, TransactionType
 from app.core.logging import get_logger
 from app.models.membership import Membership
 from app.models.transaction import Transaction
+from app.repositories.membership_repository import MembershipRepository
 
 
 class PaymentService:
     """Идемпотентная обработка платежей Telegram Payments.
 
     idempotency_key = telegram_payment_charge_id.
+
+    Membership-строка берётся под SELECT ... FOR UPDATE (через
+    MembershipRepository.lock_for_update_by_user_habit), чтобы защитить
+    `deposit_balance +=` и `subscription_until` от гонки между параллельными
+    webhook'ами (например subscription_renewal + deposit_topup, пришедшие
+    почти одновременно).
+
+    Если membership ещё не существует, создаём её в той же транзакции и
+    повторно лочим (новой select FOR UPDATE видит только-что вставленную
+    строку через identity map).
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        membership_repo: MembershipRepository | None = None,
+    ) -> None:
         self._session = session
+        self._membership_repo = membership_repo or MembershipRepository(session)
         self._logger = get_logger("payment_service")
 
     async def confirm_subscription(
@@ -81,16 +97,14 @@ class PaymentService:
             )
             return existing_tx
 
-        # 2. Достаём membership (создаём если нет — пользователь оплатил подписку и присоединился).
-        m = (
-            await self._session.execute(
-                select(Membership).where(
-                    Membership.user_id == user_id,
-                    Membership.habit_id == habit_id,
-                )
-            )
-        ).scalar_one_or_none()
+        # 2. Достаём membership под FOR UPDATE. Защита от гонки webhook'ов.
+        m = await self._membership_repo.lock_for_update_by_user_habit(
+            user_id, habit_id
+        )
         if m is None:
+            # Первый платёж этого пользователя — создаём membership, флашим,
+            # затем re-lock для гарантии атомарности относительно других
+            # writer'ов, которые могут попытаться сделать то же самое.
             m = Membership(
                 user_id=user_id,
                 habit_id=habit_id,
@@ -99,8 +113,19 @@ class PaymentService:
             )
             self._session.add(m)
             await self._session.flush()
+            # Identity map: повторный lock_for_update вернёт ту же ORM-сущность,
+            # но Postgres SELECT FOR UPDATE всё равно наложит row-lock (или
+            # обнаружит, что строка уже залочена нашей же транзакцией).
+            m = await self._membership_repo.lock_for_update_by_user_habit(
+                user_id, habit_id
+            )
+            # После нашего собственного flush m не может быть None — мы только
+            # что его создали. Защитный assert на случай гонки двух процессов.
+            assert m is not None, "membership just created must be visible"
 
-        # 3. Применяем эффект.
+        # 3. Применяем эффект. m.deposit_balance += и subscription_until теперь
+        # безопасны — строка под FOR UPDATE, никакой параллельный writer не
+        # прочтёт устаревшее значение.
         tx_type = (
             TransactionType.SUBSCRIPTION.value
             if kind == "subscription"
@@ -147,6 +172,7 @@ class PaymentService:
                 "habit_id": habit_id,
                 "kind": kind,
                 "amount_kopecks": amount_kopecks,
+                "deposit_balance_after": m.deposit_balance,
             },
         )
         return tx

@@ -44,7 +44,7 @@ async def test_close_season_distributes_prize_by_snapshot_rules(worker_db):
             prize_pool=1000,
             prize_rules_snapshot={
                 "rules": [
-                    {"metric": "streak", "rank_from": 1, "rank_to": 2, "percentage": 100},
+                    {"metric": "streak", "rank_from": 1, "rank_to": 2, "percentage_bp": 10_000},
                 ]
             },
         )
@@ -115,7 +115,7 @@ async def test_close_season_skips_active_seasons(worker_db):
             prize_pool=500,
             prize_rules_snapshot={
                 "rules": [
-                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage": 100},
+                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage_bp": 10_000},
                 ]
             },
         )
@@ -165,7 +165,7 @@ async def test_close_season_skips_already_closed(worker_db):
             status="closed",
             prize_rules_snapshot={
                 "rules": [
-                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage": 100},
+                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage_bp": 10_000},
                 ]
             },
         )
@@ -215,7 +215,7 @@ async def test_close_season_validates_rules_sum_100_percent(worker_db):
             # 50% вместо 100% — невалидный snapshot
             prize_rules_snapshot={
                 "rules": [
-                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage": 50},
+                    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage_bp": 5000},
                 ]
             },
         )

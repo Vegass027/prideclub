@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.admin import api_router as admin_api_router
 from app.api.v1 import (
@@ -27,20 +26,52 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import install_middlewares
 from app.core.observability import init_sentry
 from app.db.redis import close_redis, get_redis
-from app.db.session import get_session
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Lifespan: pre-warm Redis на старте, закрыть соединение на shutdown.
+
+    `@app.on_event` deprecated в FastAPI 0.110+ — заменяем на единый
+    lifespan-контекст. Преимущества:
+    - `yield` отделяет startup от shutdown — нельзя перепутать порядок.
+    - Один declaration для обеих фаз — нет риска забыть про одну.
+    - TestClient корректно дёргает lifespan при `with TestClient(app)`.
+    """
+    logger = get_logger("backend.lifespan")
+
+    # Startup: инициализируем Redis-пул сразу, чтобы первый запрос не
+    # упёрся в холодный connect (50-200ms). Если Redis недоступен — логируем,
+    # но не валим старт приложения: эндпоинты сами решат, как реагировать.
+    try:
+        redis = get_redis()
+        await redis.ping()
+        logger.info("backend.startup.redis_ready")
+    except Exception as exc:  # noqa: BLE001 — старт должен быть устойчивым
+        logger.warning(
+            "backend.startup.redis_ping_failed",
+            extra={"error": str(exc)},
+        )
+
+    logger.info("backend.startup")
+    try:
+        yield
+    finally:
+        await close_redis()
+        logger.info("backend.shutdown")
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
     init_sentry("backend")
-    logger = get_logger("backend.main")
 
     app = FastAPI(
         title="Habit Club API",
         version="0.1.0",
         docs_url="/docs" if settings.environment != "production" else None,
         redoc_url=None,
+        lifespan=_lifespan,
     )
 
     install_middlewares(app)
@@ -79,11 +110,6 @@ def create_app() -> FastAPI:
         admin_suspicious_pairs.router, prefix="/api/v1", tags=["admin"]
     )
     app.include_router(admin_api_router, prefix="/admin/v1", tags=["admin"])
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        await close_redis()
-        logger.info("backend.shutdown")
 
     return app
 

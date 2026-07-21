@@ -16,6 +16,11 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
 
     Защита от раннего срабатывания: если окно чек-ина в TZ клуба ещё не закрылось,
     пропускаем (сегодня ещё не пропущено — рано штрафовать).
+
+    Стриминг: memberships подгружаются через `iter_for_habit` (server-side
+    cursor, asyncpg). Память O(1) на итерацию, штрафы применяются к каждому
+    member'у по мере получения. Идемпотентность — на стороне PenaltyService
+    (INSERT ON CONFLICT DO NOTHING по (membership_id, date)).
     """
     if habit.is_within_checkin_window(now_utc):
         return {
@@ -37,9 +42,8 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
         checkin_repo=checkin_repo,
     )
 
-    members = await membership_repo.list_for_habit(str(habit.id))
     penalized = 0
-    for membership in members:
+    async for membership in membership_repo.iter_for_habit(str(habit.id)):
         if membership.status != MembershipStatus.ACTIVE:
             continue
         existing = await checkin_repo.get_for_date(str(membership.id), club_date)
@@ -61,9 +65,10 @@ async def _process() -> dict:
     summary: list[dict] = []
     async with async_session_factory() as session:  # type: ignore[name-defined]
         habit_repo = HabitRepository(session)
-        habits = await habit_repo.list_active()
         now_utc = datetime.now(tz=timezone.utc)
-        for habit in habits:
+        # Стриминг клубов через `iter_active` — ORM тащит строки по мере
+        # обработки, не загружая 100+ клубов целиком в память.
+        async for habit in habit_repo.iter_active():
             result = await _close_for_habit(session, habit, now_utc)
             summary.append(result)
         await session.commit()
