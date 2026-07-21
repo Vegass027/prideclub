@@ -50,6 +50,36 @@ async def _create_club(session: AsyncSession) -> Habit:
     return habit
 
 
+async def _create_reading_club(session: AsyncSession) -> Habit:
+    existing = (await session.execute(
+        select(Habit).where(Habit.title == "Чтение 30 минут в день")
+    )).scalar_one_or_none()
+    if existing:
+        return existing
+
+    habit = Habit(
+        title="Чтение 30 минут в день",
+        description=(
+            "Каждый день читай книгу / статью / документ суммарно 30 минут. "
+            "Присылай фото открытой книги со страницей или скриншот таймера. "
+            "Штраф 150 ₽ за пропуск."
+        ),
+        chat_id=-1009876543210,
+        prize_pool=5000,
+        penalty_amount=15000,
+        price_month=79000,
+        timezone="Europe/Moscow",
+        checkin_window_start=time(18, 0),
+        checkin_window_end=time(23, 59),
+        proof_type=ProofType.PHOTO,
+        is_active=True,
+    )
+    session.add(habit)
+    await session.commit()
+    await session.refresh(habit)
+    return habit
+
+
 async def _create_members(session: AsyncSession, habit_id: uuid.UUID) -> list[User]:
     user_repo = UserRepository(session)
     members: list[User] = []
@@ -67,11 +97,15 @@ async def _create_members(session: AsyncSession, habit_id: uuid.UUID) -> list[Us
 
 async def main() -> None:
     async with async_session_factory() as session:
-        habit = await _create_club(session)
-        await _create_members(session, habit.id)
-        print(f"seed: habit={habit.title} ({habit.id}) created")
-        print(f"      prize_pool={habit.prize_pool / 100:.2f}₽")
-        print(f"      penalty={habit.penalty_amount / 100:.2f}₽/пропуск")
+        plank = await _create_club(session)
+        reading = await _create_reading_club(session)
+        await _create_members(session, plank.id)
+        print(f"seed: '{plank.title}' ({plank.id}) created")
+        print(f"      prize_pool={plank.prize_pool / 100:.2f}₽")
+        print(f"      penalty={plank.penalty_amount / 100:.2f}₽/пропуск")
+        print(f"seed: '{reading.title}' ({reading.id}) created")
+        print(f"      prize_pool={reading.prize_pool / 100:.2f}₽")
+        print(f"      penalty={reading.penalty_amount / 100:.2f}₽/пропуск")
 
     # Touch Redis
     try:
