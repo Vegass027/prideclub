@@ -26,6 +26,7 @@
 
 ### Уровень 6 — Старт разработки
 - [08-readme.md](08-readme.md) — быстрый старт, команды, Definition of Done
+- [09-prod-readiness.md](09-prod-readiness.md) — статус бэкенда, чеклист до прода, тех-долг
 - [`/README.md`](../README.md) — главный README в корне репозитория
 
 ### Архив
