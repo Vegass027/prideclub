@@ -7,7 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user, current_user_internal
+from app.api.v1.users import current_user_db, current_user_internal
 from app.core.exceptions import PenaltyAlreadyProcessedError
 from app.core.logging import get_logger
 from app.core.security import TelegramUser
@@ -53,7 +53,7 @@ class CatchResponse(BaseModel):
 @router.get("/habits/{habit_id}/members", response_model=MembersResponse)
 async def list_members(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
 ) -> MembersResponse:
     habit_repo = HabitRepository(session)
@@ -108,7 +108,7 @@ async def _user_names(session: AsyncSession, user_ids: list[int]) -> dict[int, s
 async def catch_violator(
     habit_id: str,
     payload: CatchRequest,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> CatchResponse:

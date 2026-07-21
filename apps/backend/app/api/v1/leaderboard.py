@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user
+from app.api.v1.users import current_user_db
 from app.core.security import TelegramUser
 from app.db.session import get_session
 from app.models.checkin import Checkin
@@ -155,7 +155,7 @@ async def _shame_leaderboard(
 @router.get("/habits/{habit_id}/leaderboard/streak", response_model=LeaderboardResponse)
 async def streak(
     habit_id: str,
-    _: TelegramUser = Depends(current_user),
+    _: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
 ) -> LeaderboardResponse:
     rows = await _streak_leaderboard(
@@ -167,7 +167,7 @@ async def streak(
 @router.get("/habits/{habit_id}/leaderboard/catches", response_model=LeaderboardResponse)
 async def catches(
     habit_id: str,
-    _: TelegramUser = Depends(current_user),
+    _: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
 ) -> LeaderboardResponse:
     rows = await _catch_leaderboard(
@@ -179,7 +179,7 @@ async def catches(
 @router.get("/habits/{habit_id}/leaderboard/shame", response_model=LeaderboardResponse)
 async def shame(
     habit_id: str,
-    _: TelegramUser = Depends(current_user),
+    _: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
 ) -> LeaderboardResponse:
     rows = await _shame_leaderboard(

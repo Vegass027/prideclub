@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user
+from app.api.v1.users import current_user_db
 from app.core.security import TelegramUser
 from app.db.session import get_session
 from app.models.membership import Membership
@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.get("/balance")
 async def balance(
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     memberships = (await session.execute(

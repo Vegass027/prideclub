@@ -6,7 +6,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user
+from app.api.v1.users import current_user, current_user_db
 from app.core.config import get_settings
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
@@ -63,7 +63,7 @@ async def get_membership_service(
 @router.get("/marketplace", response_model=MarketplaceResponse)
 async def marketplace(
     session: AsyncSession = Depends(get_session),
-    _: TelegramUser = Depends(current_user),
+    _: TelegramUser = Depends(current_user_db),
 ) -> MarketplaceResponse:
     repo = HabitRepository(session)
     rows = await repo.list_with_member_counts()
@@ -92,7 +92,7 @@ async def marketplace(
 async def today(
     habit_id: str,
     service: CheckinService = Depends(get_checkin_service),
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
 ) -> TodayResponse:
     habit, m, status, streak = await service.get_today_status(
         user_id=user.id, habit_id=habit_id, now_utc=datetime.now(tz=timezone.utc)

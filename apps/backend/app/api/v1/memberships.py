@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user
+from app.api.v1.users import current_user_db
 from app.core.security import TelegramUser
 from app.db.session import get_session
 from app.repositories.habit_repository import HabitRepository
@@ -28,7 +28,7 @@ async def get_membership_service(
 @router.post("/habits/{habit_id}/join")
 async def join(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
     service: MembershipService = Depends(get_membership_service),
 ) -> MembershipOut:
     m = await service.join(user_id=user.id, habit_id=habit_id)
@@ -38,7 +38,7 @@ async def join(
 @router.post("/habits/{habit_id}/leave")
 async def leave(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUser = Depends(current_user_db),
     service: MembershipService = Depends(get_membership_service),
 ) -> MembershipOut:
     m = await service.leave(user_id=user.id, habit_id=habit_id)
