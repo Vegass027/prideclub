@@ -1,46 +1,174 @@
-import { useParams } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMembers } from "@/shared/hooks";
-import { membersApi } from "@/shared/api";
-import { MemberCard } from "@/widgets/MemberCard";
-import { hapticImpact } from "@/shared/telegram/tma";
 import { useState } from "react";
+import { useParams } from "react-router-dom";
+import { useCatch, useMembers } from "@/shared/hooks";
+import { EmptyState } from "@/shared/ui/EmptyState";
+import { PageHeader } from "@/shared/ui/PageHeader";
+import { Skeleton } from "@/shared/ui/Skeleton";
+import { StatusBadge } from "@/shared/ui/StatusBadge";
+import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
+import type { CatchCode, CatchResponse, MemberRow } from "@/shared/types";
+
+const CATCH_ERROR_LABELS: Record<string, string> = {
+  catcher_is_violator: "Нельзя поймать себя",
+  violator_has_checkin: "Участник уже отметился",
+  penalty_already_processed: "Штраф уже начислен",
+  deposit_exhausted: "Депозит нарушителя пуст",
+  membership_not_active: "Членство не активно",
+  habit_not_found: "Клуб не найден",
+  rate_limited: "Слишком много попыток — подожди",
+};
 
 export function MembersPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const { data, isLoading, isError, error } = useMembers(habitId);
-  const queryClient = useQueryClient();
-  const [busy, setBusy] = useState<string | null>(null);
+  const { data, isLoading, isError, error, refetch } = useMembers(habitId);
+  const catchMutation = useCatch(habitId);
+  const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const catchMutation = useMutation({
-    mutationFn: (membershipId: string) => membersApi.catch(habitId!, membershipId),
-    onSuccess: () => {
-      hapticImpact("medium");
-      queryClient.invalidateQueries({ queryKey: ["members", habitId] });
-    },
-  });
+  const handleCatch = (m: MemberRow) => {
+    if (!m.can_catch) return;
+    hapticImpact("heavy");
+    catchMutation.mutate(m.membership_id, {
+      onSuccess: (res: CatchResponse) => {
+        if (res.ok) {
+          hapticNotify("success");
+          setCatchMessage({
+            ok: true,
+            text: `+1 поинт. Штраф списан в фонд клуба.`,
+          });
+        } else {
+          hapticNotify("warning");
+          setCatchMessage({
+            ok: false,
+            text: CATCH_ERROR_LABELS[res.code as CatchCode] ?? "Не удалось поймать",
+          });
+        }
+        refetch();
+        setTimeout(() => setCatchMessage(null), 3000);
+      },
+      onError: () => {
+        hapticNotify("error");
+        setCatchMessage({ ok: false, text: "Ошибка сети" });
+      },
+    });
+  };
 
-  if (isLoading) return <div className="mx-auto max-w-md px-4 py-6 text-sm text-muted">Загрузка...</div>;
-  if (isError) return <div className="mx-auto max-w-md px-4 py-6 text-sm text-danger">{String(error)}</div>;
-  if (!data) return null;
+  if (isLoading) {
+    return (
+      <main className="mx-auto max-w-md px-4 py-6">
+        <PageHeader title="Участники" back />
+        <Skeleton className="h-16 w-full" rows={4} />
+      </main>
+    );
+  }
+
+  if (isError) {
+    return (
+      <main className="mx-auto max-w-md px-4 py-6">
+        <PageHeader title="Участники" back />
+        <EmptyState
+          icon="⚠️"
+          title="Не удалось загрузить список"
+          description={String(error)}
+        />
+      </main>
+    );
+  }
+
+  const items = data?.items ?? [];
+  const violators = items.filter((m) => m.status === "missed" && m.can_catch);
+  const others = items.filter((m) => !violators.includes(m));
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <h1 className="mb-4 text-2xl font-bold">Участники</h1>
-      <ul className="flex flex-col gap-2">
-        {data.items.map((m) => (
-          <li key={m.membership_id}>
-            <MemberCard
-              member={m}
-              busy={busy === m.membership_id}
-              onCatch={(id) => {
-                setBusy(id);
-                catchMutation.mutate(id, { onSettled: () => setBusy(null) });
-              }}
-            />
-          </li>
-        ))}
-      </ul>
+      <PageHeader title="Участники" back subtitle={`${items.length} в клубе`} />
+
+      {catchMessage && (
+        <div
+          role="alert"
+          className={`mb-3 rounded-card border p-3 text-sm ${
+            catchMessage.ok
+              ? "border-success/30 bg-success/10 text-success"
+              : "border-warning/30 bg-warning/10 text-warning"
+          }`}
+        >
+          {catchMessage.text}
+        </div>
+      )}
+
+      {violators.length > 0 && (
+        <section className="mb-4">
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-danger">
+            ⚠️ Можно поймать ({violators.length})
+          </h2>
+          <ul className="space-y-2">
+            {violators.map((m) => (
+              <li key={m.membership_id}>
+                <MemberRowItem
+                  row={m}
+                  busy={catchMutation.isPending && catchMutation.variables === m.membership_id}
+                  onCatch={() => handleCatch(m)}
+                />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section>
+        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+          Все участники ({others.length})
+        </h2>
+        {others.length === 0 ? (
+          <EmptyState icon="👥" title="Тут пока никого кроме тебя" />
+        ) : (
+          <ul className="space-y-2">
+            {others.map((m) => (
+              <li key={m.membership_id}>
+                <MemberRowItem row={m} onCatch={() => handleCatch(m)} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
+  );
+}
+
+interface MemberRowItemProps {
+  row: MemberRow;
+  busy?: boolean;
+  onCatch?: () => void;
+}
+
+function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
+  return (
+    <article className="flex items-center gap-3 rounded-card border border-white/5 bg-surface p-3">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-base font-semibold text-primary">
+        {row.first_name.charAt(0).toUpperCase()}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-semibold text-text">{row.first_name}</span>
+          {row.username && <span className="text-xs text-muted">@{row.username}</span>}
+        </div>
+        <div className="mt-0.5 flex items-center gap-2">
+          <StatusBadge status={row.status} />
+          {row.streak_days > 0 && (
+            <span className="text-xs text-muted">🔥 {row.streak_days}</span>
+          )}
+        </div>
+      </div>
+      {row.can_catch && onCatch && (
+        <button
+          type="button"
+          onClick={onCatch}
+          disabled={busy}
+          className="rounded-full bg-danger px-3 py-1.5 text-xs font-semibold text-white transition active:scale-95 disabled:opacity-50"
+          aria-label={`Поймать ${row.first_name}`}
+        >
+          {busy ? "..." : "Поймать"}
+        </button>
+      )}
+    </article>
   );
 }

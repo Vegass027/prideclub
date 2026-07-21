@@ -1,16 +1,38 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useMarketplace } from "@/shared/hooks";
+import { PageHeader } from "@/shared/ui/PageHeader";
+import { Skeleton } from "@/shared/ui/Skeleton";
+import { Button } from "@/shared/ui/Button";
+import { EmptyState } from "@/shared/ui/EmptyState";
 
 export function OnboardingPage() {
   const navigate = useNavigate();
+  const { data, isLoading } = useMarketplace();
+
+  useEffect(() => {
+    if (data && data.items.length > 0) {
+      navigate("/marketplace", { replace: true });
+    }
+  }, [data, navigate]);
+
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <h1 className="mb-2 text-2xl font-bold">Добро пожаловать</h1>
-      <p className="mb-6 text-sm text-muted">
-        Обещай — выполняй — зарабатывай. Закрытые клубы привычек с денежными штрафами.
-      </p>
-      <button onClick={() => navigate("/marketplace")} className="w-full rounded-card bg-primary p-4 text-base font-semibold text-white">
-        Выбрать привычку
-      </button>
+      <PageHeader title="Добро пожаловать" />
+      {isLoading ? (
+        <Skeleton className="h-32 w-full" />
+      ) : (
+        <EmptyState
+          icon="🎉"
+          title="Это Habit Club"
+          description="Закрытые клубы дисциплины: подтверждай привычку каждый день, не пропускай — деньги в призовом фонде клуба."
+          action={
+            <Button onClick={() => navigate("/marketplace")}>
+              Выбрать клуб
+            </Button>
+          }
+        />
+      )}
     </main>
   );
 }

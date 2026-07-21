@@ -2,6 +2,8 @@ export type ProofType = "video_note" | "photo" | "text";
 
 export type MembershipStatus = "active" | "paused" | "left";
 
+export type CheckinStatus = "done" | "missed" | "pending" | "not_started";
+
 export interface User {
   id: number;
   username: string | null;
@@ -12,6 +14,8 @@ export interface User {
 export interface Habit {
   id: string;
   title: string;
+  description: string | null;
+  chat_id: number;
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
@@ -19,8 +23,8 @@ export interface Habit {
   price_month: number;
   proof_type: ProofType;
   prize_pool: number;
-  chat_id: number;
   members_count: number;
+  is_active: boolean;
 }
 
 export interface Membership {
@@ -29,15 +33,21 @@ export interface Membership {
   habit_id: string;
   status: MembershipStatus;
   deposit_balance: number;
-  subscription_until: string;
+  subscription_until: string | null;
   auto_renew_enabled: boolean;
   joined_at: string;
 }
 
-export interface CheckinStatus {
-  status: "done" | "missed" | "pending" | "not_started";
+export interface CheckinStatusOut {
+  status: CheckinStatus;
   streak_days: number;
   deadline_at: string | null;
+}
+
+export interface TodayResponse {
+  habit: Habit;
+  membership: Membership;
+  checkin: CheckinStatusOut;
 }
 
 export interface MemberRow {
@@ -45,12 +55,30 @@ export interface MemberRow {
   user_id: number;
   first_name: string;
   username: string | null;
-  status: "done" | "missed" | "pending" | "not_started";
+  status: CheckinStatus;
   streak_days: number;
   can_catch: boolean;
 }
 
-export type PenaltyReason = "caught" | "window_closed_no_catch";
+export interface MembersResponse {
+  items: MemberRow[];
+}
+
+export type CatchCode =
+  | "ok"
+  | "catcher_is_violator"
+  | "violator_has_checkin"
+  | "penalty_already_processed"
+  | "deposit_exhausted"
+  | "membership_not_active"
+  | "habit_not_found"
+  | "rate_limited";
+
+export interface CatchResponse {
+  ok: boolean;
+  code?: CatchCode;
+  amount?: number;
+}
 
 export interface Transaction {
   id: string;
@@ -60,6 +88,11 @@ export interface Transaction {
   created_at: string;
 }
 
+export interface BalanceResponse {
+  deposit_balance: number;
+  history: Transaction[];
+}
+
 export interface LeaderboardEntry {
   rank: number;
   membership_id: string;
@@ -67,19 +100,16 @@ export interface LeaderboardEntry {
   metric_value: number;
 }
 
-export interface TodayResponse {
-  membership_id: string;
-  habit_id: string;
-  habit_title: string;
-  status: "done" | "missed" | "pending" | "not_started";
-  streak_days: number;
-  deadline_at: string | null;
-  proof_type: ProofType;
-  deposit_balance: number;
-  hint: string | null;
+export interface LeaderboardResponse {
+  items: LeaderboardEntry[];
 }
 
-export interface BalanceResponse {
-  deposit_balance: number;
-  history: Transaction[];
+export interface MarketplaceResponse {
+  items: Habit[];
+}
+
+export interface CheckinEnqueueResponse {
+  accepted: boolean;
+  code: string;
+  checkin_id: string | null;
 }

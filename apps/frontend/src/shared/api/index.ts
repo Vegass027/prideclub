@@ -1,45 +1,56 @@
 import { apiClient } from "@/shared/api/client";
+import type {
+  BalanceResponse,
+  CatchResponse,
+  LeaderboardResponse,
+  MarketplaceResponse,
+  MembersResponse,
+  TodayResponse,
+} from "@/shared/types";
 
 export const marketplaceApi = {
-  list: () => apiClient.get<{ items: import("@/shared/types").Habit[] }>("/marketplace").then((r) => r.data),
+  list: () => apiClient.get<MarketplaceResponse>("/marketplace").then((r) => r.data),
 };
 
-export const checkinsApi = {
+export const habitsApi = {
   today: (habitId: string) =>
-    apiClient.get<import("@/shared/types").TodayResponse>(`/habits/${habitId}/today`).then((r) => r.data),
+    apiClient.get<TodayResponse>(`/habits/${habitId}/today`).then((r) => r.data),
+  join: (habitId: string) =>
+    apiClient.post<{ ok: boolean }>(`/habits/${habitId}/join`).then((r) => r.data),
+  leave: (habitId: string) =>
+    apiClient.post<{ ok: boolean }>(`/habits/${habitId}/leave`).then((r) => r.data),
 };
 
 export const membersApi = {
   list: (habitId: string) =>
-    apiClient
-      .get<{ items: import("@/shared/types").MemberRow[] }>(`/habits/${habitId}/members`)
-      .then((r) => r.data),
+    apiClient.get<MembersResponse>(`/habits/${habitId}/members`).then((r) => r.data),
   catch: (habitId: string, violatorMembershipId: string) =>
     apiClient
-      .post<{ ok: boolean; code?: string }>(`/habits/${habitId}/catch`, {
+      .post<CatchResponse>(`/habits/${habitId}/catch`, {
         violator_membership_id: violatorMembershipId,
       })
       .then((r) => r.data),
 };
 
 export const balanceApi = {
-  get: () =>
-    apiClient
-      .get<{ deposit_balance: number; history: import("@/shared/types").Transaction[] }>("/balance")
-      .then((r) => r.data),
+  get: () => apiClient.get<BalanceResponse>("/balance").then((r) => r.data),
 };
 
 export const leaderboardApi = {
   streaks: (habitId: string) =>
     apiClient
-      .get<{ items: import("@/shared/types").LeaderboardEntry[] }>(`/habits/${habitId}/leaderboard/streak`)
+      .get<LeaderboardResponse>(`/habits/${habitId}/leaderboard/streak`)
       .then((r) => r.data),
   catchers: (habitId: string) =>
     apiClient
-      .get<{ items: import("@/shared/types").LeaderboardEntry[] }>(`/habits/${habitId}/leaderboard/catches`)
+      .get<LeaderboardResponse>(`/habits/${habitId}/leaderboard/catches`)
       .then((r) => r.data),
   shame: (habitId: string) =>
     apiClient
-      .get<{ items: import("@/shared/types").LeaderboardEntry[] }>(`/habits/${habitId}/leaderboard/shame`)
+      .get<LeaderboardResponse>(`/habits/${habitId}/leaderboard/shame`)
       .then((r) => r.data),
+};
+
+export const usersApi = {
+  me: () => apiClient.get<unknown>("/me").then((r) => r.data),
 };

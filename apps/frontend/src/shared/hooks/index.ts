@@ -1,5 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
-import { balanceApi, checkinsApi, leaderboardApi, marketplaceApi, membersApi } from "@/shared/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  balanceApi,
+  habitsApi,
+  leaderboardApi,
+  marketplaceApi,
+  membersApi,
+} from "@/shared/api";
 
 export function useMarketplace() {
   return useQuery({
@@ -11,10 +17,32 @@ export function useMarketplace() {
 
 export function useToday(habitId: string | undefined) {
   return useQuery({
-    queryKey: ["checkin", "today", habitId],
-    queryFn: () => checkinsApi.today(habitId!),
+    queryKey: ["today", habitId],
+    queryFn: () => habitsApi.today(habitId!),
     enabled: Boolean(habitId),
     staleTime: 30_000,
+  });
+}
+
+export function useJoinHabit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (habitId: string) => habitsApi.join(habitId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["marketplace"] });
+      qc.invalidateQueries({ queryKey: ["today"] });
+    },
+  });
+}
+
+export function useLeaveHabit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (habitId: string) => habitsApi.leave(habitId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["marketplace"] });
+      qc.invalidateQueries({ queryKey: ["today"] });
+    },
   });
 }
 
@@ -28,6 +56,18 @@ export function useMembers(habitId: string | undefined) {
   });
 }
 
+export function useCatch(habitId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (violatorMembershipId: string) =>
+      membersApi.catch(habitId ?? "", violatorMembershipId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["members", habitId] });
+      qc.invalidateQueries({ queryKey: ["balance"] });
+    },
+  });
+}
+
 export function useBalance() {
   return useQuery({
     queryKey: ["balance"],
@@ -36,9 +76,15 @@ export function useBalance() {
   });
 }
 
-export function useLeaderboard(habitId: string | undefined, tab: "streak" | "catches" | "shame") {
+export type LeaderboardTab = "streak" | "catches" | "shame";
+
+export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab) {
   const fn =
-    tab === "streak" ? () => leaderboardApi.streaks(habitId!) : tab === "catches" ? () => leaderboardApi.catchers(habitId!) : () => leaderboardApi.shame(habitId!);
+    tab === "streak"
+      ? () => leaderboardApi.streaks(habitId!)
+      : tab === "catches"
+        ? () => leaderboardApi.catchers(habitId!)
+        : () => leaderboardApi.shame(habitId!);
   return useQuery({
     queryKey: ["leaderboard", tab, habitId],
     queryFn: fn,

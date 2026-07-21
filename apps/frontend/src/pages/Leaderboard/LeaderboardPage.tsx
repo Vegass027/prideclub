@@ -1,43 +1,71 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useLeaderboard } from "@/shared/hooks";
+import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
+import { EmptyState } from "@/shared/ui/EmptyState";
+import { PageHeader } from "@/shared/ui/PageHeader";
+import { Skeleton } from "@/shared/ui/Skeleton";
+import { Tabs } from "@/shared/ui/Tabs";
 
-const TABS = ["streak", "catches", "shame"] as const;
-const LABELS = { streak: "Стрики", catches: "Охотники", shame: "Доска позора" } as const;
+const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
+  { id: "streak", label: "Серии", emoji: "🔥" },
+  { id: "catches", label: "Ловцы", emoji: "🎯" },
+  { id: "shame", label: "Позор", emoji: "💀" },
+];
 
 export function LeaderboardPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const [tab, setTab] = useState<(typeof TABS)[number]>("streak");
-  const { data, isLoading } = useLeaderboard(habitId, tab);
+  const [tab, setTab] = useState<LeaderboardTab>("streak");
+  const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
+
+  const metricLabel = (t: LeaderboardTab): string =>
+    t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
 
   return (
     <main className="mx-auto max-w-md px-4 py-6">
-      <h1 className="mb-4 text-2xl font-bold">Лидерборд</h1>
-      <div role="tablist" className="mb-4 flex gap-2">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${
-              tab === t ? "bg-primary text-white" : "bg-surface text-muted"
-            }`}
-          >
-            {LABELS[t]}
-          </button>
-        ))}
-      </div>
-      {isLoading && <div className="text-sm text-muted">Загрузка...</div>}
-      {data && (
-        <ol className="flex flex-col gap-2">
-          {data.items.map((row) => (
-            <li key={row.membership_id} className="flex items-center justify-between rounded-card bg-surface p-3">
-              <div className="flex items-center gap-3">
-                <span className="w-6 text-center text-lg font-bold text-muted">#{row.rank}</span>
-                <span className="text-sm">{row.first_name}</span>
-              </div>
-              <span className="text-base font-semibold text-gold">{row.metric_value}</span>
+      <PageHeader title="Лидеры" back />
+
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+
+      {isLoading && <Skeleton className="h-14 w-full" rows={5} />}
+
+      {isError && (
+        <EmptyState icon="⚠️" title="Не удалось загрузить" description={String(error)} />
+      )}
+
+      {!isLoading && !isError && (data?.items.length ?? 0) === 0 && (
+        <EmptyState
+          icon="📊"
+          title="Пока никто не отметился"
+          description="Будь первым — открой клуб и сделай чек-ин."
+        />
+      )}
+
+      {!isLoading && !isError && (data?.items.length ?? 0) > 0 && (
+        <ol className="space-y-1.5">
+          {data!.items.map((row) => (
+            <li key={row.membership_id}>
+              <article className="flex items-center gap-3 rounded-card bg-surface/60 px-3 py-2.5">
+                <div
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+                    row.rank === 1
+                      ? "bg-yellow-500/20 text-yellow-300"
+                      : row.rank === 2
+                        ? "bg-gray-400/20 text-gray-200"
+                        : row.rank === 3
+                          ? "bg-orange-700/20 text-orange-300"
+                          : "bg-surface text-muted"
+                  }`}
+                  aria-label={`Место ${row.rank}`}
+                >
+                  {row.rank}
+                </div>
+                <span className="flex-1 truncate text-sm font-medium text-text">
+                  {row.first_name}
+                </span>
+                <span className="text-sm font-bold tabular-nums text-primary">
+                  {row.metric_value} {metricLabel(tab)}
+                </span>
+              </article>
             </li>
           ))}
         </ol>

@@ -1,6 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { AppRouter } from "@/app/router";
+import { initTelegram } from "@/shared/telegram/tma";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -13,6 +15,10 @@ const queryClient = new QueryClient({
 });
 
 export function App() {
+  useEffect(() => {
+    initTelegram();
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
