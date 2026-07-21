@@ -1,8 +1,8 @@
 # Техническое задание
 ## Модуль «Персонаж и характеристики» (геймификация привычек)
 
-Версия: 2.1 (статус актуализирован)
-Дата: 21.07.2026 22:30 CEST
+Версия: 2.2 (статус актуализирован)
+Дата: 21.07.2026 23:50 CEST
 Базируется на: `docs/01-concept.md`, `docs/06-data-model.md`, `docs/04-code-standards.md`, `AGENTS.md`
 
 > **Принцип:** фича встраивается в существующую модель данных, а не переписывает её.
@@ -618,6 +618,67 @@ class CharacterConfig:
 
 ---
 
+## 8.1. Hardening денежного контура (U1–U7)
+
+> **Преамбула.** U1–U7 — это **не часть Фазы B**. Это серия укреплений денежного
+> контура, сделанных ПОСЛЕ деплоя Фазы A на прод и ДО старта Фазы B. Цель —
+> убедиться, что код, который мы собираемся расширять новой сущностью
+> `user_stats`, не потеряет деньги при гонках и не начислит приз дважды
+> при двойном запуске worker'а. Без этих защит Фаза B рисковала бы
+> накопить баги поверх существующих.
+>
+> Все 7 итераций прошли локальные pytest-тесты и проверены на проде
+> `169.58.52.78` (smoke: `/health` 200, Celery `close_catch_window` и
+> `close_season` отработали за 0.8 сек и 0.28 сек соответственно).
+
+### Что защитили
+
+| # | Где | Что было | Что стало | Эффект для денег |
+|---|---|---|---|---|
+| **U1** | `HabitRepository.add_to_prize_pool` | `session.execute(select + update)` без блокировки | `session.get(Habit, pk, with_for_update=True)` + ORM `+=` | Два штрафа из разных worker'ов (apply_catch + apply_window_expired) больше не теряют апдейты |
+| **U2** | `MembershipService.join` | Проверка `member_limit` без блокировки | Проверка под `lock_for_update` (race: N юзеров вступают в клуб с лимитом 1) | Лимит клуба нельзя обойти гонкой |
+| **U3** | `SeasonService.close_season` арифметика | `int(N * P / 100)` — float в одной формуле, потеря точности | `(prize_pool * bp) // 10_000` — чистая int-арифметика в basis points | Приз рассчитывается бит-в-бит воспроизводимо; защита от регресса через `test_season_service_source_has_no_float_arithmetic` |
+| **U4** | `PaymentService._apply` | SELECT membership → flush новой, без FOR UPDATE | `lock_for_update_by_user_habit` перед `deposit_balance +=` и `subscription_until = ...` | Два webhook'а (subscription_renewal + deposit_topup в один миг) больше не теряют деньги и не накапливают подписку мимо |
+| **U5** | `HabitRepository.list_active`, `MembershipRepository.list_for_habit` | `list(...)` — материализует ВСЕ строки в RAM | `iter_active()` / `iter_for_habit()` через `stream_scalars()` — async generator | При 100+ клубах с 10k+ members суммарно worker больше не держит всё в памяти. O(1) на итерацию |
+| **U6** | `app/main.py` lifecycle | `@app.on_event("shutdown")` (deprecated в FastAPI 0.110+) | `@asynccontextmanager async def _lifespan(app)` с pre-warm `redis.ping()` на старте | Redis-пул прогревается до первого запроса (−50…200ms на холодном старте); Redis-down на старте НЕ валит `/health` (warning, не краш); `try/finally` гарантирует `close_redis()` даже при провале startup |
+| **U7** | `SeasonService.close_season` распределение приза | `if status != ACTIVE: return 0` БЕЗ блокировки → race window | `session.get(Season, pk, with_for_update=True)` + проверка `status` под локом | Два worker'а (cron + retry-after-timeout, или две ноды Celery) больше не начислят приз дважды |
+
+### Что НЕ затронуто (намеренно)
+
+- **Миграций БД — ноль.** U1–U7 — это рефакторинг Python-кода. Поведение изменилось
+  без миграций, активируется при рестарте `backend` и `worker`.
+- **`Transaction.amount`, `Membership.deposit_balance`, `Habit.prize_pool`** — формат
+  тот же (`INTEGER` копейки). Никаких `Numeric`/`Decimal`.
+- **API контракт** `/api/v1/*` и `/internal/*` — без изменений. Фронт ничего не заметит.
+
+### Тестовое покрытие
+
+| Итерация | Файл | Тестов | Что проверяют |
+|---|---|---|---|
+| U1 | `tests/test_habit_repository.py` (новый) | 3 | prize_pool накапливается атомарно; FOR UPDATE фиксируется |
+| U2 | `tests/test_membership_service.py` (новый) | 4 | лимит работает, LEFT→ACTIVE обходит лимит, исключение корректное |
+| U3 | `tests/test_season_service.py` | 8 (5 новых + 3 обновлены) | basis_points int-only, sum=10000, защита от float-входа, source-level check |
+| U4 | `tests/test_payment_service.py` | 4 (2 новых) | lock на existing membership, lock после create+flush |
+| U5 | `tests/test_streaming_repositories.py` (новый) | 6 | async generator, `stream_scalars` контракт, ленивость, signature check |
+| U6 | `tests/test_lifespan.py` (новый) | 7 | lifespan_context != None, event_handlers пусты, ping+aclose, order, Redis-down survives |
+| U7 | `tests/test_season_service.py` | 4 (новых) | FOR UPDATE на Season, ValueError на unknown, сериализация параллельных вызовов, порядок lock→flush |
+| **Всего** | | **34 новых теста** | **141 backend + 11 worker integration passed** |
+
+### Деплой
+
+- **Коммит:** `b2bf2aa hardening(U1-U7): concurrency + idempotency for money flows`
+- **GitHub:** запушен в `origin/main` (e5e368f → b2bf2aa)
+- **Сервер:** `/app` обновлён через rsync, backend + worker пересобраны и перезапущены
+- **Smoke на проде:**
+  - `/health` → `{"status":"ok"}` ✅
+  - `GET /api/v1/marketplace` → 401 (middleware initData валиден) ✅
+  - `GET /metrics` → Prometheus метрики ✅
+  - В логах backend видны **новые** события U6: `backend.startup.redis_ready`, `backend.startup` ✅
+  - `celery call worker.tasks.close_catch_window.run_for_active_habits` → выполнен за 0.8 сек ✅
+  - `celery call worker.tasks.close_season.run` → выполнен за 0.28 сек ✅
+
+---
+
 ## 9. Что НЕ делается в этой итерации (явно вне scope)
 
 - ❌ Поддержка `weekly_n` расписания — отдельное ТЗ.
@@ -658,20 +719,34 @@ class CharacterConfig:
 
 ### Фаза B — Персонаж и характеристики 🔲 **TODO**
 
-| # | Шаг | Статус | Файлы |
+| # | Шаг | Статус | Что есть на проде / что нужно |
 |---|---|---|---|
-| 1 | Backend каркас | 🔲 | Миграция `008_character_and_club_fields.py` уже накатана на прод (часть Фазы A) — поля `habits.stat_*`, `photo_url`, `telegram_invite_link`, `member_limit`, `curator_id` готовы. Нужны: `models/user_stats.py`, `models/user_status.py`, `repositories/user_stats_repository.py`, `core/constants.py:CharacterConfig`. |
-| 2 | Backend инкремент/декремент | 🔲 | `services/character_service.py` (`increment_on_checkin`, `decrement_on_penalty`) + хуки в `CheckinService.process_checkin` и `PenaltyService.apply_catch` / `close_catch_window`. `SELECT FOR UPDATE` через `lock_for_update`. |
-| 3 | Backend API + статус + лидерборд | 🔲 | `api/v1/character.py` (`GET /character/me`), расширение `api/v1/leaderboard.py` (`GET /leaderboard/stat?habit_id=`), seed-миграция `009_user_statuses_seed.py`. |
-| 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. |
+| 1 | Backend каркас | 🟡 **частично** | Миграция `008_character_and_club_fields.py` накатана (alembic head = `008_character_and_club_fields`) — поля `habits.stat_name`, `stat_icon`, `stat_gain_per_checkin`, `stat_loss_per_miss`, `photo_url`, `telegram_invite_link`, `member_limit`, `curator_id` есть в БД с CHECK-ограничениями. **НЕ готово:** таблицы `user_stats`, `user_statuses`; миграция `009_create_user_stats_and_statuses.py`; `models/user_stats.py`, `models/user_status.py`; `repositories/user_stats_repository.py`; `core/constants.py:CharacterConfig`. |
+| 2 | Backend инкремент/декремент | 🔲 | `services/character_service.py` (`increment_on_checkin`, `decrement_on_penalty`) + хуки в `CheckinService.process_checkin` и `PenaltyService.apply_catch` / `close_catch_window`. `SELECT FOR UPDATE` через `lock_for_update` (U1/U4/U7 — паттерн уже применён в денежном контуре, переиспользуем). |
+| 3 | Backend API + статус + лидерборд | 🔲 | `api/v1/character.py` (`GET /character/me`), расширение `api/v1/leaderboard.py` (`GET /leaderboard/stat?habit_id=`), seed-миграция `010_user_statuses_seed.py`. |
+| 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. Идемпотентность (повторный запуск — 0 изменений) — паттерн как у `close_season` после U7. |
 | 5 | Документация | 🔲 | `docs/06-data-model.md` (новые таблицы), `docs/01-concept.md` (геймификация). |
 | 6 | Frontend | ⏸ | Отложено до подключения основного фронта к API (`docs/09-prod-readiness.md:127-137`). |
+
+### Hardening U1–U7 — **DONE на проде** ✅
+
+Это **отдельная работа** между Фазой A и Фазой B. Подробности в разделе 8.1 выше.
+Краткий итог: 7 итераций укрепления денежного контура — `FOR UPDATE` на деньгах,
+`basis_points` вместо float, стриминг через `stream_scalars`, FastAPI lifespan,
+идемпотентность `close_season`. Коммит `b2bf2aa` запушен на прод, smoke-тесты
+пройдены. 34 новых теста, 141 backend passed.
+
+**Зачем это нужно перед Фазой B:** новые сервисы (character_service, freeze worker)
+будут вызываться **в тех же транзакциях**, что и существующие `process_checkin`
+и `apply_penalty`. Если существующие деньги теряются при гонке — характеристики
+`user_stats` унаследуют те же баги. U1–U7 закрывают этот риск.
 
 ### Итого
 
 - Фаза A: **DONE на backend + проде**. UI админки — отдельно.
-- Фаза B: **TODO**, ~5-6 дней.
-- Frontend всё ещё блокер для полного end-to-end (API готовы, фронт не подключён).
+- Hardening U1–U7: **DONE на backend + проде**, коммит `b2bf2aa`.
+- Фаза B: 🟡 шаг 1 наполовину (поля `habits` есть, таблиц `user_stats`/`user_statuses` нет), остальное TODO. **~4-5 дней чистой работы** (без учёта подключения фронта).
+- Frontend всё ещё блокер для полного end-to-end (API готовы для Фазы A, фронт не подключён).
 
 ---
 
@@ -695,6 +770,23 @@ class CharacterConfig:
 ---
 
 ## 12. Changelog
+
+- **v2.2 (21.07.2026 23:50 CEST)** — добавлен раздел 8.1 «Hardening U1–U7»,
+  актуализирован статус Фазы B:
+  - **U1–U7 залиты на прод.** Коммит `b2bf2aa` запушен в `origin/main`,
+    `/app` обновлён через rsync, backend и worker пересобраны и перезапущены.
+    Smoke на проде: `/health` 200, lifespan-логи `backend.startup.redis_ready`
+    видны, Celery-таски `close_catch_window` и `close_season` отработали за 0.8 сек
+    и 0.28 сек соответственно. 34 новых теста, 141 backend passed.
+  - **Фаза B шаг 1** — частично на проде: миграция `008_character_and_club_fields`
+    накатана (поля `habits.stat_*`, `photo_url`, `telegram_invite_link`,
+    `member_limit`, `curator_id` есть в БД), но таблиц `user_stats` и
+    `user_statuses` ещё нет. Шаги 2–5 Фазы B — TODO, ~4-5 дней.
+  - **Зачем U1–U7 перед Фазой B:** новые сервисы будут жить в тех же транзакциях,
+    что и `process_checkin` / `apply_penalty`. Если деньги теряются при гонке —
+    `user_stats.value` унаследует те же баги. Закрыли риск заранее.
+  - Добавлено **«что есть на проде / что нужно»** в таблице Фазы B — раньше
+    статус «частично» был не виден, теперь отмечен 🟡 явно.
 
 - **v2.1 (21.07.2026 22:30 CEST)** — актуализация статуса после деплоя Фазы A на прод:
   - Раздел 10 переписан в табличный формат с реальным статусом ✅/🔲.
