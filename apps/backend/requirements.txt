@@ -23,7 +23,7 @@ pytest-cov==6.0.0
 ruff==0.8.6
 mypy==1.14.0
 black==24.10.0
-faker==33.1.0
+faker==40.32.0
 fakeredis==2.26.1
 lupa==2.2  # Lua runtime для fakeredis (EVAL/EVALSHA в rate-limiter тестах)
 aiosqlite==0.20.0
