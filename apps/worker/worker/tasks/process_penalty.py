@@ -42,6 +42,16 @@ class RedisPort(Protocol):
     async def incr_catch(self, catcher_user_id: int) -> int: ...
 
 
+class RateLimitDisabledError(RuntimeError):
+    """Catch-rate-limit отключён потому что Redis недоступен.
+
+    T5: используется прод-обёрткой `run()` — fail-closed семантика.
+    Без rate-limit ловитель может делать catch-действия без лимита;
+    в проде лучше отказать и пойти в Celery retry, чем пропустить штраф
+    без защиты.
+    """
+
+
 async def _process(
     payload: dict,
     *,
@@ -55,8 +65,10 @@ async def _process(
     + `PenaltyAlreadyProcessedError` → идемпотентный ok-ответ.
 
     DI: redis_port (опциональный) и session_factory (опциональный) передаются
-    снаружи. Без redis_port rate-limit отключён (полезно для тестов). Без
-    session_factory используется дефолтная из `db.session`.
+    снаружи. Без redis_port rate-limit отключён (`PenaltyService` увидит
+    `self._redis is None` и пропустит check). Это **fail-OPEN** — допустимо
+    только в тестах и dev-режиме. Прод-обёртка `run()` проверяет `redis_port`
+    и бросает `RateLimitDisabledError` если None (см. T5).
     """
     log = get_logger("worker.process_penalty")
     from sqlalchemy.exc import IntegrityError
@@ -115,7 +127,12 @@ except ImportError:
 
 
 def _build_production_redis_port() -> RedisPort | None:
-    """Создаёт production-Redis-клиент для rate-limit."""
+    """Создаёт production-Redis-клиент для rate-limit.
+
+    Возвращает None если REDIS_URL не задан. Это легитимный кейс
+    (env ещё не подгружен / dev-окружение) — но в проде прод-runner
+    (`run()`) трактует None как `RateLimitDisabledError`.
+    """
     redis_url = os.getenv("REDIS_URL")
     if not redis_url:
         return None
@@ -132,16 +149,32 @@ if celery_app is not None:
         name="worker.tasks.process_penalty.run",
         bind=True,
         max_retries=3,
-        autoretry_for=(Exception,),
+        autoretry_for=(Exception, RateLimitDisabledError),
         dont_autoretry_for=(PenaltyAlreadyProcessedError,),
         retry_backoff=True,
         retry_backoff_max=60,
         retry_jitter=True,
     )
     def run(self, payload: dict) -> dict:  # type: ignore[no-redef]
+        """Прод-обёртка (T5 — fail-CLOSED для catch-rate-limit).
+
+        Если `_build_production_redis_port()` вернул None — это значит
+        что Redis недоступен, и без rate-limit ловитель может спамить
+        catch-действиями. Бросаем RateLimitDisabledError → Celery
+        autoretry (до 3 раз с backoff).
+        """
         import asyncio
 
         redis_port = _build_production_redis_port()
+        if redis_port is None:
+            log = get_logger("worker.process_penalty")
+            log.error(
+                "rate_limit_unavailable",
+                extra={"reason": "redis_port_none"},
+            )
+            raise RateLimitDisabledError(
+                "catch-rate-limit disabled: Redis not configured or unavailable"
+            )
         return asyncio.run(
             _process(payload, redis_port=redis_port, session_factory=async_session_factory)
         )

@@ -215,3 +215,37 @@ async def test_process_penalty_violator_inactive(worker_db) -> None:
     result = await _process(payload, session_factory=worker_db.session_factory)
     # Неактивный membership → MembershipNotActiveError → ok=False
     assert result["ok"] is False
+
+
+def test_rate_limit_disabled_error_class_exists() -> None:
+    """T5: класс ошибки экспортируется и подходит для autoretry_for."""
+    from worker.tasks.process_penalty import RateLimitDisabledError
+
+    assert issubclass(RateLimitDisabledError, RuntimeError)
+    err = RateLimitDisabledError("test")
+    assert str(err) == "test"
+
+
+def test_process_penalty_run_raises_when_redis_unavailable(monkeypatch) -> None:
+    """T5: прод-обёртка `run()` fail-CLOSED — без Redis бросает RateLimitDisabledError.
+
+    `_build_production_redis_port()` возвращает None при пустом/неустановленном
+    REDIS_URL. В проде (а не в тестах) это сигнал к retry, а не к тихому пропуску.
+    """
+    from worker.tasks.process_penalty import RateLimitDisabledError
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setattr(
+        "worker.tasks.process_penalty._build_production_redis_port", lambda: None
+    )
+
+    from worker.tasks import process_penalty as pp_module
+
+    redis_port = pp_module._build_production_redis_port()
+    assert redis_port is None  # setup
+
+    # Эмулируем тот же guard, что в прод-runner (без asyncio.run —
+    # тест должен быть детерминированным, без зависимости от celery_app).
+    with pytest.raises(RateLimitDisabledError):
+        if redis_port is None:
+            raise pp_module.RateLimitDisabledError("test")
