@@ -24,7 +24,12 @@ _TOPIC_LINK_RE = re.compile(
 
 @dataclass(frozen=True)
 class TelegramTopic:
-    """chat_id + thread_id топика форума."""
+    """chat_id + thread_id топика форума.
+
+    chat_id хранится в Bot API-форме: для супергруппы к Telegram
+    short-id добавляется префикс `-100`. Короткая форма из ссылок
+    `t.me/c/<id>/<thread>` нормализуется в этой форме при парсинге.
+    """
 
     chat_id: int
     thread_id: int
@@ -33,8 +38,8 @@ class TelegramTopic:
 def parse_telegram_topic_link(url: str) -> TelegramTopic:
     """Парсит ссылку на топик Telegram.
 
-    Возвращает TelegramTopic с положительными chat_id (для супергрупп)
-    и thread_id (>0).
+    Возвращает TelegramTopic с chat_id в Bot API-форме
+    (для супергрупп: `-100` + короткий ID) и thread_id (>0).
 
     Бросает InvalidTopicLinkError при невалидном формате.
     """
@@ -47,17 +52,35 @@ def parse_telegram_topic_link(url: str) -> TelegramTopic:
             "Ссылка должна быть в формате https://t.me/c/<chat_id>/<thread_id>"
         )
 
-    chat_id = int(match.group("chat_id"))
+    raw_chat_id = int(match.group("chat_id"))
     thread_id = int(match.group("thread_id"))
 
-    if chat_id == 0:
+    if raw_chat_id == 0:
         raise InvalidTopicLinkError("chat_id не может быть 0")
     if thread_id <= 0:
         raise InvalidTopicLinkError("thread_id должен быть положительным")
+
+    # Нормализация в Bot API-форму.
+    # Telegram ссылка `t.me/c/<short_id>` отображает короткий chat_id без
+    # префикса `-100`, а Bot API хранит супергруппу с этим префиксом.
+    # Положительные значения без префикса трактуем как супергруппу.
+    if raw_chat_id > 0:
+        chat_id = -100_000_000_0000 - raw_chat_id
+    else:
+        chat_id = raw_chat_id
 
     return TelegramTopic(chat_id=chat_id, thread_id=thread_id)
 
 
 def make_topic_link(chat_id: int, thread_id: int) -> str:
-    """Собирает ссылку на топик из chat_id и thread_id (для UI)."""
-    return f"https://t.me/c/{chat_id}/{thread_id}"
+    """Собирает ссылку на топик из chat_id и thread_id (для UI).
+
+    Если chat_id в Bot API-форме (`-100...`), при сборке отбрасываем
+    префикс, чтобы ссылка была в коротком виде, как её показывает
+    Telegram.
+    """
+    if chat_id < -100_000_000_0000:
+        short = -(chat_id + 100_000_000_0000)
+    else:
+        short = chat_id
+    return f"https://t.me/c/{short}/{thread_id}"
