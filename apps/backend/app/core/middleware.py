@@ -94,9 +94,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 init_data = request.headers.get("X-Telegram-Init-Data")
                 if not init_data:
                     raise MissingInitDataError()
+                admin_bot_token = settings.bot_token_admin or settings.bot_token
                 tg_user = validate_init_data(
                     init_data,
-                    settings.bot_token,
+                    admin_bot_token,
                     max_age_seconds=settings.init_data_max_age_seconds,
                 )
                 if tg_user.id != settings.owner_telegram_id:

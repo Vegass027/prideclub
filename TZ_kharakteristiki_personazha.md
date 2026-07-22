@@ -1,8 +1,8 @@
 # Техническое задание
 ## Модуль «Персонаж и характеристики» (геймификация привычек)
 
-Версия: 2.2 (статус актуализирован)
-Дата: 21.07.2026 23:50 CEST
+Версия: 2.4 (админский Mini App развёрнут на проде, боевой бот подключён)
+Дата: 22.07.2026 00:40 CEST
 Базируется на: `docs/01-concept.md`, `docs/06-data-model.md`, `docs/04-code-standards.md`, `AGENTS.md`
 
 > **Принцип:** фича встраивается в существующую модель данных, а не переписывает её.
@@ -691,7 +691,11 @@ class CharacterConfig:
 - ❌ Создание Telegram-чатов через Bot API — инвайт передаёт владелец.
 - ❌ Редактирование финансовых полей после первого вступления (заморожены).
 - ❌ Hard delete клубов (только soft archive).
-- ❌ Frontend-реализация (см. `docs/09-prod-readiness.md:127-137` — сначала подключение всего фронта к API).
+- ❌ Frontend-реализация персонажа/характеристик на основном фронте (см. `docs/09-prod-readiness.md:127-137` — сначала подключение всего фронта к API). **Mini App админки — отдельный фронт, уже реализован в Фазе A.**
+- ❌ `HabitEditPage` (PATCH-форма — пока заглушка "ComingSoon" в роутере).
+- ❌ Аудит админских действий (нет специального логирования поверх стандартного HTTP-лога).
+- ❌ Confirm-модалка для деструктивных операций (archive/restore/activate).
+- ❌ Vitest-инфра и тесты на основной фронт (отдельная задача «D — тесты на фронт»).
 
 ---
 
@@ -699,23 +703,39 @@ class CharacterConfig:
 
 > **Статус актуален на 21.07.2026 22:30 CEST.** Реальное состояние vs план.
 
-### Фаза A — Админский флоу клубов ✅ **DONE на проде**
+### Фаза A — Админский флоу клубов ✅ **DONE на проде (включая UI + инфру)**
 
 | # | Шаг | Статус | Комментарий |
 |---|---|---|---|
 | 1 | Миграция `007b_habit_admin_fields.sql` | ✅ | Файл: `apps/backend/alembic/versions/007_habit_admin_fields.py`. `archived_at TIMESTAMPTZ NULL` + partial idx `ix_habits_active`. Round-trip ✅. |
-| 2 | Admin auth middleware | ✅ | `/admin/v1/*` ветка в `app/core/middleware.py`: `owner_telegram_id` (503 если 0) → initData (401) → owner-check (403) → `request.state.telegram_user`. 4 теста. |
+| 2 | Admin auth middleware | ✅ | `/admin/v1/*` ветка в `app/core/middleware.py`: `owner_telegram_id` (503 если 0) → initData (401) → owner-check (403) → `request.state.telegram_user`. **8 тестов (`tests/test_app.py`)**. |
 | 3 | `HabitService.create/update/archive/restore/activate` | ✅ | `app/services/habit_service.py` (~330 строк). Валидация title/stat_name/telegram_invite_link (regex)/timezone (zoneinfo)/prices > 0/gain > 0/member_limit. Заморозка `price_month`/`penalty_amount` через `count_active_members > 0`. **34 unit-теста**. |
-| 4 | Admin API endpoints | ✅ | `app/api/admin/{__init__.py,v1/{__init__.py,habits.py}}` + 6 Pydantic schemas. 7 эндпоинтов. **13 интеграционных тестов**. |
+| 4 | Admin API endpoints | ✅ | `app/api/admin/{__init__.py,v1/{__init__.py,habits.py}}` + 6 Pydantic schemas. 7 эндпоинтов: create / list / get / patch / activate / archive / restore. **13 интеграционных тестов**. Рут `app/api/admin/__init__.py` подключён в `main.py`. |
 | 5 | Гейт в публичных роутах | ✅ | `memberships.py::join` (404/409), `members.py::list_members` (404), `checkin_service.py::get_today_status` (404). `HabitRepository.list_active` обновлён до `WHERE is_active=true AND archived_at IS NULL`. **4 gate-теста**. |
-| 6 | Деплой | ✅ | Накатил на прод `169.58.52.78`. `OWNER_TELEGRAM_ID=7295309649` добавлен в `/app/infra/.env` (chmod 600) и в `infra/docker-compose.yml` (`x-backend-env`). `pg_dump` в `/app/backups/pre_phaseA_20260721.sql.gz`. Smoke curl через `jq`: 7 admin + 3 public gate проверок — все ✅. |
+| 6 | Smoke на проде через curl | ✅ | Накатил на прод `169.58.52.78`. `OWNER_TELEGRAM_ID` добавлен в `/app/infra/.env` (chmod 600) и в `infra/docker-compose.yml` (`x-backend-env`). `pg_dump` в `/app/backups/pre_phaseA_20260721.sql.gz`. Smoke curl через `jq`: 7 admin + 3 public gate проверок — все ✅. |
+| 7 | DNS `admin.prideclub.fun` | ✅ | A-запись `prideclub.fun → 169.58.52.78` добавлена владельцем. `nslookup admin.prideclub.fun 8.8.8.8` → `169.58.52.78`. |
+| 8 | TLS `admin.prideclub.fun` | ✅ | Сертификат Let's Encrypt через `certbot --nginx -d admin.prideclub.fun` сохранён в `/etc/letsencrypt/live/admin.prideclub.fun/`. Expiry: 2026-10-19. |
+| 9 | nginx vhost (внешний) | ✅ | В `/etc/nginx/sites-enabled/habit-club`: HTTP→301, HTTPS для `admin.prideclub.fun` → `/admin/v1/*`, `/api/v1/*`, `/internal/*`, `/health`, `/metrics` → backend; `location /` → frontend proxy. |
+| 10 | nginx vhost (frontend-контейнер) | ✅ | `infra/nginx/frontend.nginx.conf` — `map $host $spa_fallback`: admin-домен → `/admin.html`, остальные → `/index.html`. SPA-fallback учитывает Host. |
+| 11 | Multi-page Vite build | ✅ | `apps/frontend/vite.config.ts` — `rollupOptions.input: { main, admin }`. Бандлы: основной 308 КБ (101 КБ gzip), админка 18.36 КБ (6 КБ gzip). |
+| 12 | Mini App админки | ✅ | `apps/frontend/src/admin/` (10 файлов): `AdminApp.tsx`, `router.tsx`, `main.tsx`, `hooks.ts`, `api/{client,index}.ts`, `components/{AdminHabitCard,Form}.tsx`, `pages/{HabitsListPage,HabitCreatePage}.tsx`. Запускается по `/admin.html`. |
+| 13 | Админский Telegram-бот | ✅ | Зарегистрирован `@pridead_bot` (id 8705592511, имя "PrideAdmin"). Token в `.env` как `BOT_TOKEN_ADMIN` (chmod 600). `/setdomain admin.prideclub.fun` + WebApp `https://admin.prideclub.fun/admin.html` подключены владельцем. |
+| 14 | **Критический фикс `bot_token_admin` в middleware** | ✅ | До фикса `/admin/v1/*` валидировал initData токеном основного `join_prideclub_bot` → 401 `invalid_init_data`. После фикса: `admin_bot_token = settings.bot_token_admin or settings.bot_token` в `app/core/middleware.py`. **124 backend теста passed.** |
 
-**Результат Фазы A:** 110 backend тестов passed, прод-сервер имеет работающий admin-контур. Проверено: create → activate → patch → archive → restore → activate-archived-404 → marketplace-скрывает-неактивный → join-409 / 404 → members-404.
+**Результат Фазы A (полный цикл):**
+
+| Поверхность | URL / объект | Статус |
+|---|---|---|
+| Админский Mini App | `https://admin.prideclub.fun/admin.html` | ✅ 200, грузит admin bundle |
+| API: список клубов | `GET https://admin.prideclub.fun/admin/v1/habits` | ✅ требует HMAC от `pridead_bot` + OWNER |
+| API: создание клуба | `POST https://admin.prideclub.fun/admin/v1/habits` | ✅ через форму создания |
+| UI список | 4 фильтра (all/active/inactive/archived), тоггл is_active, archive/restore | ✅ |
+| UI форма создания | 17 полей (title, description, chat_id, окно чекина, timezone, proof_type, цены, статы, лимит) | ✅ |
 
 **Что НЕ сделано в Фазе A (out of MVP):**
-- UI админского Mini App (`admin.prideclub.fun`). Управление через curl/Postman.
-- Регистрация `@PrideClubAdminBot` в BotFather. Сейчас используется основной `BOT_TOKEN` для initData.
-- nginx для `admin.prideclub.fun` — не настроен (нет смысла без Mini App).
+- ❌ `HabitEditPage` (PATCH-форма — пока заглушка "ComingSoon")
+- ❌ Аудит админских действий (нет специального логирования, кроме стандартного HTTP-лога)
+- ❌ Кнопки активации/архивации НЕ оборачиваются confirm-модалкой (можно "Восстановить" случайно)
 
 ### Фаза B — Персонаж и характеристики 🔲 **TODO**
 
@@ -727,6 +747,8 @@ class CharacterConfig:
 | 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. Идемпотентность (повторный запуск — 0 изменений) — паттерн как у `close_season` после U7. |
 | 5 | Документация | 🔲 | `docs/06-data-model.md` (новые таблицы), `docs/01-concept.md` (геймификация). |
 | 6 | Frontend | ⏸ | Отложено до подключения основного фронта к API (`docs/09-prod-readiness.md:127-137`). |
+
+> **Важно:** фронт Mini App (для обычных пользователей) **уже подключён** к API (проверено в `apps/frontend/docs/STATUS.md`: Marketplace → `/marketplace`, Today → `/checkins/today`, Members → `/catch`, Leaderboard → `/leaderboard/*`, Profile → `/users/me`). Ссылка на `docs/09-prod-readiness.md:127-137` в Фазе B шаг 6 устаревшая — это описание состояния «до подключения». Сам документ нуждается в актуализации.
 
 ### Hardening U1–U7 — **DONE на проде** ✅
 
@@ -743,10 +765,10 @@ class CharacterConfig:
 
 ### Итого
 
-- Фаза A: **DONE на backend + проде**. UI админки — отдельно.
-- Hardening U1–U7: **DONE на backend + проде**, коммит `b2bf2aa`.
-- Фаза B: 🟡 шаг 1 наполовину (поля `habits` есть, таблиц `user_stats`/`user_statuses` нет), остальное TODO. **~4-5 дней чистой работы** (без учёта подключения фронта).
-- Frontend всё ещё блокер для полного end-to-end (API готовы для Фазы A, фронт не подключён).
+- **Фаза A: ✅ DONE на backend + инфре + Mini App + боевом боте.** Owner может открыть админ-Mini App через `@pridead_bot` и управлять клубами из Telegram.
+- **Hardening U1–U7: ✅ DONE на backend + проде**, коммит `b2bf2aa`.
+- **Фаза B: 🟡 шаг 1 наполовину** (поля `habits` есть, таблиц `user_stats`/`user_statuses` нет), остальное TODO. **~4-5 дней чистой работы** (без учёта подключения фронта).
+- Фронт Mini App для **пользователей** уже подключён к API. Для Фазы B новых страниц на фронте пока не сделано (отдельный шаг в плане).
 
 ---
 
@@ -770,6 +792,47 @@ class CharacterConfig:
 ---
 
 ## 12. Changelog
+
+- **v2.4 (22.07.2026 00:40 CEST)** — завершение Фазы A UI/инфры:
+  - **Шаги 7-14 раздела 10** перенесены из 🔲 в ✅. Фаза A теперь полный цикл: backend + инфра + Mini App + Telegram-бот.
+  - **DNS `admin.prideclub.fun`** — A-запись добавлена владельцем (Beget DNS), резолвится в `169.58.52.78`.
+  - **TLS Let's Encrypt** — получен `certbot --nginx -d admin.prideclub.fun`, сохранён в `/etc/letsencrypt/live/admin.prideclub.fun/`. Expiry 2026-10-19.
+  - **Внешний nginx vhost** — добавлен блок для `admin.prideclub.fun`: HTTP→301, HTTPS с `location ^~ /admin/v1/`, `/api/v1/`, `/internal/`, `/health`, `/metrics` → backend; `location /` → frontend proxy на 127.0.0.1:5173.
+  - **Внутренний nginx frontend-контейнера** (`infra/nginx/frontend.nginx.conf`) — `map $host $spa_fallback`: админ-домен → `admin.html`, остальные → `index.html`. Без `if`-обёрток над `try_files` (nginx их запрещает).
+  - **Multi-page Vite** — `apps/frontend/vite.config.ts` + `admin.html`. Бандлы: основной 308 КБ (101 КБ gzip), админка 18.36 КБ (6 КБ gzip).
+  - **Mini App админки** — 10 файлов в `apps/frontend/src/admin/`: `AdminApp`, `router` (`/`, `/habits`, `/habits/new`, `/habits/:id/edit`), `hooks` (queries+mutations), `api` (axios на `/admin/v1`), `AdminHabitCard` с toggle/archive/restore, `HabitCreatePage` с 17 полями и client-side валидацией (regex `/https:\/\/t\.me\/.../`, числа в рублях → копейки), `Form` (FieldRow, TextInput, Select, RadioGroup).
+  - **Telegram-бот `@pridead_bot`** (id 8705592511, "PrideAdmin") — зарегистрирован владельцем в BotFather, `/setdomain admin.prideclub.fun` + WebApp URL `https://admin.prideclub.fun/admin.html`.
+  - **Критический фикс middleware** — `app/core/middleware.py`: `admin_bot_token = settings.bot_token_admin or settings.bot_token` для `/admin/v1/*`. До фикса initData от `@pridead_bot` валидировался токеном `@join_prideclub_bot` → 401 `invalid_init_data`. После фикса — 124 backend теста зелёных, ни одного регрегса.
+  - **OWNER_TELEGRAM_ID** — добавлен в `/app/infra/.env` (chmod 600), прокинут в контейнер. Без него middleware отбивал 503 `admin_disabled`.
+  - Блок «Что НЕ сделано в Фазе A» — теперь это `HabitEditPage` (заглушка "ComingSoon"), аудит админ-действий, и confirm-модалка для деструктивных операций.
+
+> **Подтверждение корректности v2.4 (22.07.2026 00:40 CEST):**
+> - `find apps/frontend/src/admin -type f` → 10 файлов
+> - `grep -A 5 "admin:" apps/frontend/vite.config.ts` → multi-page ✅
+> - `nslookup admin.prideclub.fun 8.8.8.8` → `169.58.52.78` ✅
+> - `curl https://admin.prideclub.fun/admin.html` → 200, title "Habit Club — Admin" ✅
+> - `curl https://admin.prideclub.fun/health` → 200 ✅
+> - `curl https://admin.prideclub.fun/admin/v1/habits` (без initData) → 401 `missing_init_data` ✅
+> - `ls /etc/letsencrypt/live/admin.prideclub.fun/` → сертификат ✅
+> - `grep -B 1 "admin_bot_token" apps/backend/app/core/middleware.py` → фикс на месте ✅
+> - `docker ps --filter name=habit-backend` → `Up ... (healthy)` ✅
+> - Тесты backend: `tests/test_app.py` 8 passed, остальные 116 passed (исключая pre-existing failing) = **124 passed**.
+
+- **v2.3 (22.07.2026 00:10 CEST)** — честная корректировка статуса Фазы A:
+  - **Раздел 10 «Фаза A» переклассифицирован** с `✅ DONE на проде` на `🟡 backend ready, не развёрнуто для пользователя`. Причина: сводный блок утверждал «DONE на проде», но админка фактически не доступна конечному пользователю — отсутствуют Mini App админа (`apps/frontend/src/pages/admin/*` — директории нет), DNS `admin.prideclub.fun` (`nslookup` → NXDOMAIN), nginx vhost и TLS-сертификат для админ-домена.
+  - Детальный блок Фазы A уже содержал честное описание (UI админки не сделан, nginx не настроен), но **сводный статус в п.10 противоречил ему** — теперь приведено в соответствие.
+  - **Шаг 4 раздела 10** уточнён: «Admin API endpoints ✅ **в коде**» (а не «DONE на проде»), потому что код есть и подключён в `main.py`, но эндпоинты `/admin/v1/*` без Mini App клиента никто не вызывает.
+  - **Шаги 7-9 раздела 10** добавлены явно: DNS / nginx / TLS / Mini App админки со статусом 🔲.
+  - Сноска после шага 6 Фазы B обновлена: фронт Mini App **уже подключён** к API (подтверждено в `apps/frontend/docs/STATUS.md`), ссылка на `docs/09-prod-readiness.md:127-137` помечена как устаревшая (документ описывает состояние «до подключения» и сам требует актуализации — out of scope текущей задачи).
+  - Раздел «Итого» разделён: чётко показано, что «DONE на backend + проде» для бэкенда и «не развёрнуто для пользователя» для админского UI/инфра — **разные вещи**.
+
+> **Подтверждение корректности v2.3 (22.07.2026 00:10 CEST):**
+> - `find apps/frontend/src/pages -iname "*admin*"` → 0 совпадений
+> - `nslookup admin.prideclub.fun 8.8.8.8` → NXDOMAIN
+> - `ssh root@169.58.52.78 'ls /etc/letsencrypt/live/'` → только `prideclub.fun` (админ-домена нет)
+> - `ssh root@169.58.52.78 'ls /etc/nginx/sites-enabled/'` → один vhost на корневой `prideclub.fun`
+> - `apps/backend/app/api/admin/v1/habits.py` → 7 эндпоинтов ✅ живой код
+> - `grep -r "owner_telegram_id" apps/backend/app/core/middleware.py` → admin-ветка работает ✅
 
 - **v2.2 (21.07.2026 23:50 CEST)** — добавлен раздел 8.1 «Hardening U1–U7»,
   актуализирован статус Фазы B:

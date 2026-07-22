@@ -1,0 +1,177 @@
+import { useMemo } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { EmptyState } from "@/shared/ui/EmptyState";
+import { Skeleton } from "@/shared/ui/Skeleton";
+import { ScreenLayout } from "@/shared/ui/ScreenLayout";
+import { PageHeader } from "@/shared/ui/PageHeader";
+import { AdminHabitCard } from "../components/AdminHabitCard";
+import {
+  useActivateHabit,
+  useAdminHabits,
+  useArchiveHabit,
+  useRestoreHabit,
+} from "../hooks";
+import type { AdminHabit } from "../api";
+
+type Filter = "all" | "active" | "inactive" | "archived";
+
+const FILTERS: { id: Filter; label: string; emoji: string }[] = [
+  { id: "all", label: "Все", emoji: "📋" },
+  { id: "active", label: "Активные", emoji: "✅" },
+  { id: "inactive", label: "Скрытые", emoji: "👁" },
+  { id: "archived", label: "Архив", emoji: "🗂" },
+];
+
+const isFilter = (raw: string | null): raw is Filter =>
+  raw === "all" || raw === "active" || raw === "inactive" || raw === "archived";
+
+const FormButtonSecondary = (
+  <Link
+    to="/habits/new"
+    className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-card border border-white/10 bg-surface px-5 py-3 text-sm font-medium text-text transition hover:border-white/20"
+  >
+    <span aria-hidden="true">+</span>
+    <span>Добавить клуб</span>
+  </Link>
+);
+
+interface FilteredHabitsProps {
+  data: AdminHabit[];
+  filter: Filter;
+  onToggle: (habitId: string, nextActive: boolean) => void;
+  onArchive: (habitId: string) => void;
+  onRestore: (habitId: string) => void;
+  busyHabitId: string;
+  isBusy: boolean;
+}
+
+function FilteredHabits({
+  data,
+  filter,
+  onToggle,
+  onArchive,
+  onRestore,
+  busyHabitId,
+  isBusy,
+}: FilteredHabitsProps) {
+  const items = useMemo(() => {
+    if (filter === "all") return data;
+    if (filter === "archived") return data.filter((h) => h.archived_at !== null);
+    if (filter === "active") return data.filter((h) => h.archived_at === null && h.is_active);
+    return data.filter((h) => h.archived_at === null && !h.is_active);
+  }, [data, filter]);
+
+  if (items.length === 0) {
+    return (
+      <EmptyState
+        icon="🌱"
+        title="Клубов пока нет"
+        description="Создайте первый через кнопку выше."
+      />
+    );
+  }
+
+  return (
+    <ul className="flex flex-col gap-3">
+      {items.map((habit) => (
+        <li key={habit.id}>
+          <AdminHabitCard
+            habit={habit}
+            onToggle={(id, next) => onToggle(id, next)}
+            onArchive={(id) => onArchive(id)}
+            onRestore={(id) => onRestore(id)}
+            busy={busyHabitId === habit.id && isBusy}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function HabitsListPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawFilter = searchParams.get("filter");
+  const filter: Filter = isFilter(rawFilter) ? rawFilter : "all";
+
+  const { data, isLoading, isError, error, refetch } = useAdminHabits();
+  const activate = useActivateHabit();
+  const archive = useArchiveHabit();
+  const restore = useRestoreHabit();
+
+  const handleFilterChange = (next: Filter) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === "all") params.delete("filter");
+    else params.set("filter", next);
+    setSearchParams(params, { replace: true });
+  };
+
+  const busyHabitId =
+    (activate.variables?.habitId ?? archive.variables ?? restore.variables) ?? "";
+  const isBusy = activate.isPending || archive.isPending || restore.isPending;
+
+  return (
+    <ScreenLayout>
+      <PageHeader title="Клубы" right={FormButtonSecondary} />
+
+      <div className="mb-4 flex gap-1 rounded-card bg-surface/60 p-1" role="tablist">
+        {FILTERS.map((f) => {
+          const isActive = filter === f.id;
+          return (
+            <button
+              key={f.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => handleFilterChange(f.id)}
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition ${
+                isActive
+                  ? "bg-primary text-white"
+                  : "text-muted hover:bg-surface hover:text-text"
+              }`}
+            >
+              <span aria-hidden="true">{f.emoji} </span>
+              {f.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {isLoading && (
+        <div className="space-y-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-36 w-full" />
+          ))}
+        </div>
+      )}
+
+      {isError && (
+        <EmptyState
+          icon="⚠️"
+          title="Не удалось загрузить клубы"
+          description={String(error)}
+          action={
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="inline-flex min-h-[44px] items-center justify-center rounded-card bg-primary px-5 py-3 text-sm font-semibold text-white hover:opacity-90"
+            >
+              Повторить
+            </button>
+          }
+        />
+      )}
+
+      {!isLoading && !isError && data && (
+        <FilteredHabits
+          data={data.items}
+          filter={filter}
+          onToggle={(id, next) => activate.mutate({ habitId: id, isActive: next })}
+          onArchive={(id) => archive.mutate(id)}
+          onRestore={(id) => restore.mutate(id)}
+          busyHabitId={busyHabitId}
+          isBusy={isBusy}
+        />
+      )}
+    </ScreenLayout>
+  );
+}

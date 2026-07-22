@@ -82,7 +82,7 @@ class AdminHabitCreateRequest(BaseModel):
     telegram_invite_link: str | None = Field(default=None, max_length=512)
     stat_name: str = Field(min_length=1, max_length=64)
     stat_icon: str | None = Field(default=None, max_length=16)
-    chat_id: int
+    chat_id: int | None = Field(default=0)
     checkin_window_start: time
     checkin_window_end: time
     timezone: str = Field(min_length=1, max_length=64)
@@ -108,6 +108,7 @@ class AdminHabitUpdateRequest(BaseModel):
     telegram_invite_link: str | None = Field(default=None, max_length=512)
     stat_name: str | None = Field(default=None, min_length=1, max_length=64)
     stat_icon: str | None = Field(default=None, max_length=16)
+    chat_id: int | None = Field(default=None)
     checkin_window_start: time | None = None
     checkin_window_end: time | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
