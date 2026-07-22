@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
@@ -34,8 +35,6 @@ def _parse_proof(message: Message) -> dict[str, Any] | None:
 
 
 async def _send_to_backend(payload: dict[str, Any]) -> dict[str, Any]:
-    import aiohttp
-
     from security import generate_service_token
 
     settings = get_settings()
@@ -52,10 +51,7 @@ async def _send_to_backend(payload: dict[str, Any]) -> dict[str, Any]:
             json=payload,
             headers=headers,
         ) as resp:
-            try:
-                return await resp.json()
-            except Exception:
-                return {"code": "backend_unreachable"}
+            return await resp.json()
 
 
 @router.message(F.video_note | F.photo | F.text)
@@ -79,5 +75,16 @@ async def handle_proof(message: Message, bot: Bot) -> None:
             log.warning("checkin_rejected", extra={"code": code})
             return
         log.info("checkin_accepted", extra={"user_id": message.from_user.id})
+    except aiohttp.ClientError as exc:
+        # backend/redis/network недоступен — Celery-таска не поставлена.
+        # НЕ логируем checkin_accepted: пользователю придёт ошибка из Mini App
+        # при следующем опросе, а здесь только фиксируем инцидент для алертов.
+        log.error(
+            "checkin_dispatch_failed",
+            extra={"err": str(exc), "kind": "network"},
+        )
     except Exception as exc:  # noqa: BLE001
-        log.error("checkin_dispatch_failed", extra={"err": str(exc)})
+        log.error(
+            "checkin_dispatch_failed",
+            extra={"err": str(exc), "kind": "unexpected"},
+        )

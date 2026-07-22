@@ -128,10 +128,11 @@ class BonusService:
 
         penalty_obj.bonus_applied = True
         if self._session is not None:
-            try:
-                await self._session.flush()
-            except Exception:
-                pass  # В тестах сессии нет — это нормально.
+            # flush() отправляет UPDATE/INSERT в БД; если БД упала — исключение
+            # ДОЛЖНО всплыть, чтобы верхний слой (worker task) откатил транзакцию
+            # и integrity-check не сработал на ложноположительном bonus_applied=true
+            # без соответствующей transactions-строки.
+            await self._session.flush()
 
         self._logger.info(
             "catch_bonus_applied",

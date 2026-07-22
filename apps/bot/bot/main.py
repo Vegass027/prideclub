@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 from aiohttp import web
@@ -45,9 +46,29 @@ async def on_shutdown(bot: Bot) -> None:
     await bot.session.close()
 
 
+def _make_on_startup(bot: Bot, settings):
+    async def _on_startup() -> None:
+        await on_startup(bot, settings)
+    return _on_startup
+
+
+def _make_on_shutdown(bot: Bot):
+    async def _on_shutdown() -> None:
+        await on_shutdown(bot)
+    return _on_shutdown
+
+
+def _trace(msg: str) -> None:
+    if os.getenv("BOT_BOOT_TRACE") == "1":
+        print(f"[boot] {msg}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
+    _trace("enter_main")
     settings = get_settings()
+    _trace("settings_loaded")
     configure_logging(settings.log_level)
+    _trace("logging_configured")
 
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is not set")
@@ -56,11 +77,13 @@ def main() -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    _trace("bot_constructed")
     dp = Dispatcher()
     dp.message.middleware.register(RateLimitMiddleware())
     dp.include_router(start.router)
     dp.include_router(payments.router)
     dp.include_router(checkin.router)
+    _trace("routers_included")
 
     # Long-poll fallback when no webhook URL is configured.
     if not settings.webhook_base_url:
@@ -71,21 +94,22 @@ def main() -> None:
             asyncio.run(bot.session.close())
         return
 
-    # Webhook mode — canonical aiogram 3.x pattern:
-    # register the SimpleRequestHandler on the aiohttp app, then attach dispatcher
-    # lifecycle via setup_application WITHOUT the `bot=` kwarg (passing `bot=` would
-    # also start polling handlers internally and race with aiohttp's runner).
+    # Webhook mode — canonical aiogram 3.x pattern.
     app = web.Application()
+    _trace("web_app_created")
     webhook_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
         secret_token=settings.webhook_secret,
     )
     webhook_handler.register(app, path=settings.webhook_path)
+    _trace("webhook_handler_registered")
     setup_application(app, dp)
+    _trace("setup_application_done")
 
-    dp.startup.register(lambda: on_startup(bot, settings))
-    dp.shutdown.register(lambda: on_shutdown(bot))
+    dp.startup.register(_make_on_startup(bot, settings))
+    dp.shutdown.register(_make_on_shutdown(bot))
+    _trace("startup_shutdown_registered")
 
     log.info(
         "webhook_listen host=%s port=%d path=%s",
@@ -93,7 +117,9 @@ def main() -> None:
         WEB_SERVER_PORT,
         settings.webhook_path,
     )
+    _trace("calling_run_app")
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    _trace("run_app_returned")
 
 
 if __name__ == "__main__":

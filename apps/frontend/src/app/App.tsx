@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { AppRouter } from "@/app/router";
 import { initTelegram } from "@/shared/telegram/tma";
+import { ErrorBoundary } from "@/shared/ui/ErrorBoundary";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -22,7 +23,9 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AppRouter />
+        <ErrorBoundary>
+          <AppRouter />
+        </ErrorBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   );
