@@ -29,7 +29,10 @@ from app.core.exceptions import (
     HabitValidationError,
 )
 from app.core.logging import get_logger
-from app.core.telegram_links import parse_telegram_topic_link
+from app.core.telegram_links import (
+    parse_telegram_chat_link,
+    parse_telegram_topic_link,
+)
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 
@@ -74,12 +77,18 @@ class HabitService:
         curator_id: int | None,
         checkin_topic_link: str,
         notifications_topic_link: str,
+        chat_link: str | None = None,
     ) -> Any:
         """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4).
 
         Topic-scoped: обязательны ссылки на топики чек-инов и
         уведомлений (https://t.me/c/<chat_id>/<thread_id>).
         Бот ничего не создаёт — топики делает владелец в Telegram.
+
+        `chat_link` — опциональная ссылка на корневой чат клуба
+        (https://t.me/c/<chat_id>). Используется как альтернативный
+        способ задать `chat_id`, если админ не выбрал группу из
+        списка available_chats.
         """
         _validate_title(title)
         _validate_stat_name(stat_name)
@@ -112,9 +121,23 @@ class HabitService:
                 code="habit_topics_must_differ",
             )
 
-        resolved_chat_id = (
-            chat_id if chat_id != 0 else checkin_topic.chat_id
-        )
+        if chat_link is not None and chat_link.strip():
+            link_chat_id = parse_telegram_chat_link(chat_link)
+            if chat_id != 0 and link_chat_id != chat_id:
+                raise HabitTopicMismatchError(
+                    "Ссылка на чат указывает на другую группу, "
+                    "не совпадает с chat_id клуба и топик-ссылками"
+                )
+            if link_chat_id != checkin_topic.chat_id:
+                raise HabitTopicMismatchError(
+                    "Ссылка на чат указывает на группу, отличную от "
+                    "группы топика чек-инов"
+                )
+            resolved_chat_id = link_chat_id
+        else:
+            resolved_chat_id = (
+                chat_id if chat_id != 0 else checkin_topic.chat_id
+            )
 
         existing = await self._habit_repo.get_by_chat_id(resolved_chat_id)
         if existing is not None:
@@ -233,12 +256,14 @@ class HabitService:
         topic_link_changed = (
             "checkin_topic_link" in fields
             or "notifications_topic_link" in fields
+            or "chat_link" in fields
         )
         if topic_link_changed:
             new_checkin_link = fields.pop("checkin_topic_link", None)
             new_notifications_link = fields.pop(
                 "notifications_topic_link", None
             )
+            new_chat_link = fields.pop("chat_link", None)
 
             existing_chat_id = habit.chat_id
 
@@ -277,6 +302,21 @@ class HabitService:
                 fields["notifications_topic_thread_id"] = (
                     habit.notifications_topic_thread_id
                 )
+
+            if new_chat_link is not None and new_chat_link.strip():
+                link_chat_id = parse_telegram_chat_link(new_chat_link)
+                effective_chat_id = (
+                    fields["checkin_topic_thread_id"]
+                    if "chat_id" in fields
+                    else existing_chat_id
+                )
+                if effective_chat_id != 0 and link_chat_id != effective_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Ссылка на чат указывает на группу, отличную от "
+                        "чата клуба и топик-ссылок"
+                    )
+                fields["chat_id"] = link_chat_id
+                existing_chat_id = link_chat_id
 
             resolved_chat_id = fields.get("chat_id", existing_chat_id)
 

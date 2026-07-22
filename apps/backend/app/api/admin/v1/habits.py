@@ -68,7 +68,7 @@ def _get_habit_service(
 
 
 def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
-    from app.core.telegram_links import make_topic_link
+    from app.core.telegram_links import make_chat_link, make_topic_link
 
     checkin_topic_link = (
         make_topic_link(habit.chat_id, habit.checkin_topic_thread_id)
@@ -80,6 +80,11 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         make_topic_link(habit.chat_id, habit.notifications_topic_thread_id)
         if habit.notifications_topic_thread_id is not None
         and habit.chat_id != 0
+        else None
+    )
+    chat_link = (
+        make_chat_link(habit.chat_id)
+        if habit.chat_id != 0
         else None
     )
     return AdminHabitOut(
@@ -107,6 +112,7 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         notifications_topic_thread_id=habit.notifications_topic_thread_id,
         checkin_topic_link=checkin_topic_link,
         notifications_topic_link=notifications_topic_link,
+        chat_link=chat_link,
         archived_at=habit.archived_at,
         created_at=habit.created_at,
         active_members_count=active_members_count,
@@ -145,6 +151,7 @@ async def create_habit(
         curator_id=payload.curator_id,
         checkin_topic_link=payload.checkin_topic_link,
         notifications_topic_link=payload.notifications_topic_link,
+        chat_link=payload.chat_link,
     )
     await service._session.commit()  # noqa: SLF001 — admin endpoint, commit разрешён
     return _habit_to_out(habit)

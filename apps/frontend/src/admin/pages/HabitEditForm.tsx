@@ -60,6 +60,7 @@ interface FormState {
   member_limit: string;
   checkin_topic_link: string;
   notifications_topic_link: string;
+  chat_link: string;
 }
 
 const EMPTY: FormState = {
@@ -80,6 +81,7 @@ const EMPTY: FormState = {
   member_limit: "",
   checkin_topic_link: "",
   notifications_topic_link: "",
+  chat_link: "",
 };
 
 const toIntOrNull = (raw: string): number | null => {
@@ -111,6 +113,7 @@ function habitToForm(h: AdminHabit): FormState {
     member_limit: h.member_limit === null ? "" : String(h.member_limit),
     checkin_topic_link: h.checkin_topic_link ?? "",
     notifications_topic_link: h.notifications_topic_link ?? "",
+    chat_link: h.chat_link ?? "",
   };
 }
 
@@ -232,6 +235,10 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
       errors.notifications_topic_link =
         "Топик уведомлений должен отличаться от топика чек-инов";
     }
+    const chatLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/?$/;
+    if (state.chat_link.trim() && !chatLinkRe.test(state.chat_link.trim())) {
+      errors.chat_link = "Формат https://t.me/c/<chat_id>";
+    }
     return errors;
   };
 
@@ -270,6 +277,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         checkin_topic_link: form.checkin_topic_link.trim() || undefined,
         notifications_topic_link:
           form.notifications_topic_link.trim() || undefined,
+        chat_link: form.chat_link.trim() || undefined,
       });
       navigate("/habits");
     } catch (err) {
@@ -499,6 +507,19 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
           onChange={(e) => set("notifications_topic_link", e.target.value)}
           onBlur={() => touchedFields("notifications_topic_link")}
           placeholder="Вставь ссылку на топик"
+          inputMode="url"
+        />
+      </FieldRow>
+
+      <FieldRow
+        label="Ссылка на чат клуба"
+        error={touched.chat_link ? errors.chat_link : undefined}
+      >
+        <TextInput
+          value={form.chat_link}
+          onChange={(e) => set("chat_link", e.target.value)}
+          onBlur={() => touchedFields("chat_link")}
+          placeholder="Вставь ссылку на чат"
           inputMode="url"
         />
       </FieldRow>

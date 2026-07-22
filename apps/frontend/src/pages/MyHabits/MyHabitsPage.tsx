@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useMyHabits } from "@/shared/hooks";
-import { openCheckinTopic } from "@/shared/telegram/topicLink";
+import { openChatRoot, openCheckinTopic } from "@/shared/telegram/topicLink";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -37,6 +37,8 @@ export function MyHabitsPage() {
           {items.map((h) => {
             const canCheckIn =
               h.chat_id !== 0 && h.checkin_topic_thread_id !== null;
+            const canOpenChat =
+              h.chat_id !== 0 || Boolean(h.telegram_invite_link);
             return (
               <li key={h.id}>
                 <div className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
@@ -58,18 +60,32 @@ export function MyHabitsPage() {
                       <span className="text-primary">Открыть →</span>
                     </div>
                   </button>
-                  {canCheckIn && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openCheckinTopic(h.chat_id, h.checkin_topic_thread_id)
-                      }
-                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-canvas transition hover:bg-primary/90"
-                    >
-                      <span aria-hidden="true">🎬</span>
-                      Сделать чек-ин
-                    </button>
-                  )}
+                  <div className="mt-3 flex flex-col gap-2">
+                    {canCheckIn && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openCheckinTopic(h.chat_id, h.checkin_topic_thread_id)
+                        }
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-semibold text-canvas transition hover:bg-primary/90"
+                      >
+                        <span aria-hidden="true">🎬</span>
+                        Сделать чек-ин
+                      </button>
+                    )}
+                    {canOpenChat && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openChatRoot(h.chat_id, h.telegram_invite_link ?? null)
+                        }
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2.5 text-sm font-medium text-text transition hover:border-white/20"
+                      >
+                        <span aria-hidden="true">💬</span>
+                        Перейти в чат
+                      </button>
+                    )}
+                  </div>
                 </div>
               </li>
             );

@@ -5,7 +5,9 @@ import pytest
 from app.core.exceptions import InvalidTopicLinkError
 from app.core.telegram_links import (
     TelegramTopic,
+    make_chat_link,
     make_topic_link,
+    parse_telegram_chat_link,
     parse_telegram_topic_link,
 )
 
@@ -72,3 +74,46 @@ class TestMakeTopicLink:
         assert parse_telegram_topic_link(url) == TelegramTopic(
             chat_id=-1001234567890, thread_id=5
         )
+
+class TestParseTelegramChatLink:
+    def test_short_form(self) -> None:
+        assert parse_telegram_chat_link("https://t.me/c/4348250990") == -1004348250990
+
+    def test_short_form_trailing_slash(self) -> None:
+        assert parse_telegram_chat_link("https://t.me/c/123/") == -1000000000123
+
+    def test_bot_api_form(self) -> None:
+        assert (
+            parse_telegram_chat_link("https://t.me/c/-1004348250990")
+            == -1004348250990
+        )
+
+    def test_http(self) -> None:
+        assert parse_telegram_chat_link("http://t.me/c/123") == -1000000000123
+
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "",
+            "not-a-url",
+            "https://t.me/+abc",
+            "https://t.me/c/0",
+            "https://t.me/c/abc",
+            "https://t.me/c/123/456",
+        ],
+    )
+    def test_invalid(self, bad_url: str) -> None:
+        with pytest.raises(InvalidTopicLinkError):
+            parse_telegram_chat_link(bad_url)
+
+
+class TestMakeChatLink:
+    def test_short_form_for_bot_api_chat_id(self) -> None:
+        assert make_chat_link(-1004348250990) == "https://t.me/c/4348250990"
+
+    def test_passthrough_for_short_id(self) -> None:
+        assert make_chat_link(123) == "https://t.me/c/123"
+
+    def test_roundtrip(self) -> None:
+        chat_id = -1004348250990
+        assert parse_telegram_chat_link(make_chat_link(chat_id)) == chat_id

@@ -58,6 +58,7 @@ def _base_kwargs(**overrides) -> dict:
         curator_id=None,
         checkin_topic_link="https://t.me/c/-1001234567890/1",
         notifications_topic_link="https://t.me/c/-1001234567890/2",
+        chat_link=None,
     )
     base.update(overrides)
     return base
@@ -173,6 +174,25 @@ class TestCreate:
         with pytest.raises(HabitValidationError) as exc_info:
             await svc.create(admin_id=42, **_base_kwargs(title="Другой клуб"))
         assert exc_info.value.code == "habit_chat_id_duplicate"
+
+    async def test_chat_link_assigns_chat_id_when_zero(self) -> None:
+        svc, _, _ = _make_service()
+        habit = await svc.create(
+            admin_id=42,
+            **_base_kwargs(chat_id=0, chat_link="https://t.me/c/-1001234567890"),
+        )
+        assert habit.chat_id == -1001234567890
+
+    async def test_chat_link_must_match_topics(self) -> None:
+        svc, _, _ = _make_service()
+        with pytest.raises(HabitTopicMismatchError):
+            await svc.create(
+                admin_id=42,
+                **_base_kwargs(
+                    chat_id=-1001234567890,
+                    chat_link="https://t.me/c/-1007777777777",
+                ),
+            )
 
 
 class TestUpdate:
