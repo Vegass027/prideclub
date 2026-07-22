@@ -281,6 +281,49 @@ class FakeCache:
         self.invalidated.append((habit_id, membership_id))
 
 
+class FakePenaltyRepo:
+    """Замена PenaltyRepository для unit-тестов.
+
+    Тест наполняет через `add()`; lookup `get(penalty_id)` возвращает
+    объект Penalty или None.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, Any] = {}
+
+    def add(self, penalty: Penalty) -> None:
+        self._store[str(penalty.id)] = penalty
+
+    async def get(self, penalty_id: str) -> Penalty | None:
+        return self._store.get(penalty_id)
+
+
+class FakeBonusRuleRepo:
+    """Замена BonusRuleRepository. Тест задаёт правила через `set(event, threshold, rule)`."""
+
+    def __init__(self) -> None:
+        self._rules: dict[tuple[str, int], Any] = {}
+
+    def set(self, event_type: str, threshold: int, rule: Any) -> None:
+        self._rules[(event_type, threshold)] = rule
+
+    async def find(self, event_type: str, *, threshold: int) -> Any:
+        return self._rules.get((event_type, threshold))
+
+
+class FakeUserRepo:
+    """Замена UserRepository. Тест задаёт пользователей через `add(user)`."""
+
+    def __init__(self) -> None:
+        self._store: dict[int, Any] = {}
+
+    def add(self, user: Any) -> None:
+        self._store[user.id] = user
+
+    async def get(self, user_id: int) -> Any:
+        return self._store.get(user_id)
+
+
 class FakeSession:
     """Минимальный session для SELECT-эмиттирующих методов сервиса streak."""
 

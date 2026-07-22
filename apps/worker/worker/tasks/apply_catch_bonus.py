@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.core.logging import get_logger
+from app.repositories.bonus_rule_repository import BonusRuleRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
+from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
+from app.repositories.user_repository import UserRepository
 from app.services.bonus_service import BonusService
-from app.repositories.habit_repository import HabitRepository
 
 
 async def _process(payload: dict, *, session_factory=None) -> dict:
@@ -19,6 +22,10 @@ async def _process(payload: dict, *, session_factory=None) -> dict:
             service = BonusService(
                 session=session,
                 membership_repo=MembershipRepository(session),
+                penalty_repo=PenaltyRepository(session),
+                user_repo=UserRepository(session),
+                bonus_rule_repo=BonusRuleRepository(session),
+                suspicious_repo=SuspiciousPairsRepository(session),
             )
             applied = await service.apply_catch_bonus(
                 catcher_membership_id=payload["catcher_membership_id"],
