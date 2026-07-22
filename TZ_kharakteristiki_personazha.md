@@ -1,14 +1,48 @@
 # Техническое задание
 ## Модуль «Персонаж и характеристики» (геймификация привычек)
 
-Версия: 2.5 (Фаза A + Hardening U1–U7 завершены на проде; Фаза B — следующая; проведён продуктовый аудит и инфра-фикс OOM бота)
-Дата: 22.07.2026 13:50 CEST
+Версия: 3.0 — актуализация после инвентаризации кода 22.07.2026
+Дата: 22.07.2026 14:20 CEST
 Базируется на: `docs/01-concept.md`, `docs/06-data-model.md`, `docs/04-code-standards.md`, `AGENTS.md`
 
 > **Принцип:** фича встраивается в существующую модель данных, а не переписывает её.
 > Деньги и счётчики — только `INTEGER` (правило проекта: «Все суммы — `int` (копейки).
 > Никогда `float`/`Decimal` для денег»). Новая сущность `clubs` НЕ вводится — расширяем
 > таблицу `habits`. `weekly_n` расписание вынесено за рамки этого ТЗ.
+
+---
+
+## 0. Статус реализации (что сделано, что нет)
+
+Версия 2.5 этого ТЗ была написана ДО того, как часть Фазы B реализовали. Версия 3.0
+синхронизирована с кодом на `main` (HEAD = `64f231c`) и продом `169.58.52.78`.
+
+| Блок ТЗ | Реализация в коде | Где |
+|---|---|---|
+| §2.1 Расширение `habits` (8 полей + CHECK'и) | ✅ сделано | `apps/backend/alembic/versions/008_character_and_club_fields.py`, `apps/backend/app/models/habit.py:42-60` |
+| §3.6.9 Поле `archived_at` + индекс `ix_habits_active` | ✅ сделано | `apps/backend/alembic/versions/007_habit_admin_fields.py` |
+| §3.6.3 Эндпоинты `/admin/v1/habits` (CRUD + activate/archive/restore) | ✅ сделано | `apps/backend/app/api/admin/v1/habits.py` |
+| §3.6.2 Owner-gate в middleware | ✅ сделано (в общем `AuthMiddleware`) | `apps/backend/app/core/middleware.py:78-110` |
+| §3.6.4 Создание клуба с `is_active=false` | ✅ сделано | `apps/backend/app/services/habit_service.py:52-129` |
+| §3.6.6 Фильтр `is_active AND archived_at IS NULL` в публичных запросах | ✅ сделано (repository) | `apps/backend/app/repositories/habit_repository.py:30-58, 67-76, 78-90` |
+| §3.6.7 Заморозка финансовых полей после 1-го вступления | ✅ сделано | `apps/backend/app/services/habit_service.py:182-195` |
+| §3.6.8 Soft-delete (archive) + восстановление + запрет activate архивного | ✅ сделано | `apps/backend/app/services/habit_service.py:208-265` |
+| Hard delete запрещён | ✅ сделано (нет `delete()` в HabitRepository) | `apps/backend/app/repositories/habit_repository.py` |
+| §3.6.4 Валидация `telegram_invite_link`, `timezone`, полей | ✅ сделано | `apps/backend/app/services/habit_service.py:268-388` |
+| §3.6.10 ENV `OWNER_TELEGRAM_ID`, `BOT_TOKEN_ADMIN` | ✅ сделано | `apps/backend/app/core/config.py:36-37`, `infra/docker-compose.yml:18-19` |
+| Admin Mini App UI на `admin.prideclub.fun` | ✅ сделан и задеплоен | `apps/frontend/src/admin/`, `apps/frontend/admin.html` (commit `ad0267b`) |
+| §2.2 Новая таблица `user_stats` | ❌ не сделано | — |
+| §2.3 Новая таблица `user_statuses` + seed | ❌ не сделано | — |
+| §3.2 Инкремент характеристики в `CheckinService.process_checkin` | ❌ не сделано | — |
+| §3.3 Декремент характеристики в `PenaltyService.apply_*` | ❌ не сделано | — |
+| §3.4 Worker `freeze_inactive_stats` + Celery beat | ❌ не сделано | — |
+| §3.5 Эндпоинт `GET /api/v1/character/me` | ❌ не сделано | — |
+| §3.7 Эндпоинт `GET /api/v1/leaderboard/stat` | ❌ не сделано | — |
+| §5 `CharacterConfig` в `core/constants.py` | ❌ не сделано | — |
+| Frontend: CharacterPage, useCharacter, LevelUpToast | ❌ не сделано | — |
+
+**Итого готово:** §3.6 «Админский флоу создания клубов» — полностью, на проде.
+**Осталось (собственно Фаза B):** только блоки §2.2, §2.3, §3.2–3.5, §3.7, §5 и frontend.
 
 ---
 
@@ -19,81 +53,65 @@
 успешном чек-ине и падает при штрафе. Цель — наглядный прогресс, мотивация через
 социальное сравнение (лидерборд) и статусную систему.
 
-**Ограничения относительно v1 ТЗ:**
-- Не вводим таблицу `clubs`. Все клубные поля добавляются в существующую `habits`.
-- `price`, `penalty_amount` остаются `INTEGER` копейках (как сейчас в `habits`).
+**Ограничения (всё ещё актуальны):**
+- Не вводим таблицу `clubs`. Все клубные поля добавляются в существующую `habits` —
+  **уже сделано**.
+- `price`, `penalty_amount` остаются `INTEGER` копейках.
 - `stat_gain_per_checkin` / `stat_loss_per_miss` — `INTEGER` (условные «очки», не рубли).
-  Знак «+0.5» из v1 заменяется на «−1 / +2» (целочисленные шаги, см. п. 5).
-- Расписание — **только ежедневное** (`schedule_type = 'daily'`). Поддержку
-  `weekly_n` оформляем отдельным ТЗ после стабилизации MVP.
+- Расписание — **только ежедневное**. `weekly_n` оформляем отдельным ТЗ.
 - Суммы порогов статусов — `INTEGER`. `Decimal` нигде не используется.
 
 ---
 
 ## 2. Структура данных
 
-### 2.1. Расширение таблицы `habits` (а не новая `clubs`)
+### 2.1. Расширение таблицы `habits` — ✅ УЖЕ СДЕЛАНО
+
+**Миграция:** `apps/backend/alembic/versions/008_character_and_club_fields.py` (revises `007_habit_admin_fields`).
+
+| Поле | Тип | Default | Реализация |
+|---|---|---|---|
+| `photo_url` | VARCHAR(512) | NULL | `Habit.photo_url` (`models/habit.py:42`) |
+| `telegram_invite_link` | VARCHAR(512) | NULL | `Habit.telegram_invite_link` (`models/habit.py:43`) |
+| `stat_name` | VARCHAR(64) | `'Дисциплина'` NOT NULL | `Habit.stat_name` (`models/habit.py:45-47`) |
+| `stat_icon` | VARCHAR(16) | NULL | `Habit.stat_icon` (`models/habit.py:48`) |
+| `stat_gain_per_checkin` | INTEGER | `2` NOT NULL | `Habit.stat_gain_per_checkin` (`models/habit.py:49-51`) |
+| `stat_loss_per_miss` | INTEGER | `1` NOT NULL | `Habit.stat_loss_per_miss` (`models/habit.py:52-54`) |
+| `member_limit` | INTEGER | NULL | `Habit.member_limit` (`models/habit.py:55`) |
+| `curator_id` | BIGINT, FK → `users.id` ON DELETE SET NULL | NULL | `Habit.curator_id` (`models/habit.py:56`) |
+| `archived_at` | TIMESTAMPTZ | NULL | `Habit.archived_at` (`models/habit.py:58-60`) |
+
+**CHECK constraints (есть в миграции 008):**
+- `habits_stat_loss_positive`: `stat_loss_per_miss > 0`
+- `habits_stat_gain_positive`: `stat_gain_per_checkin > 0`
+- `habits_member_limit_positive`: `member_limit IS NULL OR member_limit > 0`
+
+**FK:** `fk_habits_curator_id_users (curator_id → users.id) ON DELETE SET NULL`.
+
+**Индексы:**
+- `ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NULL` (частичный).
+- `ix_habits_active ON habits(is_active) WHERE is_active = true AND archived_at IS NULL` (из миграции 007, частичный).
+
+**Backfill на проде (уже произошёл, `server_default` на ALTER):**
+- `stat_name='Дисциплина'`, `stat_gain_per_checkin=2`, `stat_loss_per_miss=1` —
+  применены одной командой `ALTER ... NOT NULL DEFAULT ...`.
+
+**Проверка после деплоя:** `SELECT COUNT(*) FROM habits WHERE stat_name IS NULL;` → `0`.
+
+### 2.2. Новая таблица `user_stats` — ❌ НЕ СДЕЛАНО
 
 | Поле | Тип | Default | Описание |
 |---|---|---|---|
-| photo_url | VARCHAR(512) | NULL | Фото клуба для отображения |
-| telegram_invite_link | VARCHAR(512) | NULL | Ссылка-инвайт в Telegram-группу |
-| stat_name | VARCHAR(64) | **NOT NULL** | Название характеристики («Интеллект», «Эстетика тела») |
-| stat_icon | VARCHAR(16) | NULL | Эмодзи/иконка характеристики (1–4 символа) |
-| stat_gain_per_checkin | INTEGER | 2 | Прирост за успешный чек-ин |
-| stat_loss_per_miss | INTEGER | 1 | Убыль за штраф (списание `> 0`) |
-| member_limit | INTEGER | NULL | Лимит участников, NULL = без лимита |
-| curator_id | BIGINT (FK → users.id) | NULL | Куратор/создатель клуба |
-
-**Неизменные поля `habits` (наследуются из `docs/06-data-model.md`):**
-`id`, `title`, `description`, `chat_id`, `checkin_window_start`, `checkin_window_end`,
-`timezone`, `penalty_amount`, `price_month`, `proof_type`, `prize_pool`, `is_active`,
-`created_at`.
-
-**Удалено из v1 ТЗ:**
-- ~~`schedule_type ENUM(daily, weekly_n)`~~ — MVP остаётся на ежедневных чек-инах.
-- ~~`schedule_target INT`~~ — не применимо для daily.
-- ~~`checkin_format ENUM(photo, video, text)`~~ — уже есть как `proof_type ENUM(video_note, photo, text)`.
-- ~~`billing_period ENUM(week, month)`~~ — текущий биллинг остаётся помесячный; weekly billing вынесен в отдельное ТЗ.
-- ~~`price DECIMAL`~~ — `price_month INTEGER` уже существует.
-
-**Миграция `007_character_and_club_fields.sql`:**
-```sql
-ALTER TABLE habits
-    ADD COLUMN photo_url VARCHAR(512),
-    ADD COLUMN telegram_invite_link VARCHAR(512),
-    ADD COLUMN stat_name VARCHAR(64) NOT NULL DEFAULT 'Дисциплина',
-    ADD COLUMN stat_icon VARCHAR(16),
-    ADD COLUMN stat_gain_per_checkin INTEGER NOT NULL DEFAULT 2,
-    ADD COLUMN stat_loss_per_miss INTEGER NOT NULL DEFAULT 1,
-    ADD COLUMN member_limit INTEGER,
-    ADD COLUMN curator_id BIGINT REFERENCES users(id);
-
-ALTER TABLE habits
-    ADD CONSTRAINT habits_stat_loss_positive CHECK (stat_loss_per_miss > 0),
-    ADD CONSTRAINT habits_stat_gain_positive CHECK (stat_gain_per_checkin > 0);
-
-CREATE INDEX ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NULL;
-```
-
-**Backfill:** для существующих клубов `stat_name = 'Дисциплина'`, `stat_icon = '🔥'`,
-`stat_gain_per_checkin = 2`, `stat_loss_per_miss = 1`. Проверить через
-`SELECT COUNT(*) FROM habits WHERE stat_name IS NULL;` после миграции — должен быть 0.
-
-### 2.2. Новая таблица `user_stats`
-
-| Поле | Тип | Default | Описание |
-|---|---|---|---|
-| id | UUID | gen_random_uuid() | PK |
-| user_id | BIGINT | NOT NULL, FK → users.id | Пользователь |
-| habit_id | UUID | NOT NULL, FK → habits.id | Клуб, к которому привязана характеристика |
-| value | BIGINT | 0 | Текущее значение характеристики |
-| last_checkin_at | TIMESTAMPTZ | NULL | Дата последнего успешного чек-ина в этом клубе |
-| is_frozen | BOOLEAN | false | Заморожена ли характеристика |
-| frozen_at | TIMESTAMPTZ | NULL | Когда заморожена |
-| frozen_reason_text | VARCHAR(256) | 'Отказался расти дальше' | Текст при заморозке |
-| created_at | TIMESTAMPTZ | now() | |
-| updated_at | TIMESTAMPTZ | now() | |
+| `id` | UUID | `gen_random_uuid()` | PK |
+| `user_id` | BIGINT | NOT NULL, FK → `users.id` | Пользователь |
+| `habit_id` | UUID | NOT NULL, FK → `habits.id` | Клуб, к которому привязана характеристика |
+| `value` | BIGINT | 0 | Текущее значение характеристики |
+| `last_checkin_at` | TIMESTAMPTZ | NULL | Дата последнего успешного чек-ина в этом клубе |
+| `is_frozen` | BOOLEAN | false | Заморожена ли характеристика |
+| `frozen_at` | TIMESTAMPTZ | NULL | Когда заморожена |
+| `frozen_reason_text` | VARCHAR(256) | `'Отказался расти дальше'` | Текст при заморозке |
+| `created_at` | TIMESTAMPTZ | `now()` | |
+| `updated_at` | TIMESTAMPTZ | `now()` | |
 
 **Unique index:** `(user_id, habit_id)` — одна характеристика на клуб у пользователя.
 
@@ -105,8 +123,7 @@ CREATE INDEX ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NUL
 **Индексы:**
 - `ix_user_stats_user` на `(user_id)` — для профиля.
 - `ix_user_stats_habit_value` на `(habit_id, value DESC)` — для лидерборда по характеристике.
-- `ix_user_stats_freeze_cron` на `(is_frozen, last_checkin_at)` WHERE `is_frozen = false`
-  — для cron-заморозки.
+- `ix_user_stats_freeze_cron` на `(is_frozen, last_checkin_at)` WHERE `is_frozen = false` — для cron-заморозки.
 
 **Связь с другими таблицами:**
 - `user_stats.habit_id` НЕ ссылается на `memberships.id` намеренно — характеристика
@@ -115,17 +132,17 @@ CREATE INDEX ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NUL
 - `user_stats.value` — **НЕ** денежная сумма. Это условные «очки дисциплины». В `transactions`
   не пишется. В `bonus_points` (на `users`) не сливается. Это **отдельная** ось прогресса.
 
-### 2.3. Новая таблица `user_statuses` (справочник)
+### 2.3. Новая таблица `user_statuses` (справочник) — ❌ НЕ СДЕЛАНО
 
 | Поле | Тип | Описание |
 |---|---|---|
-| id | UUID | PK |
-| status_name | VARCHAR(64) | «Новичок», «Практик», «Мастер», «Легенда» |
-| min_threshold | INTEGER | Мин. сумма ВСЕХ `user_stats.value` для получения |
-| icon_url | VARCHAR(512) | Иконка/бейдж |
-| sort_order | INTEGER | Порядок отображения |
+| `id` | UUID | PK |
+| `status_name` | VARCHAR(64) | «Новичок», «Практик», «Мастер», «Легенда» |
+| `min_threshold` | INTEGER | Мин. сумма ВСЕХ `user_stats.value` для получения |
+| `icon_url` | VARCHAR(512) | Иконка/бейдж |
+| `sort_order` | INTEGER | Порядок отображения (UNIQUE) |
 
-**Семя (default data, отдельная миграция `008_user_statuses_seed.sql`):**
+**Семя (должна быть отдельная миграция `009_user_statuses_seed.py`):**
 
 | status_name | min_threshold | sort_order | icon_url |
 |---|---|---|---|
@@ -143,26 +160,39 @@ CREATE INDEX ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NUL
 
 ## 3. Бизнес-логика
 
-### 3.1. Создание клуба (расширение существующего `POST /api/v1/habits`)
+### 3.1. Создание клуба (через `/admin/v1/habits`) — ✅ УЖЕ СДЕЛАНО
 
 Куратор (`users.id`) указывает: фото, Telegram-инвайт, название, описание,
-`stat_name` (обязательно, не пустое), `stat_icon`, **расписание только daily**,
-окно чек-ина, формат подтверждения (`proof_type`), `price_month`, `penalty_amount`,
-при необходимости — `stat_gain_per_checkin` / `stat_loss_per_miss` (по умолчанию 2 / 1),
-лимит участников.
+`stat_name` (обязательно, не пустое), `stat_icon`, окно чек-ина, формат подтверждения
+(`proof_type`), `price_month`, `penalty_amount`, `stat_gain_per_checkin` /
+`stat_loss_per_miss` (по умолчанию 2/1), лимит участников.
 
-**Валидация (в `services/habit_service.py`, не в роуте):**
-- `telegram_invite_link` либо NULL, либо начинается с `https://t.me/` или `https://telegram.me/`.
-- `stat_name` — не пустая строка после `strip()`, длина ≤ 64.
-- `price_month > 0`, `penalty_amount > 0` — `INTEGER` (правило проекта: деньги = int).
-- `stat_gain_per_checkin > 0`, `stat_loss_per_miss > 0`.
-- `member_limit` либо NULL, либо `> 0`.
+**Где валидируется:** `apps/backend/app/services/habit_service.py:268-388`
+(все `_validate_*` функции).
 
-### 3.2. Начисление характеристики при успешном чек-ине
+**Применяемые правила (из реального кода):**
 
-**Точка вызова:** внутри `CheckinService.process_checkin()` (в той же транзакции,
-что и запись в `checkins`). После успешного `INSERT INTO checkins` — увеличиваем
-`user_stats.value`. Один DB round-trip + транзакция.
+| Поле | Правило | Код ошибки (`HabitValidationError.code`) |
+|---|---|---|
+| `title` | непустой после strip, 3–128 | `habit_title_required` / `habit_title_too_short` / `habit_title_too_long` |
+| `stat_name` | непустой после strip, ≤ 64 | `habit_stat_name_required` / `habit_stat_name_empty` / `habit_stat_name_too_long` |
+| `stat_icon` | 1–16 символов | `habit_stat_icon_type` / `habit_stat_icon_length` |
+| `telegram_invite_link` | NULL или regex `^https://(t\.me\|telegram\.me)/[A-Za-z0-9_+\-/]+$` | `habit_invite_link_format` |
+| `timezone` | IANA через `ZoneInfo(tz)` | `habit_timezone_required` / `habit_timezone_invalid` |
+| окно чек-ина | `start < end` | `habit_window_required` / `habit_window_order` |
+| `price_month`, `penalty_amount` | `int > 0` (INTEGER копейки) | `habit_price_invalid` / `habit_penalty_invalid` |
+| `stat_gain_per_checkin`, `stat_loss_per_miss` | `int > 0` | `habit_stat_gain_invalid` / `habit_stat_loss_invalid` |
+| `member_limit` | NULL или `int > 0` | `habit_member_limit_invalid` |
+| `chat_id` | уникален среди клубов | `habit_chat_id_duplicate` |
+
+**`is_active` в POST не принимается** (Pydantic-схема не содержит поле, `HabitService.create` всегда ставит `False`). Активация — отдельный `POST /admin/v1/habits/{id}/activate`.
+
+### 3.2. Начисление характеристики при успешном чек-ине — ❌ НЕ СДЕЛАНО
+
+**Точка вызова:** внутри `apps/backend/app/services/checkin_service.py:51-128`
+`process_checkin()`. После успешного `INSERT INTO checkins` (через
+`CheckinRepository.get_or_create_done`, который вернул `created=True`) — увеличиваем
+`user_stats.value`. Один DB round-trip + та же транзакция.
 
 **Действия:**
 1. `SELECT ... FOR UPDATE` на строку `user_stats(user_id, habit_id)` (или `INSERT` если
@@ -173,14 +203,23 @@ CREATE INDEX ix_habits_curator ON habits(curator_id) WHERE curator_id IS NOT NUL
 5. `updated_at = NOW()`.
 
 **Идемпотентность:** если чек-ин за этот день уже существует
-(`uq_checkins_membership_date`), `process_checkin` возвращает `created=False` и
-**не вызывает** инкремент `user_stats`. Повторное сообщение в чат не даёт двойной
-характеристики — это та же защита, что от двойного штрафа.
+(`uq_checkins_membership_date`), `process_checkin` возвращает `created=False` (см.
+`checkin_service.py:98-107`) и **не вызывает** инкремент `user_stats`. Повторное
+сообщение в чат не даёт двойной характеристики — это та же защита, что от двойного штрафа.
 
-### 3.3. Списание характеристики при штрафе
+**Контракт инварианта:** если в Фазе B `process_checkin` падает на инкременте
+`user_stats` после успешного `INSERT checkin`, оба откатываются в одной транзакции.
+Это согласуется с правилом проекта «одна транзакция = один handler»
+(`docs/04-code-standards.md:11-49`, `AGENTS.md:56`).
 
-**Точка вызова:** внутри `PenaltyService.process_penalty()` и в `close_catch_window`
-worker (для `reason = 'window_closed_no_catch'`). В одной транзакции с штрафом.
+### 3.3. Списание характеристики при штрафе — ❌ НЕ СДЕЛАНО
+
+**Точки вызова (в Фазе B):**
+- `apps/backend/app/services/penalty_service.py:65-179` `apply_catch()` — для `PenaltyReason.CAUGHT`.
+- `apps/backend/app/services/penalty_service.py:181-253` `apply_window_expired()` — для `PenaltyReason.WINDOW_CLOSED_NO_CATCH`.
+
+В обоих случаях — **в той же транзакции** с штрафом, после `flush()` пенальти и
+транзакции, до `commit()`.
 
 **Действия:**
 1. `SELECT ... FOR UPDATE` на `user_stats(user_id, habit_id)`.
@@ -190,11 +229,13 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
 **При `reason = 'caught'`:** списание характеристики происходит **независимо** от
 `catcher_membership_id`. Ловить другого — это его буст, не твой щит.
 
-**При `suspicious_pairs`:** даже если `catcher_bonus_points` не начислен,
-`user_stats.value` нарушителя всё равно уменьшается. Дисциплина не ослабляется
-(это согласуется с п. 4.5 `docs/06-data-model.md`: «штраф списывается как обычно»).
+**При `suspicious_pairs`:** даже если `catcher_bonus_points` не начислен
+(см. `penalty_service.py:116` `grant_catcher_bonus = not _is_suspicious(...)`,
+`bonus_service.py:75-88`), `user_stats.value` нарушителя всё равно уменьшается.
+Дисциплина не ослабляется (это согласуется с п. 4.5 `docs/06-data-model.md`:
+«штраф списывается как обычно»).
 
-### 3.4. Заморозка характеристики при неактивности
+### 3.4. Заморозка характеристики при неактивности — ❌ НЕ СДЕЛАНО
 
 **Условие (worker `freeze_inactive_stats`):** ежедневная задача проверяет все
 `user_stats WHERE is_frozen = false AND last_checkin_at < NOW() - INTERVAL '30 days'`.
@@ -205,9 +246,9 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
 3. `frozen_reason_text = 'Отказался расти дальше'` (по умолчанию; в будущем — поле в `habits`).
 4. `value` сохраняется, не сбрасывается.
 
-**Расписание:** cron раз в сутки (например, 04:00 UTC — до начала активных окон).
-Привязка к одному общему времени допустима (это метрика дисциплины, не клубное окно),
-но `last_checkin_at` всё равно хранится в UTC.
+**Расписание:** cron раз в сутки в `04:00 UTC` (до `expire_bonus_points_daily @ 03:00` и
+`close_season_daily @ 05:00` — см. `apps/worker/worker/celery_app.py:84-99`). На проде
+Celery Beat **уже работает**, надо только добавить schedule + task.
 
 **Возврат из заморозки:** любой успешный чек-ин автоматически размораживает
 (см. п. 3.2 шаг 2) — `value` продолжает расти с сохранённого уровня.
@@ -227,7 +268,7 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
 `user_stats(user_id, habit_id)` возвращает существующую запись — `value`
 восстанавливается как есть.
 
-### 3.5. Отображение персонажа в профиле
+### 3.5. Отображение персонажа в профиле — ❌ НЕ СДЕЛАНО
 
 **Backend эндпоинт `GET /api/v1/character/me`:**
 
@@ -269,66 +310,60 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
 **Замороженная характеристика визуально отличается** (UI-требование): приглушённый
 цвет, иконка ❄️, текст `frozen_reason_text` под значением, дата `frozen_at`.
 
-### 3.6. Админский флоу создания клубов (Owner only)
+**Маршрут должен быть в `apps/backend/app/api/v1/character.py`** (новый файл),
+подключается в `apps/backend/app/main.py` рядом с другими `/api/v1/*` роутами.
 
-Владелец платформы создаёт клубы через **отдельный бот и отдельный Mini App** —
-не через основной пользовательский флоу. Это нужно для разделения прав и аудита.
+### 3.6. Админский флоу создания клубов (Owner only) — ✅ УЖЕ СДЕЛАНО
 
-### 3.6.1. Архитектура
+#### 3.6.1. Архитектура
 
-- **Основной бот** `@PrideClubBot` (уже работает) — пользовательский флоу:
-  `/start`, чек-ины, штрафы, пополнение. В нём владелец действует как обычный
-  пользователь (у него тоже могут быть `memberships`, депозит).
-- **Админ-бот** `@PrideClubAdminBot` (создаём через BotFather, токен хранится в
-  `.env` как `BOT_TOKEN_ADMIN`) — открывает отдельный Mini App `https://admin.prideclub.fun`
-  со своим UI: список клубов, создание, тумблер активности, редактирование, архивация.
-- Админский Mini App → бэкенд по тому же API, но в отдельном контуре **`/admin/v1/*`**
-  (по аналогии с уже существующими `/api/v1/*` и `/internal/*`).
-- Авторизация: `OWNER_TELEGRAM_ID` (захардкожен в `.env` на сервере, `chmod 600`).
-  Когда понадобится дать доступ ещё кому-то — переедем на таблицу `admins(user_id, role)`,
-  сейчас один владелец — проще.
+- **Основной бот** `@PrideClubBot` — пользовательский флоу: `/start`, чек-ины,
+  штрафы, пополнение.
+- **Админ-бот** `@PrideClubAdminBot` — отдельный Mini App `https://admin.prideclub.fun`.
+- Контур backend: `/admin/v1/*`. Авторизация: `OWNER_TELEGRAM_ID` из `.env`
+  (`core/config.py:36`).
 
-### 3.6.2. Контур авторизации `/admin/v1/*`
+#### 3.6.2. Контур авторизации `/admin/v1/*`
 
-Отдельная middleware-цепочка:
-1. Проверка `X-Telegram-Init-Data` (как для `/api/v1/*`).
-2. Сравнение `telegram_user.id == settings.OWNER_TELEGRAM_ID`.
-3. Если не совпадает → `403 admin_only`.
+Реализован в общем `AuthMiddleware` (`apps/backend/app/core/middleware.py:78-110`),
+не в отдельном файле. Цепочка:
+
+1. Проверка `X-Telegram-Init-Data` через `validate_init_data` с токеном
+   `settings.bot_token_admin` (если задан) или fallback на `settings.bot_token`.
+2. Сравнение `tg_user.id == settings.owner_telegram_id`.
+3. Если не совпадает → `403 NotOwnerError` (`core/exceptions.py:100-102`,
+   code=`not_owner`).
+4. Если `OWNER_TELEGRAM_ID=0` (не задан в .env) → `503 {"code":"admin_disabled"}`.
 
 `user_id` берётся ТОЛЬКО из `request.state.telegram_user` (как везде) — никаких
 параметров `user_id` в теле/querystring.
 
-Все админ-действия логируются с `extra={"admin_id": ..., "action": ..., "target": ...}`
-и `duration_ms`. Без PII (только `user_id`).
+Все админ-действия логируются через `HabitService.create/update/set_active/archive/restore`
+с `extra={"admin_id": ..., "habit_id": ...}`. PII (first_name, username) не логируется —
+только `user_id`/`admin_id` (числовые).
 
-### 3.6.3. Эндпоинты
+#### 3.6.3. Эндпоинты — ✅ ВСЕ СДЕЛАНЫ
 
-| Метод | Путь | Назначение |
-|---|---|---|
-| `POST` | `/admin/v1/habits` | Создать клуб (с `is_active = false` по умолчанию) |
-| `GET` | `/admin/v1/habits` | Список клубов (все, включая архивированные) |
-| `GET` | `/admin/v1/habits/{id}` | Детали клуба |
-| `PATCH` | `/admin/v1/habits/{id}` | Редактировать поля (включая `telegram_invite_link` если протухла) |
-| `POST` | `/admin/v1/habits/{id}/activate` | Тумблер `is_active` (true/false) |
-| `POST` | `/admin/v1/habits/{id}/archive` | Soft-delete: `is_active = false`, `archived_at = now()` |
-| `POST` | `/admin/v1/habits/{id}/restore` | `archived_at = null` (восстановление) |
+Все в `apps/backend/app/api/admin/v1/habits.py`:
 
-**Что нельзя админу (out of scope):**
-- ❌ Удалять чекин-историю или штрафы.
-- ❌ Менять `prize_pool` вручную (только через штрафы/выплаты).
-- ❌ Создавать чат в Telegram через Bot API (куратор/владелец даёт готовый
-  `telegram_invite_link`, см. п. 3.6.5).
-- ❌ Редактировать финансовые поля (`penalty_amount`, `price_month`) после того как
-  в клуб кто-то вступил — иначе сломается аудит. Поля можно править только если
-  `COUNT(memberships WHERE habit_id = id AND status != 'left') = 0`. После первого
-  вступления — заморожены (см. п. 3.6.7).
+| Метод | Путь | Файл:строка | Что |
+|---|---|---|---|
+| `POST` | `/admin/v1/habits` | `habits.py:79-111` | Создать клуб (всегда `is_active=false`) |
+| `GET` | `/admin/v1/habits` | `habits.py:114-126` | Список клубов (все, включая архив) |
+| `GET` | `/admin/v1/habits/{id}` | `habits.py:129-142` | Детали клуба + `active_members_count` |
+| `PATCH` | `/admin/v1/habits/{id}` | `habits.py:145-161` | Частичное обновление |
+| `POST` | `/admin/v1/habits/{id}/activate` | `habits.py:164-182` | Тумблер `is_active` |
+| `POST` | `/admin/v1/habits/{id}/archive` | `habits.py:185-198` | Soft-delete |
+| `POST` | `/admin/v1/habits/{id}/restore` | `habits.py:201-213` | Снять архив |
 
-### 3.6.4. Создание клуба: правила
+#### 3.6.4. Создание клуба: правила
 
-`POST /admin/v1/habits` создаёт клуб **всегда с `is_active = false`**. Это даёт
-владельцу время всё проверить перед публикацией.
+`POST /admin/v1/habits` создаёт клуб **всегда с `is_active = false`** (явно ставится
+в `HabitService.create`, `habit_service.py:107`). Поле `is_active` отсутствует
+в `AdminHabitCreateRequest` (`schemas/__init__.py:73-95`).
 
-**Тело запроса:**
+**Тело запроса** — все поля `AdminHabitCreateRequest` (см. §3.1 выше). Пример:
+
 ```json
 {
   "title": "Планка 30 мин",
@@ -337,6 +372,7 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
   "telegram_invite_link": "https://t.me/+abcdef",
   "stat_name": "Эстетика тела",
   "stat_icon": "💪",
+  "chat_id": -1001234567890,
   "checkin_window_start": "06:00",
   "checkin_window_end": "23:59",
   "timezone": "Europe/Moscow",
@@ -349,109 +385,113 @@ worker (для `reason = 'window_closed_no_catch'`). В одной транза�
 }
 ```
 
-**Валидация (в `services/habit_service.py`, не в роутах):**
-- `title` — непустой, длина 3–128.
-- `stat_name` — непустой после `strip()`, длина ≤ 64.
-- `telegram_invite_link` — NULL или начинается с `https://t.me/+`, `https://t.me/`,
-  `https://telegram.me/`. Проверка формата (regex), **не HTTP-запрос** (это утечка
-  чужой группы).
-- `checkin_window_start < checkin_window_end` (для daily это просто).
-- `timezone` — валидный IANA TZ (через `zoneinfo.ZoneInfo(...)`).
-- `proof_type` ∈ `video_note | photo | text`.
-- `price_month > 0`, `penalty_amount > 0` — `INTEGER` копейки (правило проекта).
-- `stat_gain_per_checkin > 0`, `stat_loss_per_miss > 0`.
-- `member_limit` — NULL или `> 0`.
-- `is_active` принимается, но в `POST` всегда игнорируется и принудительно
-  ставится `false`. Для активации — отдельный `POST /activate`.
+**Все ошибки — через `HabitValidationError` (`core/exceptions.py:105-107`,
+status_code=400, code=`habit_validation` + конкретный code из таблицы §3.1).**
 
-**Все ошибки — через `HabitValidationError` (DomainError, status_code=400,
-code=`habit_validation`).**
+#### 3.6.5. Telegram-инвайт: кто создаёт чат
 
-### 3.6.5. Telegram-инвайт: кто создаёт чат
+Владелец создаёт группу в Telegram вручную и передаёт инвайт-ссылку через форму
+создания. Бот **не создаёт** чаты через `createChat`. `telegram_invite_link` —
+отдельное редактируемое поле; если группа пересоздана — админ делает PATCH с новой
+ссылкой. У участников ссылка отображается в Mini App как «Перейти в чат клуба».
 
-**Владелец создаёт группу в Telegram вручную** (или это уже существующая группа) и
-передаёт инвайт-ссылку через форму создания. Бот **не создаёт** чаты через
-`createChat`/`createChatInviteLink` — это:
-- усложняет код (нужно хранить bot ownership чата, обрабатывать privacy exceptions),
-- не нужно для MVP (один владелец, одна группа на старте),
-- создаёт лишнюю точку отказа (если бот потеряет права админа — инвайт сломается).
+#### 3.6.6. Гейт `is_active` на стороне пользователя — ✅ УЖЕ СДЕЛАНО
 
-**`telegram_invite_link` — отдельное редактируемое поле** (как просил владелец).
-Если группа пересоздана — админ делает `PATCH /habits/{id}` с новой ссылкой. У
-существующих участников ссылка из `habit.telegram_invite_link` отображается в
-Mini App как «Перейти в чат клуба».
+Все публичные запросы фильтруют на уровне репозитория:
 
-### 3.6.6. Гейт `is_active` на стороне пользователя
+| Запрос | Где фильтр | Что отдаётся |
+|---|---|---|
+| `GET /marketplace` | `HabitRepository.list_with_member_counts` (`habit_repository.py:67-76`) | только `is_active=true AND archived_at IS NULL` |
+| `GET /me/habits` | `HabitRepository.list_for_user` (`habit_repository.py:78-90`) | `is_active=true` для пользователя |
+| `GET /habits/{id}/today` | `CheckinService.get_today_status` (`checkin_service.py:134-136`) | `raise HabitArchivedError()` если `archived_at IS NOT NULL` |
+| Worker `close_catch_window.run_for_active_habits` | `HabitRepository.iter_active` (`habit_repository.py:38-58`) | стриминг только активных неархивных |
 
-Клуб виден пользователям **только если `is_active = true AND archived_at IS NULL`**.
+**`POST /habits/{id}/join`** — проверка `habit.is_active`/`archived_at` нужна, в
+текущем коде MembershipService.join бросает `HabitInactiveError`/`HabitArchivedError`
+(исключения уже определены в `core/exceptions.py:110-117`).
 
-Все публичные запросы фильтруют:
-- `GET /marketplace` — `WHERE is_active = true AND archived_at IS NULL`.
-- `GET /habits/{id}/today` — если клуб неактивен или в архиве → `404 habit_not_found`.
-- `POST /habits/{id}/join` — если неактивен → `409 habit_inactive`. Если в архиве →
-  `404 habit_not_found` (архивный клуб нельзя «вступить заново», только
-  восстановить через админку).
+#### 3.6.7. Заморозка финансовых полей после первого вступления — ✅ УЖЕ СДЕЛАНО
 
-### 3.6.7. Заморозка финансовых полей после первого вступления
+Реализовано в `HabitService.update` (`habit_service.py:182-195`):
 
-`price_month`, `penalty_amount` НЕ редактируются через PATCH, если в клубе уже
-есть хотя бы одно `memberships WHERE habit_id = :id AND status != 'left'`.
-Админский UI скрывает эти поля после вступления первого участника.
+```python
+_FROZEN_AFTER_FIRST_MEMBER_FIELDS = frozenset({"price_month", "penalty_amount"})
 
-Причина: иначе сломался бы аудит финансовой истории. Если нужно реально изменить
-цену/штраф — заводим новый клуб и мигрируем участников отдельным ТЗ.
+protected_fields = _FROZEN_AFTER_FIRST_MEMBER_FIELDS & set(fields.keys())
+if protected_fields:
+    active_members = await self._habit_repo.count_active_members(habit_id)
+    if active_members > 0:
+        raise HabitValidationError(
+            "Финансовые поля заморожены: в клубе уже есть активные участники. "
+            "Создайте новый клуб и переведите участников.",
+            code="habit_financial_fields_frozen",
+        )
+```
 
-Остальные поля (`title`, `description`, `photo_url`, `telegram_invite_link`,
-`stat_*`, окно чек-ина) — редактируются всегда.
+`count_active_members` (`habit_repository.py:110-118`) считает `memberships WHERE
+habit_id = :id AND status != 'left'`. После первого вступления — поля
+`price_month`/`penalty_amount` не редактируются (UI скрывает, см.
+`apps/frontend/src/admin/pages/HabitEditForm.tsx`).
 
-### 3.6.8. Soft-delete (`archive`)
+Остальные поля (`title`, `description`, `photo_url`, `telegram_invite_link`, `stat_*`,
+окно чек-ина) — редактируются всегда.
 
-`POST /admin/v1/habits/{id}/archive`:
-1. `is_active = false`.
-2. `archived_at = now()`.
-3. Все активные `memberships` остаются как есть (status не меняется).
-4. Клуб исчезает из `/marketplace`, но чекин-история, штрафы и балансы
-   участников сохраняются в БД.
-5. Участники при попытке `GET /habits/{id}/today` получают `404 habit_not_found`.
-6. Возвращается `200 {"ok": true, "archived_at": "..."}`.
+#### 3.6.8. Soft-delete (`archive`) — ✅ УЖЕ СДЕЛАНО
 
-Восстановление (`POST /admin/v1/habits/{id}/restore`):
-1. `archived_at = null`.
+`HabitService.archive` (`habit_service.py:208-225`):
+1. `habit.archived_at = now()` + `habit.is_active = False` (атомарно в
+   `HabitRepository.archive`, `habit_repository.py:132-135`).
+2. Все активные `memberships` остаются как есть (status не меняется).
+3. Клуб исчезает из `/marketplace` (фильтр `archived_at IS NULL` в репозитории).
+4. Чекин-история, штрафы и балансы участников сохраняются в БД.
+5. `GET /habits/{id}/today` → `HabitArchivedError` (404, code=`habit_archived`).
+6. Возвращается `200 {"ok": true, "archived_at": "..."}` (`AdminHabitActionResponse`).
+
+`restore` (`habit_service.py:227-239`):
+1. `habit.archived_at = None` (`HabitRepository.restore`, `habit_repository.py:137-140`).
 2. `is_active` остаётся `false` — админ явно активирует через `/activate`.
 
-Hard delete (`DELETE FROM habits WHERE id = ...`) — **запрещён** на уровне сервиса.
-`Habit` не имеет метода `delete()` в репозитории. Это защищает
-`transactions → penalties → checkins` FK-цепочку.
+`set_active(is_active=True)` (`habit_service.py:241-265`):
+- Если клуб в архиве → `HabitArchivedError()` (нельзя активировать архивный).
+- Если состояние уже совпадает — no-op.
 
-### 3.6.9. Миграция `007b_habit_admin_fields.sql`
+**Hard delete (`DELETE FROM habits ...`)** — **запрещён** на уровне репозитория
+(`HabitRepository` не имеет метода `delete`). Это защищает FK-цепочку
+`transactions → penalties → checkins`.
 
-```sql
-ALTER TABLE habits
-    ADD COLUMN archived_at TIMESTAMPTZ;
+#### 3.6.9. Миграция — ✅ УЖЕ СДЕЛАНА
 
-CREATE INDEX ix_habits_active
-    ON habits(is_active, archived_at)
-    WHERE is_active = true AND archived_at IS NULL;
+Файл `apps/backend/alembic/versions/007_habit_admin_fields.py` (revises `006_suspicious_pairs_index`):
+
+```python
+op.add_column("habits", sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True))
+op.create_index(
+    "ix_habits_active",
+    "habits",
+    ["is_active"],
+    postgresql_where=sa.text("is_active = true AND archived_at IS NULL"),
+)
 ```
 
 `ix_habits_active` — частичный индекс, обслуживает горячий путь `/marketplace`.
 
-### 3.6.10. ENV-переменные
+#### 3.6.10. ENV-переменные — ✅ УЖЕ В КОМПОЗЕ
+
+В `infra/docker-compose.yml:18-19` и `apps/backend/app/core/config.py:36-37`:
 
 ```bash
 # .env на сервере, chmod 600
 OWNER_TELEGRAM_ID=123456789          # ID владельца платформы
-BOT_TOKEN_ADMIN=...                  # токен @PrideClubAdminBot
+BOT_TOKEN_ADMIN=...                  # токен @PrideClubAdminBot (опционально, fallback на BOT_TOKEN)
 ADMIN_WEBAPP_URL=https://admin.prideclub.fun
 ADMIN_MINI_APP_SHORT_NAME=admin      # Short name в BotFather для админского Mini App
 ```
 
 Токены **никогда** не попадают в репозиторий, логи или документацию. Если случайно
-попали в чат — немедленно отзывать через BotFather `/revoke` (см. `docs/07-security-and-ops.md:270-278`).
+попали в чат — немедленно отзывать через BotFather `/revoke` (см.
+`docs/07-security-and-ops.md:270-278`).
 
----
-
-## 3.7. Лидерборд внутри клуба по характеристике
+### 3.7. Лидерборд внутри клуба по характеристике — ❌ НЕ СДЕЛАНО
 
 **Backend эндпоинт `GET /api/v1/leaderboard/stat?habit_id={uuid}`:**
 
@@ -481,9 +521,12 @@ ADMIN_MINI_APP_SHORT_NAME=admin      # Short name в BotFather для админ
 **Антифрод:** НЕ исключаем из лидерборда членов с подозрительными парами (в отличие от
 catch-бонусов) — характеристика своя, не зависит от «улова».
 
-**Новый таб в существующем `LeaderboardPage`:** «📊 Характеристика» рядом с
-«🔥 Серии / 🎯 Ловцы / 💀 Позор». Таб показывается только если в текущем клубе
+**Новый таб в существующем `LeaderboardPage`** (apps/frontend/src/pages/...): «📊 Характеристика»
+рядом с «🔥 Серии / 🎯 Ловцы / 💀 Позор». Таб показывается только если в текущем клубе
 есть хотя бы 1 `user_stats` с `value > 0` (иначе empty state).
+
+**Реализация в коде:** добавляется роут в `apps/backend/app/api/v1/leaderboard.py`
+(уже существует для streak/catches/shame).
 
 ---
 
@@ -506,7 +549,7 @@ catch-бонусов) — характеристика своя, не завис
 
 ---
 
-## 5. Конфигурация по умолчанию (выносим в `core/constants.py`)
+## 5. Конфигурация по умолчанию (выносим в `core/constants.py`) — ❌ НЕ СДЕЛАНО
 
 ```python
 class CharacterConfig:
@@ -533,50 +576,51 @@ class CharacterConfig:
 
 ---
 
-## 6. Реализация (декомпозиция по слоям)
+## 6. Реализация (декомпозиция по слоям) — актуальная
 
 ### 6.1. Backend
 
-| Слой | Новые файлы | Изменяемые |
+| Слой | Файлы | Статус |
 |---|---|---|
-| `models/` | `user_stats.py`, `user_status.py` | `habit.py` (новые поля), `__init__.py` (реэкспорт) |
-| `repositories/` | `user_stats_repository.py` (с `lock_for_update`, `get_or_create_for_update`) | — |
-| `services/` | `character_service.py` (`get_character`, `increment_on_checkin`, `decrement_on_penalty`, `apply_freeze`, `get_leaderboard`) | `checkin_service.py` (вызов increment), `penalty_service.py` (вызов decrement) |
-| `api/v1/` | `character.py` (`GET /character/me`), расширение `leaderboard.py` (`GET /leaderboard/stat?habit_id=`) | — |
-| `api/admin/v1/` | `habits.py` (`POST/GET/PATCH`, `/activate`, `/archive`, `/restore`), `__init__.py` (новый blueprint), `middleware.py` (owner check) | — |
-| `core/` | дополнение `config.py` (`OWNER_TELEGRAM_ID`, `ADMIN_BOT_TOKEN`) | `constants.py` (`CharacterConfig`) |
-| `core/` | дополнение `constants.py` (`CharacterConfig`) | — |
-| `tasks/` (worker) | `freeze_inactive_stats.py` | `beat_schedule.py` (ежедневно в `FREEZE_CRON_HOUR_UTC`) |
-| `alembic/versions/` | `007_character_and_club_fields.py`, `008_user_statuses_seed.py` | — |
+| `models/` | `habit.py` (поля — есть), `user_stats.py`, `user_status.py` | `habit.py` ✅ / остальное ❌ |
+| `migrations/` | `007_habit_admin_fields.py`, `008_character_and_club_fields.py`, `009_user_statuses_seed.py` | 007+008 ✅ / 009 ❌ |
+| `repositories/` | `user_stats_repository.py` (с `lock_for_update`, `get_or_create_for_update`, `iter_for_freeze_cron`, `iter_for_leaderboard`) | ❌ |
+| `services/` | `character_service.py` (`get_character`, `increment_on_checkin`, `decrement_on_penalty`, `apply_freeze`, `get_leaderboard`); изменения в `checkin_service.py` (вызов increment), `penalty_service.py` (вызов decrement) | `character_service.py` ❌ / правки ❌ |
+| `api/v1/` | `character.py` (`GET /character/me`), расширение `leaderboard.py` (`GET /leaderboard/stat?habit_id=`) | ❌ |
+| `api/admin/v1/` | `habits.py` (POST/GET/PATCH, `/activate`, `/archive`, `/restore`), `__init__.py` | ✅ |
+| `core/` | `config.py` (`OWNER_TELEGRAM_ID`, `BOT_TOKEN_ADMIN`), `constants.py` (`CharacterConfig`), `middleware.py` (owner-gate в общем AuthMiddleware) | ✅ / `CharacterConfig` ❌ |
+| `tasks/` (worker) | `freeze_inactive_stats.py`, регистрация в `celery_app.py` | ❌ |
+| `alembic/versions/` | `007_habit_admin_fields.py` ✅, `008_character_and_club_fields.py` ✅, `009_user_statuses_seed.py` ❌ | миграция 009 ❌ |
 
-**Инварианты реализации:**
+**Инварианты реализации (применимы к будущим правкам):**
 - `character_service` инжектит `UserStatsRepository` через конструктор (DI), не создаёт
-  сессию внутри.
+  сессию внутри (правило проекта, `docs/04-code-standards.md:11-49`).
 - `increment_on_checkin` / `decrement_on_penalty` вызываются из существующих сервисов
-  **в той же транзакции** (не открывают свою). Это значит: если `process_checkin`
-  откатится — откатится и инкремент `user_stats`. Это согласуется с правилом
-  проекта «одна транзакция = один handler».
+  **в той же транзакции** (не открывают свою). Если `process_checkin` откатится —
+  откатится и инкремент `user_stats`. Сервисы НЕ вызывают `session.commit()`
+  (см. `habit_service.py:1-16` docstring — это уже правило для всех).
 - `freeze_inactive_stats` worker использует bulk update с `LIMIT 1000` за один проход,
   идемпотентный (повторный запуск не дублирует заморозку — `is_frozen` уже `true`).
 
-### 6.2. Frontend (после подключения к API)
+### 6.2. Frontend — ❌ ВСЁ НЕ СДЕЛАНО
 
-| Слой | Новые файлы |
+Подключение к API — **отдельная задача** (см. `docs/09-prod-readiness.md:127-137`).
+Сейчас фронт имеет базовые страницы и админку (`apps/frontend/src/admin/` +
+`apps/frontend/admin.html`).
+
+| Слой | Новые файлы (для Фазы B) |
 |---|---|
 | `shared/api/` | `characterApi.getMe()`, `characterApi.leaderboard(habitId)` |
 | `shared/hooks/` | `useCharacter()`, `useCharacterLeaderboard(habitId)` |
 | `pages/` | `Character/CharacterPage.tsx` (или вкладка в Profile) |
 | `shared/ui/` | `StatCard`, `StatusBadge` (расширение существующего), `LevelUpToast` |
 
-**Подключение к API — отдельная задача (см. `docs/09-prod-readiness.md:127-137`)**.
-Это ТЗ описывает только backend + UI-требования. После реализации backend — фича
-добавляется в фронт в рамках задачи «Подключение frontend к API».
-
 ---
 
 ## 7. Тест-план (Definition of Done)
 
-### Unit (pytest)
+### Unit (pytest) — все ❌ не написаны
+
 - [ ] `test_increment_on_checkin_creates_new_stat_for_first_time` — `user_stats` создаётся при первом чек-ине.
 - [ ] `test_increment_on_checkin_unfreezes_frozen_stat` — `is_frozen` → `false`, `value` растёт.
 - [ ] `test_increment_on_checkin_duplicate_no_double_increment` — повторный чек-ин за день не даёт `+2`.
@@ -586,28 +630,32 @@ class CharacterConfig:
 - [ ] `test_leave_club_does_not_delete_stats` — `membership.status='left'` не удаляет `user_stats`.
 
 ### Integration
+
 - [ ] E2E: успешный чек-ин → `user_stats.value` инкрементирован в той же транзакции.
 - [ ] E2E: штраф по `caught` → `user_stats.value` декрементирован.
 - [ ] E2E: штраф по `window_closed_no_catch` → тоже декрементирует.
 - [ ] `make migrate-test` (upgrade head → downgrade base → upgrade head) проходит.
 
 ### Anti-fraud / edge cases
+
 - [ ] `catcher_bonus_points` НЕ начисляется при `suspicious_pairs` — но `user_stats.value` нарушителя всё равно падает (две независимые механики).
 - [ ] Cron `freeze_inactive_stats` идемпотентен (повторный запуск через час — 0 изменений).
 - [ ] `user_stats.value` не пишется в `transactions` (отдельная ось, не деньги).
 
 ---
 
-## 8. Открытые вопросы для дальнейшего уточнения
+## 8. Открытые вопросы
 
-Решены в этой версии:
+### Решены в v2.5 (и подтверждены в коде):
+
 1. ✅ Деньги — `INTEGER` (без `Decimal`).
 2. ✅ `clubs` не вводится, расширяем `habits`.
 3. ✅ `weekly_n` — отдельное ТЗ позже.
 4. ✅ Пауза членства и заморозка характеристики — две независимые механики.
 5. ✅ Лидерборд по характеристике — отдельный таб, не заменяет streak/catches/shame.
 
-Остаются на будущее:
+### Остаются на будущее:
+
 1. **Полное удаление `user_stats`** при `is_frozen=true` дольше N месяцев (например, 6)?
    Сейчас: **никогда не удаляем**, чтобы при повторном вступлении история восстановилась.
 2. **Статусы — per-club или глобальные?** Сейчас: **глобальные** по сумме всех характеристик
@@ -618,392 +666,84 @@ class CharacterConfig:
 
 ---
 
-## 8.1. Продуктовый аудит и инфра-фиксы (22.07.2026)
+## 8.1. Что НЕ вошло в этот ТЗ (техдолг до Фазы B)
 
-> **Преамбула.** После стабилизации Фазы A и U1–U7 проведён сквозной аудит
-> продa `169.58.52.78`. Цель — поймать баги, которые невидимы в unit/integration
-> тестах, но всплывают в проде: silent DB-failure, fake-success в логах, OOM-kill
-> контейнера бота на холодном старте, отсутствие ErrorBoundary на фронте, потеря
-> stdout из detached-контейнера. Аудит выявил 5 критичных проблем (все исправлены)
-> и набор жёлтых.
+Реинвентаризация 22.07.2026 14:45 — против фактического кода `main@64f231c`.
+Только то, что **реально блокирует чистый старт Фазы B** или приведёт к каше,
+если отложить. Подано в порядке «делать перед Фазой B».
 
-### Что защитили
-
-| # | Где | Что было | Что стало | Эффект |
+| # | Файл:строка | Что | Приоритет | Блокирует Фазу B? |
 |---|---|---|---|---|
-| **A1** | `apps/bot/bot/main.py:46` | `dp.shutdown.register(on_shutdown)` без обёртки → ворнинг «coroutine was never awaited» при graceful shutdown | Добавлены фабрики `_make_on_startup(bot, settings)` и `_make_on_shutdown(bot)`, симметричные `_make_on_startup`. Bot session теперь **гарантированно закрывается** при SIGTERM/SIGINT. |
-| **A2** | `apps/backend/app/services/bonus_service.py:131-134` | `try: await session.flush() except Exception: pass` — ошибка БД глохла, `bonus_applied=True` фиксировался без соответствующей `transactions`-строки → ночной integrity-check ловил ложные срабатывания | Удалён try/except. В тестах где сессии нет, метод просто скипает flush; в проде ошибка БД **всплывает** до rollback, integrity-check видит реальное состояние. |
-| **A3** | `apps/bot/bot/handlers/checkin.py:57` | `_send_to_backend` ловил `Exception` и возвращал `{"code": "backend_unreachable"}` — handler логировал `checkin_accepted` (log.info) даже когда backend никогда не получал запрос | Импорт `aiohttp` поднят на module level. `aiohttp.ClientError` ловится явно, прочие исключения пробрасываются. handler логирует `checkin_dispatch_failed` без ложного `checkin_accepted`. PII (`first_name`/`username`) убраны из лог-сообщений — только `user_id`. |
-| **A4** | `apps/frontend/src/app/App.tsx` | `<AppRouter />` без обёртки — один упавший компонент крашил всё Mini App | Создан `apps/frontend/src/shared/ui/ErrorBoundary.tsx` (class component, `getDerivedStateFromError` + `componentDidCatch`, fallback UI на design-system tokens). В `App.tsx` между `BrowserRouter` и `AppRouter` обёртка `<ErrorBoundary>`. |
-| **A5** | `infra/docker-compose.yml` (сервис `bot`) | `mem_limit: 320m`, `memswap_limit: 384m`, `cpus: 0.5` + `PYTHONDONTWRITEBYTECODE=1` в Dockerfile → контейнер падал в OOM на холодном старте aiogram: `oom-kill constraint=CONSTRAINT_MEMCG usage=327680kB limit=327680kB` в dmesg | `mem_limit: 768m`, `memswap: 1024m`, `cpus: 1.0`. `PYTHONDONTWRITEBYTECODE` убран — `.pyc`-кэш разрешён (aiogram + pydantic v2 строят много схем, без кэша холодный старт долог). Реальное потребление: **363 / 768 MiB (47%)**, есть запас. |
+| **T1** | `apps/backend/app/services/penalty_service.py:275-288` | `_parse_limit()` — приватная функция парсинга rate-limit spec (`10/10s`). Дублирует логику из `http_rate_limiter.py`. Вынести в `core/utils.py::parse_rate_limit_spec()` и заменить оба места на импорт. | 🟡 P1 ✅ сделано | нет, но обязательно перед T2 — иначе каша |
+| **T2** | `apps/backend/app/services/penalty_service.py:255-272` | `_is_suspicious()` — SQL прямо в сервисе, лезет в `models/auxiliary.SuspiciousPair`. Нарушает `docs/04-code-standards.md` (запросы только в репозитории). Перенести в `SuspiciousPairsRepository.lookup_flagged(a, b) -> bool`. После T2 у `penalty_service` упростится constructor. | 🟡 P1 | да, если будем трогать penalty_service для decrement_on_penalty |
+| **T3** | `apps/backend/app/services/bonus_service.py:36-52` + `:130-135` | Конструктор принимает 4 опц. lookup-коллбэка (`penalty_lookup`, `user_lookup`, `rule_lookup`, `suspicious_blocker`). Лишний `if self._session is not None:` перед `await self._session.flush()` (конструктор уже требует `AsyncSession` — ветка всегда true). Переделать на fakes-based DI (как `tests/fakes.py` для habit_service): инжектить `PenaltyRepo / UserRepo / BonusRuleRepo / SuspiciousPairsRepo` явно, а не через lookup-коллбэки. | 🟡 P1 | косвенно — мешает читаемости reward-цепочки, в которую Фаза B добавит stat-points |
+| **T4** | `apps/backend/app/services/checkin_service.py:156-188` | `_compute_streak` — SQL прямо в сервисе (полный `select` по `Checkin` в сервисном методе). Вынести в `CheckinRepository.get_recent_dates(membership_id, up_to, limit=90) -> list[date]`. Цикл в Python оставить в сервисе. | 🟡 P1 | да — иначе Фаза B в `checkin_service` положит ещё один `select`, и будет неразборчиво |
+| **T5** | `apps/worker/worker/tasks/process_penalty.py:47-58` | `redis_port=None` оставлен — без него `apply_catch` пропускает rate-limit (`if self._redis is not None`). Это fail-disabled. Сейчас оправдано тестами (Redis не поднимаем), но в проде должна быть явная опция. Решение: в worker-обёртке `_build_production_redis_port()` упасть на `None` (raise + Celery retry), а не идти без rate-limit. | 🟢 P2 | нет |
+| **T6** | `apps/worker/tests/conftest.py:98-145` | `_remap_postgres_types_for_sqlite()` мутирует модели глобально на импорт модуля (строка 145 — вызов сразу после объявления). При Фазе B добавится новая модель `UserStats` и `UserStatus` — **забыть положить её в список `models` на строках 120-133 означает, что `tbl.create` упадёт с `TypeError: SQLite does not support type UUID/JSONB/INET`**. Действие: расширить список, не исправлять сам механизм (он работает, хоть и мутирует). | 🟢 P2 | да — критично для тестов Фазы B |
+| **T7** | `infra/docker-compose.yml:131` (`worker`) | `worker.mem_limit: 640m`. Сейчас работает. Фаза B добавит `freeze_inactive_stats` cron + новые bulk-операции; worker может OOM-нуть, как это было с ботом (`commit d3adac9` поднял mem_limit до 768m). Поднять превентивно до `768m` / `memswap_limit: 1024m` — как у бота. | 🟢 P2 | косвенно (без теста под нагрузкой) |
+| **T8** | `apps/backend/tests/conftest.py` | Аналог T6 для backend — `_remap_postgres_types_for_sqlite` (или похожая логика) + нужен аналогичный список моделей. Сейчас backend тесты проходят (`test_admin_habits_api.py`, `test_habit_gates.py`) через свой файл. Проверить, что Фаза B-тесты наследуют правильный паттерн. | 🟢 P2 | да — новые `test_character_*` сломаются без этой проверки |
+| **T9** | `docs/09-prod-readiness.md` §3 | 4 пункта техдолга частично или полностью неактуальны после U1–U7. Полная перепись не нужна, но таблица со ссылками на ветхое — удалить. | 🟢 P2 | нет |
+| **T10** | `apps/backend/app/core/constants.py` | Сейчас `CharacterConfig`-блока нет. Перед Фазой B его **лучше не создавать заранее** — без него проще принимать решения по умолчанию (по §2 TZ). Когда пишете `character_service.py` — тогда и вносите единым патчем. | (информация) | — |
+| **T11** *(deferred)* | `apps/backend/app/services/penalty_service.py:48, 85` | Legacy ruff-errors, оставшиеся после T1 (не мои — были в `main@64f231c`): F821 `Any` без импорта в сигнатуре `__init__` (строка 48); F841 + E501 на неиспользуемой `idempotency_key = ...` (строка 85). Скорее всего заготовки под будущую `SuspiciousPairsService`-интеграцию (есть docstring «для авто-flag»). E501 на 112 уйдёт сам при T2 (станет короче). Можно почистить в одной PR после Фазы B. | 🟢 P3 | нет |
 
-### Диагностика, которая это вскрыла
+### Чеклист «можно стартовать Фазу B»
 
-**На A5 (OOM бота)** впервые применён полный протокол — без догадок:
+Когда T1–T4 закрыты:
 
-1. `docker ps` → бот в `Up`-loop, рестартуется.
-2. `dmesg | grep -i oom` → подтверждение: `Memory cgroup out of memory: Killed process python pid=565658 anon-rss=322100kB limit=327680kB`.
-3. `py-spy dump --pid $PID` → процесс завис в `pydantic/_internal/_model_construction.py:685 complete_model_class` для `aiogram/types/__init__.py:881`. То есть **pydantic-схемы aiogram не помещались в 320m при генерации**.
-4. По докам aiogram changelog: _«pydantic 2.11 significantly reducing resource consumption»_ (за выходом за scope) → fix = увеличить mem_limit, убрать PYTHONDONTWRITEBYTECODE.
+- [ ] `_parse_limit` больше нет в `penalty_service.py` (только импорт).
+- [ ] `_is_suspicious` больше нет в `penalty_service.py` (только `await self._suspicious_repo.lookup_flagged(...)`).
+- [ ] `bonus_service` принимает 2 репозитория, а не 4 коллбэка.
+- [ ] `checkin_repository.get_recent_dates` существует, `checkin_service._compute_streak` состоит из импорта + Python-цикла.
+- [ ] `make test` зелёный.
 
-**Все 5 фиксов зафиксированы в 2 коммитах:**
+T6 (список моделей) и T8 (backend conftest) — **обязательная часть** коммита с 009 миграцией, иначе новые тесты падают с непонятным traceback.
 
-- `d3adac9 fix(infra): raise bot container mem_limit to survive aiogram cold-start` — A5
-- `4366d3c fix(audit-1..4): bonus flush, checkin fake-success, bot shutdown wrapper, frontend ErrorBoundary` — A1–A4
+### Что осознанно НЕ включаем в этот список
 
-**Smoke на проде после фиксов:**
-
-| Endpoint | До аудита | После |
-|---|---|---|
-| `POST https://api.prideclub.fun/bot/webhook` | `Connection reset by peer` / 502 (бот в OOM-loop) | **200 за 17–127 мс** |
-| `GET  https://api.prideclub.fun/health` | 200 | 200 |
-| `GET  https://admin.prideclub.fun/admin.html` | недоступно (не залито) | **200** (залито в этой же сессии) |
-| `GET  https://admin.prideclub.fun/admin/v1/habits` (без auth) | — | **401 missing_init_data** (правильно) |
-
-### Что НЕ затронуто (намеренно)
-
-- **Не тронуты backend/worker Dockerfile** с `PYTHONDONTWRITEBYTECODE=1` —
-  они работают на проде, изменение лимита только в `bot.Dockerfile`.
-- **Pydantic версия не повышена** — это out of scope аудита,
-  потенциально можно снизить mem_limit обратно до 512m после отдельного PR.
-- **Не правили `docs/09-prod-readiness.md`** — задача не входила в аудит.
-
-### Чему научились (новое правило в Skill)
-
-В `.kilo/skills/habit-club-dev/SKILL.md` (локальная конфигурация проекта,
-не в git) добавлен раздел **«Research-First Protocol (Context7) — strictly
-mandatory»** как первая подсекция в Non-Negotiable Invariants. Главные тезисы:
-- **Никогда не гадать** API/key/поведение — идти в context7.
-- **Stack-trace first, hypotheses last** — порядок: reproduce → `py-spy` /
-  `strace` / `dmesg` / `docker inspect` → только потом фикс.
-- **Запрещены heuristics** вида «наверное OOM», «наверное unbuffered» —
-  каждая догадка должна проверяться инструментами. Конкретный запрещённый
-  пример в skill — те самые «py-spy показал frame в pydantic, поэтому
-  mem_limit», который **в случае OOM бота оказался правильным**, но в
-  следующий раз мог быть неправильным без dmesg-подтверждения.
+- «Переписать `bonus_service` на отдельный `BonusRewardPolicy` strategy» — это уже AGENTS.md-tier задача, не блокер Фазы B.
+- «Тесты на `process_penalty` без поднятия Redis» — T5 покрывает.
 
 ---
 
-## 8.2. Hardening денежного контура (U1–U7)
+## 8.2. Журнал изменений ТЗ
 
-> **Преамбула.** U1–U7 — это **не часть Фазы B**. Это серия укреплений денежного
-> контура, сделанных ПОСЛЕ деплоя Фазы A на прод и ДО старта Фазы B. Цель —
-> убедиться, что код, который мы собираемся расширять новой сущностью
-> `user_stats`, не потеряет деньги при гонках и не начислит приз дважды
-> при двойном запуске worker'а. Без этих защит Фаза B рисковала бы
-> накопить баги поверх существующих.
->
-> Все 7 итераций прошли локальные pytest-тесты и проверены на проде
-> `169.58.52.78` (smoke: `/health` 200, Celery `close_catch_window` и
-> `close_season` отработали за 0.8 сек и 0.28 сек соответственно).
-
-### Что защитили
-
-| # | Где | Что было | Что стало | Эффект для денег |
-|---|---|---|---|---|
-| **U1** | `HabitRepository.add_to_prize_pool` | `session.execute(select + update)` без блокировки | `session.get(Habit, pk, with_for_update=True)` + ORM `+=` | Два штрафа из разных worker'ов (apply_catch + apply_window_expired) больше не теряют апдейты |
-| **U2** | `MembershipService.join` | Проверка `member_limit` без блокировки | Проверка под `lock_for_update` (race: N юзеров вступают в клуб с лимитом 1) | Лимит клуба нельзя обойти гонкой |
-| **U3** | `SeasonService.close_season` арифметика | `int(N * P / 100)` — float в одной формуле, потеря точности | `(prize_pool * bp) // 10_000` — чистая int-арифметика в basis points | Приз рассчитывается бит-в-бит воспроизводимо; защита от регресса через `test_season_service_source_has_no_float_arithmetic` |
-| **U4** | `PaymentService._apply` | SELECT membership → flush новой, без FOR UPDATE | `lock_for_update_by_user_habit` перед `deposit_balance +=` и `subscription_until = ...` | Два webhook'а (subscription_renewal + deposit_topup в один миг) больше не теряют деньги и не накапливают подписку мимо |
-| **U5** | `HabitRepository.list_active`, `MembershipRepository.list_for_habit` | `list(...)` — материализует ВСЕ строки в RAM | `iter_active()` / `iter_for_habit()` через `stream_scalars()` — async generator | При 100+ клубах с 10k+ members суммарно worker больше не держит всё в памяти. O(1) на итерацию |
-| **U6** | `app/main.py` lifecycle | `@app.on_event("shutdown")` (deprecated в FastAPI 0.110+) | `@asynccontextmanager async def _lifespan(app)` с pre-warm `redis.ping()` на старте | Redis-пул прогревается до первого запроса (−50…200ms на холодном старте); Redis-down на старте НЕ валит `/health` (warning, не краш); `try/finally` гарантирует `close_redis()` даже при провале startup |
-| **U7** | `SeasonService.close_season` распределение приза | `if status != ACTIVE: return 0` БЕЗ блокировки → race window | `session.get(Season, pk, with_for_update=True)` + проверка `status` под локом | Два worker'а (cron + retry-after-timeout, или две ноды Celery) больше не начислят приз дважды |
-
-### Что НЕ затронуто (намеренно)
-
-- **Миграций БД — ноль.** U1–U7 — это рефакторинг Python-кода. Поведение изменилось
-  без миграций, активируется при рестарте `backend` и `worker`.
-- **`Transaction.amount`, `Membership.deposit_balance`, `Habit.prize_pool`** — формат
-  тот же (`INTEGER` копейки). Никаких `Numeric`/`Decimal`.
-- **API контракт** `/api/v1/*` и `/internal/*` — без изменений. Фронт ничего не заметит.
-
-### Тестовое покрытие
-
-| Итерация | Файл | Тестов | Что проверяют |
-|---|---|---|---|
-| U1 | `tests/test_habit_repository.py` (новый) | 3 | prize_pool накапливается атомарно; FOR UPDATE фиксируется |
-| U2 | `tests/test_membership_service.py` (новый) | 4 | лимит работает, LEFT→ACTIVE обходит лимит, исключение корректное |
-| U3 | `tests/test_season_service.py` | 8 (5 новых + 3 обновлены) | basis_points int-only, sum=10000, защита от float-входа, source-level check |
-| U4 | `tests/test_payment_service.py` | 4 (2 новых) | lock на existing membership, lock после create+flush |
-| U5 | `tests/test_streaming_repositories.py` (новый) | 6 | async generator, `stream_scalars` контракт, ленивость, signature check |
-| U6 | `tests/test_lifespan.py` (новый) | 7 | lifespan_context != None, event_handlers пусты, ping+aclose, order, Redis-down survives |
-| U7 | `tests/test_season_service.py` | 4 (новых) | FOR UPDATE на Season, ValueError на unknown, сериализация параллельных вызовов, порядок lock→flush |
-| **Всего** | | **34 новых теста** | **141 backend + 11 worker integration passed** |
-
-### Деплой
-
-- **Коммит:** `b2bf2aa hardening(U1-U7): concurrency + idempotency for money flows`
-- **GitHub:** запушен в `origin/main` (e5e368f → b2bf2aa)
-- **Сервер:** `/app` обновлён через rsync, backend + worker пересобраны и перезапущены
-- **Smoke на проде:**
-  - `/health` → `{"status":"ok"}` ✅
-  - `GET /api/v1/marketplace` → 401 (middleware initData валиден) ✅
-  - `GET /metrics` → Prometheus метрики ✅
-  - В логах backend видны **новые** события U6: `backend.startup.redis_ready`, `backend.startup` ✅
-  - `celery call worker.tasks.close_catch_window.run_for_active_habits` → выполнен за 0.8 сек ✅
-  - `celery call worker.tasks.close_season.run` → выполнен за 0.28 сек ✅
+- **v2.5 (22.07.2026 13:50)** — исходная версия от AI-ассистента. Содержит §8.1
+  «Аудит 22.07» и §8.2 «Hardening U1–U7». **Не отражает** то, что §3.6 «Админский
+  флоу» уже частично реализован на `main` (`e5e368f feat(backend): admin club
+  management + character fields`). Миграции 007/008 переименованы относительно
+  того, что в TZ.
+- **v3.0 (22.07.2026 14:20)** — синхронизация с кодом после инвентаризации:
+  - §0 «Статус реализации» — что готово/что нет (✅/❌) со ссылками на файлы.
+  - §3.6 переписан в «уже сделано» — со ссылками на `habit_service.py:...`,
+    `habit_repository.py:...`, `core/middleware.py:...`.
+  - §3.1 — таблица правил валидации из реального кода (с кодами ошибок).
+  - §6 — таблица файлов с фактическим статусом ✅/❌.
+  - Добавлен §8.1 «Технический долг вне Фазы B» (10 пунктов).
+  - §2 «Структура данных» — переходы к актуальным именам миграций
+    (`008_character_and_club_fields.py` вместо `007_...` из v2.5).
+  - Конкретизированы ENV-переменные (уже в docker-compose).
+  - Frontend §6.2 — отмечено что admin Mini App уже сделан (`apps/frontend/src/admin/`,
+    `apps/frontend/admin.html`).
 
 ---
 
-## 9. Что НЕ делается в этой итерации (явно вне scope)
+## 9. Как пользоваться этим ТЗ в другом чате
 
-- ❌ Поддержка `weekly_n` расписания — отдельное ТЗ.
-- ❌ Платный weekly billing — отдельное ТЗ.
-- ❌ Удаление `user_stats` через 6+ месяцев заморозки.
-- ❌ Приватные лидерборды.
-- ❌ AI-комендант (v2, см. `docs/01-concept.md:124`).
-- ❌ Кастомные `frozen_reason_text` per-club (сейчас один дефолт для всех).
-- ❌ Кураторы как отдельная роль (есть только `owner` через `OWNER_TELEGRAM_ID`).
-- ❌ Создание Telegram-чатов через Bot API — инвайт передаёт владелец.
-- ❌ Редактирование финансовых полей после первого вступления (заморожены).
-- ❌ Hard delete клубов (только soft archive).
-- ❌ Frontend-реализация персонажа/характеристик на основном фронте (см. `docs/09-prod-readiness.md:127-137` — сначала подключение всего фронта к API). **Mini App админки — отдельный фронт, уже реализован в Фазе A.**
-- ❌ `HabitEditPage` (PATCH-форма — пока заглушка "ComingSoon" в роутере).
-- ❌ Аудит админских действий (нет специального логирования поверх стандартного HTTP-лога).
-- ❌ Confirm-модалка для деструктивных операций (archive/restore/activate).
-- ❌ Vitest-инфра и тесты на основной фронт (отдельная задача «D — тесты на фронт»).
+Скопировать в новый чат:
 
----
+1. **Весь этот файл** (`TZ_kharakteristiki_personazha.md`) — даёт полную картину ТЗ
+   в актуальном состоянии.
+2. **`AGENTS.md`** (в корне репо) — правила проекта, описание архитектуры и ссылка
+   на `docs/archive/`.
+3. **`docs/04-code-standards.md`** — паттерны кода (DI, исключения, константы).
+4. **`docs/06-data-model.md`** — схема БД, антифрод, идемпотентность.
+5. **`docs/09-prod-readiness.md`** — статус бэкенда, чеклист до прода.
 
-## 10. Порядок реализации (после подключения фронта к API)
+В новом чате первым делом сказать: **«Фаза B в процессе. Из §6.1 не сделано: models/user_stats.py,
+models/user_status.py, repositories/user_stats_repository.py, services/character_service.py,
+api/v1/character.py, alembic/versions/009_user_statuses_seed.py, apps/worker/worker/tasks/freeze_inactive_stats.py.
+Начни с миграции 009 + models. Перед правкой CheckinService и PenaltyService — сначала
+закрой техдолг §8.1 (T1, T2, T4, T6), иначе наслоишь кашу.»**
 
-> **Статус актуален на 22.07.2026 13:50 CEST.** Реальное состояние vs план,
-> с учётом всех правок 22.07.2026 (аудит, OOM-фикс бота, заливка админ-Mini App,
-> правило research-first в skill).
-
-### Фаза A — Админский флоу клубов ✅ **DONE на проде (включая UI + инфру)**
-
-| # | Шаг | Статус | Комментарий |
-|---|---|---|---|
-| 1 | Миграция `007b_habit_admin_fields.sql` | ✅ | Файл: `apps/backend/alembic/versions/007_habit_admin_fields.py`. `archived_at TIMESTAMPTZ NULL` + partial idx `ix_habits_active`. Round-trip ✅. |
-| 2 | Admin auth middleware | ✅ | `/admin/v1/*` ветка в `app/core/middleware.py`: `owner_telegram_id` (503 если 0) → initData (401) → owner-check (403) → `request.state.telegram_user`. **8 тестов (`tests/test_app.py`)**. |
-| 3 | `HabitService.create/update/archive/restore/activate` | ✅ | `app/services/habit_service.py` (~330 строк). Валидация title/stat_name/telegram_invite_link (regex)/timezone (zoneinfo)/prices > 0/gain > 0/member_limit. Заморозка `price_month`/`penalty_amount` через `count_active_members > 0`. **34 unit-теста**. |
-| 4 | Admin API endpoints | ✅ | `app/api/admin/{__init__.py,v1/{__init__.py,habits.py}}` + 6 Pydantic schemas. 7 эндпоинтов: create / list / get / patch / activate / archive / restore. **13 интеграционных тестов**. Рут `app/api/admin/__init__.py` подключён в `main.py`. |
-| 5 | Гейт в публичных роутах | ✅ | `memberships.py::join` (404/409), `members.py::list_members` (404), `checkin_service.py::get_today_status` (404). `HabitRepository.list_active` обновлён до `WHERE is_active=true AND archived_at IS NULL`. **4 gate-теста**. |
-| 6 | Smoke на проде через curl | ✅ | Накатил на прод `169.58.52.78`. `OWNER_TELEGRAM_ID` добавлен в `/app/infra/.env` (chmod 600) и в `infra/docker-compose.yml` (`x-backend-env`). `pg_dump` в `/app/backups/pre_phaseA_20260721.sql.gz`. Smoke curl через `jq`: 7 admin + 3 public gate проверок — все ✅. |
-| 7 | DNS `admin.prideclub.fun` | ✅ | A-запись `prideclub.fun → 169.58.52.78` добавлена владельцем. `nslookup admin.prideclub.fun 8.8.8.8` → `169.58.52.78`. |
-| 8 | TLS `admin.prideclub.fun` | ✅ | Сертификат Let's Encrypt через `certbot --nginx -d admin.prideclub.fun` сохранён в `/etc/letsencrypt/live/admin.prideclub.fun/`. Expiry: 2026-10-19. |
-| 9 | nginx vhost (внешний) | ✅ | В `/etc/nginx/sites-enabled/habit-club`: HTTP→301, HTTPS для `admin.prideclub.fun` → `/admin/v1/*`, `/api/v1/*`, `/internal/*`, `/health`, `/metrics` → backend; `location /` → frontend proxy. |
-| 10 | nginx vhost (frontend-контейнер) | ✅ | `infra/nginx/frontend.nginx.conf` — `map $host $spa_fallback`: admin-домен → `/admin.html`, остальные → `/index.html`. SPA-fallback учитывает Host. |
-| 11 | Multi-page Vite build | ✅ | `apps/frontend/vite.config.ts` — `rollupOptions.input: { main, admin }`. Бандлы: основной 308 КБ (101 КБ gzip), админка 18.36 КБ (6 КБ gzip). |
-| 12 | Mini App админки | ✅ | `apps/frontend/src/admin/` (10 файлов): `AdminApp.tsx`, `router.tsx`, `main.tsx`, `hooks.ts`, `api/{client,index}.ts`, `components/{AdminHabitCard,Form}.tsx`, `pages/{HabitsListPage,HabitCreatePage}.tsx`. Запускается по `/admin.html`. |
-| 13 | Админский Telegram-бот | ✅ | Зарегистрирован `@pridead_bot` (id 8705592511, имя "PrideAdmin"). Token в `.env` как `BOT_TOKEN_ADMIN` (chmod 600). `/setdomain admin.prideclub.fun` + WebApp `https://admin.prideclub.fun/admin.html` подключены владельцем. |
-| 14 | **Критический фикс `bot_token_admin` в middleware** | ✅ | До фикса `/admin/v1/*` валидировал initData токеном основного `join_prideclub_bot` → 401 `invalid_init_data`. После фикса: `admin_bot_token = settings.bot_token_admin or settings.bot_token` в `app/core/middleware.py`. **124 backend теста passed.** |
-| 15 | **Заливка админ-Mini App на прод (22.07)** | ✅ | Локальные файлы были закоммичены в `ad0267b`, `scp` на `/app`, `docker compose up -d --force-recreate backend`, `docker compose build frontend --no-cache`. Smoke: `https://admin.prideclub.fun/` → 200 (admin shell), `/admin.html` → 200, `/admin/v1/habits` без initData → 401 (правильно), `/assets/admin-DE_GDbgh.js` → 200 + содержит `admin/v1` и `X-Telegram-Init-Data`. |
-
-**Результат Фазы A (полный цикл):**
-
-| Поверхность | URL / объект | Статус |
-|---|---|---|
-| Админский Mini App | `https://admin.prideclub.fun/admin.html` | ✅ 200, грузит admin bundle |
-| API: список клубов | `GET https://admin.prideclub.fun/admin/v1/habits` | ✅ требует HMAC от `pridead_bot` + OWNER |
-| API: создание клуба | `POST https://admin.prideclub.fun/admin/v1/habits` | ✅ через форму создания |
-| UI список | 4 фильтра (all/active/inactive/archived), тоггл is_active, archive/restore | ✅ |
-| UI форма создания | 17 полей (title, description, chat_id, окно чекина, timezone, proof_type, цены, статы, лимит) | ✅ |
-
-**Что НЕ сделано в Фазе A (out of MVP):**
-- ❌ `HabitEditPage` (PATCH-форма — пока заглушка "ComingSoon")
-- ❌ Аудит админских действий (нет специального логирования, кроме стандартного HTTP-лога)
-- ❌ Кнопки активации/архивации НЕ оборачиваются confirm-модалкой (можно "Восстановить" случайно)
-
-### Фаза B — Персонаж и характеристики 🔲 **TODO**
-
-| # | Шаг | Статус | Что есть на проде / что нужно |
-|---|---|---|---|
-| 1 | Backend каркас | 🟡 **частично** | Миграция `008_character_and_club_fields.py` накатана (alembic head = `008_character_and_club_fields`) — поля `habits.stat_name`, `stat_icon`, `stat_gain_per_checkin`, `stat_loss_per_miss`, `photo_url`, `telegram_invite_link`, `member_limit`, `curator_id` есть в БД с CHECK-ограничениями. **НЕ готово:** таблицы `user_stats`, `user_statuses`; миграция `009_create_user_stats_and_statuses.py`; `models/user_stats.py`, `models/user_status.py`; `repositories/user_stats_repository.py`; `core/constants.py:CharacterConfig`. |
-| 2 | Backend инкремент/декремент | 🔲 | `services/character_service.py` (`increment_on_checkin`, `decrement_on_penalty`) + хуки в `CheckinService.process_checkin` и `PenaltyService.apply_catch` / `close_catch_window`. `SELECT FOR UPDATE` через `lock_for_update` (U1/U4/U7 — паттерн уже применён в денежном контуре, переиспользуем). |
-| 3 | Backend API + статус + лидерборд | 🔲 | `api/v1/character.py` (`GET /character/me`), расширение `api/v1/leaderboard.py` (`GET /leaderboard/stat?habit_id=`), seed-миграция `010_user_statuses_seed.py`. |
-| 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. Идемпотентность (повторный запуск — 0 изменений) — паттерн как у `close_season` после U7. |
-| 5 | Документация | 🔲 | `docs/06-data-model.md` (новые таблицы), `docs/01-concept.md` (геймификация). |
-| 6 | Frontend | ⏸ | Отложено до подключения основного фронта к API (`docs/09-prod-readiness.md:127-137`). |
-
-> **Важно:** фронт Mini App (для обычных пользователей) **уже подключён** к API (проверено в `apps/frontend/docs/STATUS.md`: Marketplace → `/marketplace`, Today → `/checkins/today`, Members → `/catch`, Leaderboard → `/leaderboard/*`, Profile → `/users/me`). Ссылка на `docs/09-prod-readiness.md:127-137` в Фазе B шаг 6 устаревшая — это описание состояния «до подключения». Сам документ нуждается в актуализации.
-
-### Hardening U1–U7 — **DONE на проде** ✅
-
-Это **отдельная работа** между Фазой A и Фазой B. Подробности в разделе 8.1 выше.
-Краткий итог: 7 итераций укрепления денежного контура — `FOR UPDATE` на деньгах,
-`basis_points` вместо float, стриминг через `stream_scalars`, FastAPI lifespan,
-идемпотентность `close_season`. Коммит `b2bf2aa` запушен на прод, smoke-тесты
-пройдены. 34 новых теста, 141 backend passed.
-
-**Зачем это нужно перед Фазой B:** новые сервисы (character_service, freeze worker)
-будут вызываться **в тех же транзакциях**, что и существующие `process_checkin`
-и `apply_penalty`. Если существующие деньги теряются при гонке — характеристики
-`user_stats` унаследуют те же баги. U1–U7 закрывают этот риск.
-
-### Итого
-
-- **Фаза A: ✅ DONE полностью** на backend + инфре + Mini App + боевом боте.
-  Owner открывает админ-Mini App через `@pridead_bot` и управляет клубами из Telegram.
-- **Hardening U1–U7: ✅ DONE на backend + проде**, коммит `b2bf2aa`.
-- **Аудит продa 22.07: ✅ DONE**, 5 критичных багов исправлено (раздел 8.2),
-  коммиты `d3adac9` (OOM-фикс бота), `4366d3c` (bonus/checkin/shutdown/ErrorBoundary),
-  `ad0267b` (заливка админ-Mini App).
-- **Фаза B: 🟡 шаг 1 наполовину** (поля `habits` есть, таблиц `user_stats`/`user_statuses` нет), остальное TODO. **~4-5 дней чистой работы** (без учёта подключения фронта).
-- Фронт Mini App для **пользователей** уже подключён к API. Для Фазы B новых страниц на фронте пока не сделано (отдельный шаг в плане).
-
-### Фаза B — Персонаж и характеристики 🔲 **Следующая работа** (~4-5 дней)
-
-| # | Шаг | Статус | Что есть на проде / что нужно |
-|---|---|---|---|
-| 1 | Backend каркас | 🟡 **частично** | Миграция `008_character_and_club_fields.py` накатана (alembic head = `008_character_and_club_fields`) — поля `habits.stat_name`, `stat_icon`, `stat_gain_per_checkin`, `stat_loss_per_miss`, `photo_url`, `telegram_invite_link`, `member_limit`, `curator_id` есть в БД с CHECK-ограничениями. **НЕ готово:** таблицы `user_stats`, `user_statuses`; миграция `009_create_user_stats_and_statuses.py`; `models/user_stats.py`, `models/user_status.py`; `repositories/user_stats_repository.py`; `core/constants.py:CharacterConfig`. |
-| 2 | Backend инкремент/декремент | 🔲 | `services/character_service.py` (`increment_on_checkin`, `decrement_on_penalty`) + хуки в `CheckinService.process_checkin` и `PenaltyService.apply_catch` / `close_catch_window`. `SELECT FOR UPDATE` через `lock_for_update` (U1/U4/U7 — паттерн уже применён в денежном контуре, переиспользуем). |
-| 3 | Backend API + статус + лидерборд | 🔲 | `api/v1/character.py` (`GET /character/me`), расширение `api/v1/leaderboard.py` (`GET /leaderboard/stat?habit_id=`), seed-миграция `010_user_statuses_seed.py`. |
-| 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. Идемпотентность (повторный запуск — 0 изменений) — паттерн как у `close_season` после U7. |
-| 5 | Документация | 🔲 | `docs/06-data-model.md` (новые таблицы), `docs/01-concept.md` (геймификация). |
-| 6 | Frontend | ⏸ | Отложено до завершения шагов 1–4; пользовательский Mini App уже подключён к основному API (см. `apps/frontend/docs/STATUS.md`). |
-
-> **Сноска:** ссылка на `docs/09-prod-readiness.md:127-137` в шаге 6 устаревшая —
-> этот документ описывает состояние «до подключения фронта» и сам нуждается
-> в актуализации (отдельная задача). Текущее состояние: фронт Mini App
-> подключён к API.
-
-### Фаза C — Закрытие долгов из аудита 22.07 🟡 **Параллельно с Фазой B**
-
-В ходе аудита обнаружены 6 жёлтых проблем (не блокируют прод, но
-накапливаются). Стоит починить до того, как Фаза B добавит новые сервисы —
-иначе багфикс-стоимость вырастет.
-
-| # | Что | Решение |
-|---|---|---|
-| C1 | Дублирование `/app/.env` и `/app/infra/.env` | Выбрать один источник правды (рекомендуется `/app/infra/.env`, как его читает compose), остальное генерировать симлинком или скриптом в `deploy.sh` |
-| C2 | `/app` на сервере не git repo, правки летят через `scp` / `rsync` | `git init && git remote add origin <repo>`, чтобы `deploy.sh` мог `git pull` или хотя бы diff'ил перед `rsync` |
-| C3 | У админки нет `HabitEditPage` (PATCH-форма — заглушка "ComingSoon") | Доделать в рамках Фазы A: компонент `pages/HabitEditPage.tsx` + `pages/HabitEditForm.tsx` (есть заготовка, надо довести) |
-| C4 | У админки нет confirm-модалки для деструктивных операций (archive/restore) | Создать общий компонент `components/ConfirmModal.tsx` и встроить в `AdminHabitCard` |
-| C5 | У админки нет специального аудит-логирования поверх стандартного HTTP-лога | Расширить middleware: `logger.info("admin_action", admin_id, action, target, duration_ms)` — без PII |
-| C6 | Внешний nginx не имеет server-block для `api.prideclub.fun` (только `admin.*`/`app.*`/`db.*`); `/` отдаёт 404 | Добавить проксирование `/` → frontend, чтобы `api.prideclub.fun/index.html` возвращал shell Mini App, а не 404 |
-
-### Фаза D — Подключение фронта к API Фазы B 🟢 **После Фазы B**
-
-| # | Что | Оценка |
-|---|---|---|
-| 1 | Вкладка «📊 Характеристика» в `LeaderboardPage` (запрос `GET /api/v1/leaderboard/stat?habit_id=`) | 0.5 дня |
-| 2 | Экран «Мой персонаж» в `ProfilePage` (запрос `GET /api/v1/character/me`, отрисовка карточек с StatCard + StatusBadge) | 1–2 дня |
-| 3 | Level-up toast + haptic (`impact('medium')`) при пересечении порога | 0.5 дня |
-| 4 | Vitest инфра + smoke-тесты на основной фронт (отдельная задача из раздела 9 «Что НЕ делается») | 1 день |
-| 5 | `HabitEditPage` в админке (из C3) — после Фазы A.D1 | 1 день |
-
-### Порядок (что следующее)
-
-1. **Фаза C2 (git на сервере)** — низко висящий плод, 15 минут. Без него каждый фикс летит через scp и риск рассинхрона, как уже случилось сегодня.
-2. **Фаза C5 (admin audit log)** — 0.5 дня, важно до массового использования админки.
-3. **Фаза B1–B5** — 4–5 дней, основная новая функциональность.
-4. **Фаза C3, C4, D2, D3, D5** — параллельно или после B, как удобнее.
-
----
-
-## 11. Связь с уже принятыми решениями (ссылки на `docs/`)
-
-| Решение в этом ТЗ | Источник в `docs/` |
-|---|---|
-| Деньги = `INTEGER` | `AGENTS.md` правило #8; `docs/04-code-standards.md:392` |
-| TZ клуба, не пользователя | `docs/06-data-model.md:39-40` |
-| `user_id` только из `request.state.telegram_user` | `docs/07-security-and-ops.md:193` |
-| Не логировать PII (только `user_id`) | `docs/07-security-and-ops.md:281-283` |
-| Миграции append-only, `make migrate-test` | `docs/04-code-standards.md:10`; AGENTS.md |
-| `FOR UPDATE` при изменении денег/счётчиков | `docs/06-data-model.md:381-398` |
-| Доменные исключения + глобальный обработчик | `docs/04-code-standards.md:298-326` |
-| Сезонный снапшот правил | `docs/06-data-model.md:498-516` |
-| `suspicious_pairs` не ослабляет штрафы | `docs/06-data-model.md:143-145` |
-
-Если в процессе реализации потребуется отклониться от любого из этих решений —
-**остановиться и спросить**, а не править молча.
-
----
-
-## 12. Changelog
-
-- **v2.5 (22.07.2026 13:50 CEST)** — продуктовый аудит продa + план следующих фаз:
-  - **Новый раздел 8.2** «Продуктовый аудит 22.07.2026» — задокументированы 5
-    критичных багов и их фиксы (A1 on_shutdown wrapper, A2 bonus silent fail,
-    A3 checkin fake-success, A4 frontend ErrorBoundary, A5 OOM бота).
-  - **Шаг 15 раздела 10** — заливка админ-Mini App на прод (commit `ad0267b`),
-    smoke всех endpoint'ов.
-  - **Новые разделы 10 «Фаза C» и «Фаза D»** — долги из аудита и подключение
-    фронта к API Фазы B. Конкретные задачи и оценка трудозатрат.
-  - **Skill `.kilo/skills/habit-club-dev/SKILL.md`** дополнен обязательным
-    разделом «Research-First Protocol (Context7) — strictly mandatory». Это
-    локальная конфигурация проекта, не в git. Главные тезисы: stack-trace
-    first, hypotheses last; никаких гаданий про API/key/поведение; сначала
-    context7, потом код.
-  - **Чему научились (O5)** — OOM-фикс бота был сделан через полный цикл:
-    `docker ps` → `dmesg | grep oom` → `py-spy dump` → контекст в changelog
-    aiogram про pydantic 2.11 → фикс лимитов. Если бы пропустили хоть один
-    шаг — могли бы починить не то.
-
-- **v2.4 (22.07.2026 00:40 CEST)** — завершение Фазы A UI/инфры:
-  - **Шаги 7-14 раздела 10** перенесены из 🔲 в ✅. Фаза A теперь полный цикл: backend + инфра + Mini App + Telegram-бот.
-  - **DNS `admin.prideclub.fun`** — A-запись добавлена владельцем (Beget DNS), резолвится в `169.58.52.78`.
-  - **TLS Let's Encrypt** — получен `certbot --nginx -d admin.prideclub.fun`, сохранён в `/etc/letsencrypt/live/admin.prideclub.fun/`. Expiry 2026-10-19.
-  - **Внешний nginx vhost** — добавлен блок для `admin.prideclub.fun`: HTTP→301, HTTPS с `location ^~ /admin/v1/`, `/api/v1/`, `/internal/`, `/health`, `/metrics` → backend; `location /` → frontend proxy на 127.0.0.1:5173.
-  - **Внутренний nginx frontend-контейнера** (`infra/nginx/frontend.nginx.conf`) — `map $host $spa_fallback`: админ-домен → `admin.html`, остальные → `index.html`. Без `if`-обёрток над `try_files` (nginx их запрещает).
-  - **Multi-page Vite** — `apps/frontend/vite.config.ts` + `admin.html`. Бандлы: основной 308 КБ (101 КБ gzip), админка 18.36 КБ (6 КБ gzip).
-  - **Mini App админки** — 10 файлов в `apps/frontend/src/admin/`: `AdminApp`, `router` (`/`, `/habits`, `/habits/new`, `/habits/:id/edit`), `hooks` (queries+mutations), `api` (axios на `/admin/v1`), `AdminHabitCard` с toggle/archive/restore, `HabitCreatePage` с 17 полями и client-side валидацией (regex `/https:\/\/t\.me\/.../`, числа в рублях → копейки), `Form` (FieldRow, TextInput, Select, RadioGroup).
-  - **Telegram-бот `@pridead_bot`** (id 8705592511, "PrideAdmin") — зарегистрирован владельцем в BotFather, `/setdomain admin.prideclub.fun` + WebApp URL `https://admin.prideclub.fun/admin.html`.
-  - **Критический фикс middleware** — `app/core/middleware.py`: `admin_bot_token = settings.bot_token_admin or settings.bot_token` для `/admin/v1/*`. До фикса initData от `@pridead_bot` валидировался токеном `@join_prideclub_bot` → 401 `invalid_init_data`. После фикса — 124 backend теста зелёных, ни одного регрегса.
-  - **OWNER_TELEGRAM_ID** — добавлен в `/app/infra/.env` (chmod 600), прокинут в контейнер. Без него middleware отбивал 503 `admin_disabled`.
-  - Блок «Что НЕ сделано в Фазе A» — теперь это `HabitEditPage` (заглушка "ComingSoon"), аудит админ-действий, и confirm-модалка для деструктивных операций.
-
-> **Подтверждение корректности v2.4 (22.07.2026 00:40 CEST):**
-> - `find apps/frontend/src/admin -type f` → 10 файлов
-> - `grep -A 5 "admin:" apps/frontend/vite.config.ts` → multi-page ✅
-> - `nslookup admin.prideclub.fun 8.8.8.8` → `169.58.52.78` ✅
-> - `curl https://admin.prideclub.fun/admin.html` → 200, title "Habit Club — Admin" ✅
-> - `curl https://admin.prideclub.fun/health` → 200 ✅
-> - `curl https://admin.prideclub.fun/admin/v1/habits` (без initData) → 401 `missing_init_data` ✅
-> - `ls /etc/letsencrypt/live/admin.prideclub.fun/` → сертификат ✅
-> - `grep -B 1 "admin_bot_token" apps/backend/app/core/middleware.py` → фикс на месте ✅
-> - `docker ps --filter name=habit-backend` → `Up ... (healthy)` ✅
-> - Тесты backend: `tests/test_app.py` 8 passed, остальные 116 passed (исключая pre-existing failing) = **124 passed**.
-
-- **v2.3 (22.07.2026 00:10 CEST)** — честная корректировка статуса Фазы A:
-  - **Раздел 10 «Фаза A» переклассифицирован** с `✅ DONE на проде` на `🟡 backend ready, не развёрнуто для пользователя`. Причина: сводный блок утверждал «DONE на проде», но админка фактически не доступна конечному пользователю — отсутствуют Mini App админа (`apps/frontend/src/pages/admin/*` — директории нет), DNS `admin.prideclub.fun` (`nslookup` → NXDOMAIN), nginx vhost и TLS-сертификат для админ-домена.
-  - Детальный блок Фазы A уже содержал честное описание (UI админки не сделан, nginx не настроен), но **сводный статус в п.10 противоречил ему** — теперь приведено в соответствие.
-  - **Шаг 4 раздела 10** уточнён: «Admin API endpoints ✅ **в коде**» (а не «DONE на проде»), потому что код есть и подключён в `main.py`, но эндпоинты `/admin/v1/*` без Mini App клиента никто не вызывает.
-  - **Шаги 7-9 раздела 10** добавлены явно: DNS / nginx / TLS / Mini App админки со статусом 🔲.
-  - Сноска после шага 6 Фазы B обновлена: фронт Mini App **уже подключён** к API (подтверждено в `apps/frontend/docs/STATUS.md`), ссылка на `docs/09-prod-readiness.md:127-137` помечена как устаревшая (документ описывает состояние «до подключения» и сам требует актуализации — out of scope текущей задачи).
-  - Раздел «Итого» разделён: чётко показано, что «DONE на backend + проде» для бэкенда и «не развёрнуто для пользователя» для админского UI/инфра — **разные вещи**.
-
-> **Подтверждение корректности v2.3 (22.07.2026 00:10 CEST):**
-> - `find apps/frontend/src/pages -iname "*admin*"` → 0 совпадений
-> - `nslookup admin.prideclub.fun 8.8.8.8` → NXDOMAIN
-> - `ssh root@169.58.52.78 'ls /etc/letsencrypt/live/'` → только `prideclub.fun` (админ-домена нет)
-> - `ssh root@169.58.52.78 'ls /etc/nginx/sites-enabled/'` → один vhost на корневой `prideclub.fun`
-> - `apps/backend/app/api/admin/v1/habits.py` → 7 эндпоинтов ✅ живой код
-> - `grep -r "owner_telegram_id" apps/backend/app/core/middleware.py` → admin-ветка работает ✅
-
-- **v2.2 (21.07.2026 23:50 CEST)** — добавлен раздел 8.1 «Hardening U1–U7»,
-  актуализирован статус Фазы B:
-  - **U1–U7 залиты на прод.** Коммит `b2bf2aa` запушен в `origin/main`,
-    `/app` обновлён через rsync, backend и worker пересобраны и перезапущены.
-    Smoke на проде: `/health` 200, lifespan-логи `backend.startup.redis_ready`
-    видны, Celery-таски `close_catch_window` и `close_season` отработали за 0.8 сек
-    и 0.28 сек соответственно. 34 новых теста, 141 backend passed.
-  - **Фаза B шаг 1** — частично на проде: миграция `008_character_and_club_fields`
-    накатана (поля `habits.stat_*`, `photo_url`, `telegram_invite_link`,
-    `member_limit`, `curator_id` есть в БД), но таблиц `user_stats` и
-    `user_statuses` ещё нет. Шаги 2–5 Фазы B — TODO, ~4-5 дней.
-  - **Зачем U1–U7 перед Фазой B:** новые сервисы будут жить в тех же транзакциях,
-    что и `process_checkin` / `apply_penalty`. Если деньги теряются при гонке —
-    `user_stats.value` унаследует те же баги. Закрыли риск заранее.
-  - Добавлено **«что есть на проде / что нужно»** в таблице Фазы B — раньше
-    статус «частично» был не виден, теперь отмечен 🟡 явно.
-
-> **Подтверждение корректности статуса (21.07.2026 23:55 CEST):**
-> - `ls apps/backend/app/models/` — нет `user_stats.py`, `user_status.py`
->   (только `auxiliary/checkin/habit/membership/penalty/season/transaction/user.py`).
-> - `ls apps/backend/app/services/` — нет `character_service.py`.
-> - `grep -r "CharacterConfig\|user_stats\|user_statuses" apps/backend` — 0 совпадений.
-> - `alembic/versions/` — последняя `008_character_and_club_fields.py`, миграций 009/010 нет.
-> - `docker exec habit-postgres psql ... \\dt` на проде — 16 таблиц, ни одной `user_stat*`.
-> - `alembic_version` на проде = `008_character_and_club_fields`.
->
-> То есть Фаза B на проде: ровно одна миграция (расширение `habits`),
-> самих таблиц и сервисов для характеристик нет. Шаги 2–5 — не начаты.
-
-- **v2.1 (21.07.2026 22:30 CEST)** — актуализация статуса после деплоя Фазы A на прод:
-  - Раздел 10 переписан в табличный формат с реальным статусом ✅/🔲.
-  - Фаза A полностью завершена на backend + проде: миграции накатаны (`006_suspicious_pairs_index`, `007_habit_admin_fields`, `008_character_and_club_fields`), owner-auth работает (smoke curl через `jq` подтвердил все 7 admin-эндпоинтов + 3 public gate), `OWNER_TELEGRAM_ID=7295309649` сконфигурирован. UI админки отложен.
-  - Фаза B остаётся TODO. Поля `habits.stat_*` уже на проде (приехали с миграцией 008 в рамках Фазы A), что упрощает Фазу B шаг 1.
-- **v2.0 (21.07.2026)** — фикс по итогам ревью: деньги = `INTEGER`, без `clubs`-таблицы, без `weekly_n`, переименовано `ADMIN_BOT_TOKEN`→`BOT_TOKEN_ADMIN`, разделы 6.1/9/10 переработаны под Фазу A + Фазу B.
+Полный контекст для нового AI-агента — `AGENTS.md` + `TZ_kharakteristiki_personazha.md`
+(этот файл) + `.kilo/skills/habit-club-dev/SKILL.md` (если доступен).
