@@ -17,6 +17,11 @@
 Версия 2.5 этого ТЗ была написана ДО того, как часть Фазы B реализовали. Версия 3.0
 синхронизирована с кодом на `main` (HEAD = `64f231c`) и продом `169.58.52.78`.
 
+**Версия 3.1 (23.07.2026):** синхронизация с HEAD `bdfd9c9` (10 коммитов между v3.0 и v3.1:
+`e129398` T1, `443a8b8` TZ mark T1, `db47303` T2, `3996634` T3, `496cf3e` T4,
+`46114ca` T5, `5e5061b` T7, `fd3b1c2` T9, `c7f8d87` archive→permanent-delete,
+`bdfd9c9` docs full sync). Изменения v3.1 — см. §3.6.8 (permanent delete) и §8.1 (T11).
+
 | Блок ТЗ | Реализация в коде | Где |
 |---|---|---|
 | §2.1 Расширение `habits` (8 полей + CHECK'и) | ✅ сделано | `apps/backend/alembic/versions/008_character_and_club_fields.py`, `apps/backend/app/models/habit.py:42-60` |
@@ -455,9 +460,65 @@ habit_id = :id AND status != 'left'`. После первого вступлен
 - Если клуб в архиве → `HabitArchivedError()` (нельзя активировать архивный).
 - Если состояние уже совпадает — no-op.
 
-**Hard delete (`DELETE FROM habits ...`)** — **запрещён** на уровне репозитория
+**Hard delete (`DELETE FROM habits ...`)** — **запрещён на уровне репозитория**
 (`HabitRepository` не имеет метода `delete`). Это защищает FK-цепочку
 `transactions → penalties → checkins`.
+
+#### 3.6.8.1. Permanent delete (жёсткое удаление) — ✅ УЖЕ СДЕЛАНО (commit `c7f8d87`)
+
+В v3.0 этого ТЗ не было — описан только soft-delete. После `c7f8d87` добавлен
+**permanent delete** как вторая стадия удаления пустого клуба (без активных
+участников).
+
+**Endpoint:** `DELETE /admin/v1/habits/{id}/permanent`
+(`apps/backend/app/api/admin/v1/habits.py:655`). Только для owner'а.
+
+**Сервис:** `HabitService.permanent_delete`
+(`apps/backend/app/services/habit_service.py:241-275`):
+1. `habit = await self._habit_repo.get(habit_id)` — если нет → `HabitNotFoundError`.
+2. `active_members = await self._habit_repo.count_active_members(habit_id)`.
+3. Если `active_members > 0` → `HabitValidationError("Невозможно удалить клуб
+   навсегда: у него есть активные участники. Сначала выгоните их или дождитесь
+   выхода.", code="habit_has_active_members")`.
+4. Сохранить `chat_id` и `title` для лога.
+5. `await self._habit_repo.permanent_delete(habit)`.
+
+**Репозиторий:** `HabitRepository.permanent_delete`
+(`apps/backend/app/repositories/habit_repository.py:167-172`):
+```python
+async def permanent_delete(self, habit: Habit) -> None:
+    """Hard delete строки из `habits`. Каскадные FK memberships/checkins
+    удалят связанные строки автоматически (см. миграции)."""
+    await self._session.delete(habit)
+    await self._session.flush()
+```
+
+**Семантика:**
+- Каскадное удаление по FK: `memberships → checkins → penalties → transactions`,
+  `seasons → season_stats`, `bonus_rules / pricing_rules / season_prize_rules /
+  daily_streak_snapshots` через FK `habit_id`. Удаляются **только** строки, связанные
+  с этим `habit_id`.
+- НЕ удаляются: `users` (никогда), `user_consents`, `user_statuses`,
+  `suspicious_pairs` (там FK не на `habit_id`).
+- Все финансовые записи (`transactions` с типом `penalty/prize/bonus_catch`)
+  удаляются вместе с клубом — **намеренно**, так как без клуба они бессмысленны.
+  Если нужно сохранить историю — это нарушение soft-delete pattern, не permanent
+  delete (см. запрет выше).
+
+**Логирование:** `habit_permanently_deleted` с `extra={"admin_id", "habit_id",
+"title", "chat_id"}` (`habit_service.py:265-273`). PII не пишется.
+
+**Frontend:** хук `usePermanentDeleteHabit`
+(`apps/frontend/src/admin/hooks.ts`), кнопка в `AdminHabitCard`. Подтверждение
+через `showConfirm` Telegram WebApp API (предполагается — проверить в коде
+компонента при первом UI-ревью).
+
+**UI-инвариант:** кнопка permanent delete должна быть disabled или скрыта
+когда `active_members_count > 0`. На уровне backend это уже enforced.
+
+**Связь с soft-delete:** клубы сначала архивируются, потом (после выхода
+всех участников) — permanent delete. Прямой permanent delete для клуба с
+участниками невозможен.
 
 #### 3.6.9. Миграция — ✅ УЖЕ СДЕЛАНА
 
@@ -684,7 +745,7 @@ class CharacterConfig:
 | **T8** | `apps/backend/tests/conftest.py` | Аналог T6 для backend — `_remap_postgres_types_for_sqlite` (или похожая логика) + нужен аналогичный список моделей. Сейчас backend тесты проходят (`test_admin_habits_api.py`, `test_habit_gates.py`) через свой файл. Проверить, что Фаза B-тесты наследуют правильный паттерн. | 🟢 P2 → 🔵 перенесено в Фазу B | да — новые `test_character_*` сломаются без этой проверки |
 | **T9** | `docs/09-prod-readiness.md` §3 | 4 пункта техдолга частично или полностью неактуальны после U1–U7. Полная перепись не нужна, но таблица со ссылками на ветхое — удалить. | 🟢 P2 ✅ сделано | нет |
 | **T10** | `apps/backend/app/core/constants.py` | Сейчас `CharacterConfig`-блока нет. Перед Фазой B его **лучше не создавать заранее** — без него проще принимать решения по умолчанию (по §2 TZ). Когда пишете `character_service.py` — тогда и вносите единым патчем. | (информация) | — |
-| **T11** *(deferred)* | `apps/backend/app/services/penalty_service.py:48, 85` | Legacy ruff-errors, оставшиеся после T1 (не мои — были в `main@64f231c`): F821 `Any` без импорта в сигнатуре `__init__` (строка 48); F841 + E501 на неиспользуемой `idempotency_key = ...` (строка 85). Скорее всего заготовки под будущую `SuspiciousPairsService`-интеграцию (есть docstring «для авто-flag»). E501 на 112 уйдёт сам при T2 (станет короче). Можно почистить в одной PR после Фазы B. | 🟢 P3 | нет |
+| **T11** ✅ закрыто в T2 | `apps/backend/app/services/penalty_service.py:35-90` | Проверено в v3.1: legacy `: Any` в сигнатуре `__init__` **отсутствует** (строки 41-49 — все типы явно импортированы через `HabitRepository, MembershipRepository, CheckinRepository, SuspiciousPairsRepository, RedisPort \| None`), неиспользуемая `idempotency_key = ...` **отсутствует** (идемпотентность реализована через прямой `SELECT` с проверкой `existing.first() is not None` в `apply_catch:82-90`). Legacy ушли в T2 (commit `db47303`) и/или позже. **Можно не делать отдельный PR** — закрыто. | 🟢 P3 | нет |
 
 ### Чеклист «можно стартовать Фазу B»
 
@@ -724,6 +785,17 @@ T6 и T8 (список моделей в `_remap_postgres_types_for_sqlite`) —
   - Конкретизированы ENV-переменные (уже в docker-compose).
   - Frontend §6.2 — отмечено что admin Mini App уже сделан (`apps/frontend/src/admin/`,
     `apps/frontend/admin.html`).
+- **v3.1 (23.07.2026 00:15)** — синхронизация с HEAD `bdfd9c9` (10 коммитов между v3.0
+  и v3.1):
+  - §0 — обновлён HEAD до `bdfd9c9`, перечислены 10 промежуточных коммитов.
+  - §3.6.8.1 **(новый подраздел)** — Permanent delete (жёсткое удаление клуба без
+    активных участников). Endpoint `DELETE /admin/v1/habits/{id}/permanent`,
+    сервис `HabitService.permanent_delete` (`habit_service.py:241-275`), репо
+    `HabitRepository.permanent_delete` (`habit_repository.py:167-172`), фронт
+    `usePermanentDeleteHabit`. Commit `c7f8d87 feat(admin): archive→permanent-delete`.
+  - §8.1 T11 — статус **✅ закрыто в T2** (commit `db47303`). Legacy `: Any` в
+    сигнатуре `__init__` и неиспользуемая `idempotency_key` отсутствуют в коде.
+    Идемпотентность реализована через прямой `SELECT` в `apply_catch:82-90`.
 
 ---
 
