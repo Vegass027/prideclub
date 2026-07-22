@@ -165,10 +165,11 @@ async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
 
 
 def test_rate_limit_parse() -> None:
-    from app.services.penalty_service import _parse_limit
+    # Источник правды: app.core.utils.parse_rate_limit_spec (T1: дедупликация).
+    from app.core.utils import parse_rate_limit_spec
 
-    assert _parse_limit("10/10s") == (10, 10)
-    assert _parse_limit("5/1m") == (5, 60)
+    assert parse_rate_limit_spec("10/10s") == (10, 10)
+    assert parse_rate_limit_spec("5/1m") == (5, 60)
 
 
 @pytest.mark.asyncio

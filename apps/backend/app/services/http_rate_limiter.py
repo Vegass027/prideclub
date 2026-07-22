@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from redis.asyncio import Redis
 
+from app.core.utils import parse_rate_limit_spec
+
 
 class RedisHttpRateLimiter:
     """Sliding-bucket через fixed-window INCR+EXPIRE (как у catch-rate-limiter).
@@ -44,26 +46,17 @@ class RedisHttpRateLimiter:
         return count <= self._max, count, self._max
 
 
-def _parse_spec(spec: str) -> tuple[int, int]:
-    count, _, ttl = spec.partition("/")
-    if ttl.endswith("s"):
-        return int(count), int(ttl[:-1])
-    if ttl.endswith("m"):
-        return int(count), int(ttl[:-1]) * 60
-    raise ValueError(f"Bad rate-limit spec: {spec}")
-
-
 def make_api_v1_limiter(redis: Redis) -> RedisHttpRateLimiter:
     from app.core.constants import HttpRateLimitConfig
 
-    max_n, window = _parse_spec(HttpRateLimitConfig.RATE_LIMIT_API_V1)
+    max_n, window = parse_rate_limit_spec(HttpRateLimitConfig.RATE_LIMIT_API_V1)
     return RedisHttpRateLimiter(redis, max_n, window, prefix="http_rate:api:")
 
 
 def make_internal_limiter(redis: Redis) -> RedisHttpRateLimiter:
     from app.core.constants import HttpRateLimitConfig
 
-    max_n, window = _parse_spec(HttpRateLimitConfig.RATE_LIMIT_INTERNAL)
+    max_n, window = parse_rate_limit_spec(HttpRateLimitConfig.RATE_LIMIT_INTERNAL)
     return RedisHttpRateLimiter(redis, max_n, window, prefix="http_rate:int:")
 
 

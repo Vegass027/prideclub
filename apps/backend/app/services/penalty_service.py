@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Protocol
 from uuid import uuid4
 
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
@@ -17,13 +15,11 @@ from app.core.exceptions import (
     CannotCatchSelfError,
     HabitNotFoundError,
     MembershipNotActiveError,
-    MembershipNotFoundError,
     PenaltyAlreadyProcessedError,
     TooManyCatchAttemptsError,
 )
 from app.core.logging import get_logger
-from app.models.habit import Habit
-from app.models.membership import Membership
+from app.core.utils import parse_rate_limit_spec
 from app.models.penalty import Penalty
 from app.models.transaction import Transaction
 from app.repositories.checkin_repository import CheckinRepository
@@ -72,7 +68,7 @@ class PenaltyService:
     ) -> Penalty:
         if self._redis is not None:
             count = await self._redis.incr_catch(catcher_user_id)
-            if count > _parse_limit(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
+            if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
                 raise TooManyCatchAttemptsError()
 
         violator = await self._membership_repo.lock_for_update(violator_membership_id)
@@ -270,19 +266,3 @@ class PenaltyService:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none() is not None
-
-
-def _parse_limit(spec: str) -> tuple[int, int]:
-    """Парсит лимит вида '10/10s' → (10, 10 секунд) или '5/1m' → (5, 60 секунд).
-
-    Возвращает (max_count, window_seconds).
-    """
-    count, _, ttl = spec.partition("/")
-    if not ttl:
-        raise ValueError(f"Bad rate-limit spec: {spec!r}")
-    unit = ttl[-1]
-    if unit not in ("s", "m"):
-        raise ValueError(f"Bad rate-limit unit in {spec!r}: expected 's' or 'm'")
-    n = int(ttl[:-1])
-    seconds = n * 60 if unit == "m" else n
-    return int(count), seconds
