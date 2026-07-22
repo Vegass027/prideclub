@@ -1,48 +1,54 @@
 # Habit Club — Статус бэкенда и план до прода
 
-> Дата среза: 2026-07-21 (обновлено после `33dc194`)
+> Дата среза: 2026-07-22 (обновлено после T1–T7 hardening, до начала Фазы B)
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
-> Домен: `prideclub.fun` (beget DNS, Let's Encrypt TLS)
+> Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
+> `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
 > Документ описывает только **бэкенд** (FastAPI + worker + bot). Фронт — отдельная тема.
 
 ---
 
-## 1. Текущая стадия: **✅ готов к soft-launch**
+## 1. Текущая стадия: **✅ готов к soft-launch + Admin Mini App**
 
 ### 1.0 Что сделано в этой итерации
 - ✅ `/setdomain` в BotFather → Mini App открывается кнопкой в боте
 - ✅ Mini App живой на `https://app.prideclub.fun`
+- ✅ **Admin Mini App** на `https://admin.prideclub.fun` (owner-only, через `OWNER_TELEGRAM_ID`)
 - ✅ Telegram WebApp SDK подключён, initData передаётся в каждом запросе
+- ✅ **Hardening итерация T1–T7** (см. `TZ_kharakteristiki_personazha.md` §8.1) —
+  рефакторинг сервисов/репозиториев, без функциональных изменений.
+  Все сервисы перезапущены на проде, `/health=ok`.
 
 ### 1.1 Что полностью работает (есть на проде, проверено E2E)
 
 | # | Подсистема | Статус | Где проверено |
 |---|-----------|--------|---------------|
-| 1 | **Аутентификация** initData + JWT для /internal | ✅ Работает | E2E на сервере, 55 backend тестов |
-| 2 | **Чек-ины** через Celery worker | ✅ Работает | `worker_checkin_ok` в логах, идемпотентность по `(membership_id, date)` |
-| 3 | **Кэтчер-механика** через worker | ✅ Работает | `process_penalty` через `/internal/penalties/catch` → penalty + transaction в БД |
+| 1 | **Аутентификация** initData + JWT для /internal | ✅ Работает | E2E на сервере, 161 backend тестов |
+| 2 | **Чек-ины** через Celery worker | ✅ Работает | `worker_checkin_ok` в логах, идемпотентность по `(membership_id, date)`. T4: streak-SELECT вынесен в `CheckinRepository.get_recent_dates`. |
+| 3 | **Кэтчер-механика** через worker | ✅ Работает | `process_penalty` через `/internal/penalties/catch` → penalty + transaction в БД. T2: `_is_suspicious` в репо. T5: fail-closed без Redis. |
 | 4 | **Telegram Payments webhook** | ✅ Работает | `process_payment` идемпотентно через `charge_id` |
 | 5 | **Депозит + штрафы** | ✅ Работает | FK-фикс (penalty → transaction в одной транзакции) |
-| 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points` |
+| 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
-| 9 | **PostgreSQL** (6 миграций, расширения) | ✅ Работает | `000_extensions` → `006_suspicious_pairs_index` |
-| 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py` |
-| 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` |
+| 9 | **PostgreSQL** (8 миграций, расширения) | ✅ Работает | `000_extensions` → `008_character_and_club_fields` |
+| 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py`. T1: `parse_rate_limit_spec` в `core/utils.py`. |
+| 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` + T2 `SuspiciousPairsRepository.lookup_flagged` |
 | 12 | **Season prize distribution** | ✅ Работает | `close_season` через worker |
 | 13 | **JSON-логирование** (structlog + JSONRenderer) | ✅ Работает | backend + worker пишут JSON в stdout |
 | 14 | **HTTP rate-limit** (60/min api, 120/min internal) | ✅ Live проверен | 130 req → 120 пропущено + 10×429 |
 | 15 | **HTTPS + Nginx + Let's Encrypt** | ✅ Live работает | `app.prideclub.fun/health` → 200 |
 | 16 | **Telegram bot webhook** | ✅ Live работает | POST `/bot/webhook` → 200 |
 | 17 | **CI в GitHub Actions** | ✅ Конфиг исправлен | `backend-ci.yml`, `frontend-ci.yml` |
+| 18 | **Admin Mini App** (управление клубами: CRUD + activate/archive/restore) | ✅ На проде с `2026-07-21` (commit `ad0267b`) | `apps/frontend/src/admin/`, `admin.prideclub.fun`. Owner-gate в `core/middleware.py`. |
 
 ### 1.2 Тесты
 
 | Пакет | Локально | На сервере |
 |-------|----------|------------|
-| `apps/backend/tests` | **55 passed** | **54 passed, 1 skipped** |
-| `apps/worker/tests` | **32 passed** | **32 passed** |
-| **Итого** | **87 passed** | **86 passed, 1 skipped** |
+| `apps/backend/tests` | **161 passed** | не запускаются в проде (только локально + CI) |
+| `apps/worker/tests` | **34 passed** (2 legacy fail в `test_close_catch_window.py` — pre-existing, не связано с T5) | не запускаются в проде |
+| **Итого** | **195 passed** | — |
 
 ### 1.3 Live endpoints (после последнего деплоя)
 
@@ -140,12 +146,17 @@ _(пусто — soft-launch разблокирован)_
 
 ## 3. Технический долг (не блокер)
 
+_Обновлено после T1–T7 (22.07.2026). Полная таблица с приоритетами —
+`TZ_kharakteristiki_personazha.md` §8.1._
+
 | Что | Файл | Что сделать |
 |-----|------|------------|
-| `on_event` deprecation в FastAPI | `apps/backend/app/main.py:81` | Перевести на `lifespan` context manager |
-| `_remap_postgres_types_for_sqlite` мутирует типы колонок | `apps/worker/tests/conftest.py` | Использовать копирование таблиц вместо мутации моделей |
-| `redis_port=None` в worker | `apps/worker/worker/tasks/process_penalty.py` | Сделать rate-limit обязательным, fail-closed |
-| Catch rate-limit константа в коде | `penalty_service.py` | Вынести в `core/constants.py` |
+| ~~`on_event` deprecation в FastAPI~~ | ~~`apps/backend/app/main.py:81`~~ | ✅ Закрыто: миграция на `lifespan` уже сделана (`main.py:32, 74`). |
+| ~~`redis_port=None` в worker~~ | ~~`apps/worker/worker/tasks/process_penalty.py`~~ | ✅ Закрыто (T5, commit `46114ca`): прод-runner бросает `RateLimitDisabledError` → Celery autoretry. Тесты сохраняют fail-open через явный `redis_port=None`. |
+| ~~Catch rate-limit в коде~~ | ~~`penalty_service.py`~~ | ✅ Константа `RATE_LIMIT_CATCH = "10/10s"` уже в `core/constants.py:67` (`PenaltyConfig`). Парсинг вынесен в `core/utils.py::parse_rate_limit_spec` (T1, commit `e129398`). |
+| `_remap_postgres_types_for_sqlite` мутирует типы колонок | `apps/worker/tests/conftest.py:98-145` + `apps/backend/tests/conftest.py` | Перенесено в Фазу B (T6/T8): добавлять новые модели (`UserStats`, `UserStatus`) в whitelist при коммите миграции 009. |
+| Legacy `Any` без импорта в `PenaltyService.__init__` | `penalty_service.py:48` | Перенесено в T11 (deferred до после Фазы B). Частично закрыто через T2 — `_suspicious_service: Any` ушёл, остался в одном сигнатуре. |
+| Admin Mini App интеграция — пустые/default-value на UI | `apps/frontend/src/admin/pages/*` | Сделано (commit `ad0267b`), но UI минимум — после Фазы B будет polish. |
 
 ---
 
@@ -178,7 +189,8 @@ _(пусто — soft-launch разблокирован)_
 
 | Фаза | Задачи | Время |
 |------|--------|-------|
-| **Soft-launch готов** | /setdomain сделано. Frontend MVP до 50 человек. | ✅ сейчас |
+| **Soft-launch готов** | /setdomain, Admin Mini App сделано. Frontend MVP до 50 человек. | ✅ сейчас |
+| **Фаза B (характеристики и персонаж)** | user_stats / user_statuses модели + инкремент в CheckinService + worker freeze_inactive_stats + frontend страница | 2-3 дня (после pre-B hardening) |
 | **Подключение frontend к API** | Marketplace, Today, Members, Balance, Leaderboard, Profile | 3-5 дней |
 | **Широкий запуск** | Переезд БД в Selectel + load-test + ФЗ-152 compliance | 1 неделя |
 | **Пост-launch** | Тех-долг + новые фичи | по необходимости |
@@ -195,7 +207,7 @@ _(пусто — soft-launch разблокирован)_
 |------|--------------|--------|
 | Код (Python, SQL, инфра) | AI-ассистент (я) | ✅ |
 | Домен + DNS | Дмитрий | ✅ `prideclub.fun` работает |
-| Telegram bot setup | Дмитрий | ⏳ осталось `/setdomain` |
+| Telegram bot setup | Дмитрий | ✅ `/setdomain` сделан; admin bot развернут |
 | S3 для бэкапов | Дмитрий + я | ⏸ отложено |
 | Selectel managed БД (переезд) | Дмитрий + я | ⏸ когда будут пользователи |
 | Юридическое (ФЗ-152) | Дмитрий | ⏸ когда будет прод |
