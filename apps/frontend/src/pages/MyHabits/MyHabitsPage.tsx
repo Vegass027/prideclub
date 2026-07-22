@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useMyHabits } from "@/shared/hooks";
 import { openCheckinTopic } from "@/shared/telegram/topicLink";
+import { hapticImpact } from "@/shared/telegram/tma";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -39,6 +40,18 @@ export function MyHabitsPage() {
               h.chat_id !== 0 && h.checkin_topic_thread_id !== null;
             const canOpenChat =
               h.chat_id !== 0 && h.chat_topic_thread_id !== null;
+            const canJoinGroup = Boolean(h.telegram_invite_link);
+            const handleJoinGroup = () => {
+              hapticImpact("medium");
+              const tg = window.Telegram?.WebApp;
+              if (tg?.openTelegramLink && h.telegram_invite_link) {
+                tg.openTelegramLink(h.telegram_invite_link);
+              } else if (tg?.openLink && h.telegram_invite_link) {
+                tg.openLink(h.telegram_invite_link);
+              } else if (h.telegram_invite_link) {
+                window.open(h.telegram_invite_link, "_blank", "noopener,noreferrer");
+              }
+            };
             return (
               <li key={h.id}>
                 <div className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
@@ -61,6 +74,16 @@ export function MyHabitsPage() {
                     </div>
                   </button>
                   <div className="mt-3 flex flex-col gap-2">
+                    {canJoinGroup && (
+                      <button
+                        type="button"
+                        onClick={handleJoinGroup}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2.5 text-sm font-medium text-text transition hover:border-white/20"
+                      >
+                        <span aria-hidden="true">👋</span>
+                        Присоединиться к клубу
+                      </button>
+                    )}
                     {canCheckIn && (
                       <button
                         type="button"

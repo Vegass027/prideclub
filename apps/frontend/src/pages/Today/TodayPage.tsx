@@ -180,6 +180,38 @@ export function TodayPage() {
         </div>
       </section>
 
+      {habit.telegram_invite_link && (
+        <section className="mt-4 rounded-card border border-white/10 bg-surface p-4">
+          <h3 className="mb-2 text-sm font-semibold text-text">
+            Ты ещё не в клубе
+          </h3>
+          <p className="mb-3 text-xs text-muted">
+            Чтобы бот принимал твои чек-ины и участники могли тебя «поймать»,
+            нужно вступить в группу клуба в Telegram.
+          </p>
+          <Button
+            onClick={() => {
+              hapticImpact("medium");
+              const tg = window.Telegram?.WebApp;
+              if (tg?.openTelegramLink && habit.telegram_invite_link) {
+                tg.openTelegramLink(habit.telegram_invite_link);
+              } else if (tg?.openLink && habit.telegram_invite_link) {
+                tg.openLink(habit.telegram_invite_link);
+              } else if (habit.telegram_invite_link) {
+                window.open(
+                  habit.telegram_invite_link,
+                  "_blank",
+                  "noopener,noreferrer",
+                );
+              }
+            }}
+            className="w-full"
+          >
+            👋 Присоединиться к клубу
+          </Button>
+        </section>
+      )}
+
       <section className="mt-4 rounded-card border border-white/5 bg-surface p-4 text-sm text-muted">
         <h3 className="mb-2 text-sm font-semibold text-text">Что дальше</h3>
         <ul className="list-disc space-y-1 pl-5">
