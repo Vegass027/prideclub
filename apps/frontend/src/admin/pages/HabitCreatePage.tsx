@@ -480,7 +480,7 @@ export function HabitCreatePage() {
             value={state.checkin_topic_link}
             onChange={(e) => set("checkin_topic_link", e.target.value)}
             onBlur={() => markTouched("checkin_topic_link")}
-            placeholder="https://t.me/c/<chat_id>/<thread_id>"
+            placeholder="Вставь ссылку на топик"
             inputMode="url"
             aria-invalid={Boolean(
               touched.checkin_topic_link && errors.checkin_topic_link,
@@ -504,7 +504,7 @@ export function HabitCreatePage() {
             value={state.notifications_topic_link}
             onChange={(e) => set("notifications_topic_link", e.target.value)}
             onBlur={() => markTouched("notifications_topic_link")}
-            placeholder="https://t.me/c/<chat_id>/<thread_id>"
+            placeholder="Вставь ссылку на топик"
             inputMode="url"
             aria-invalid={Boolean(
               touched.notifications_topic_link &&

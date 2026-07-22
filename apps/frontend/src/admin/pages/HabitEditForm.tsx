@@ -481,7 +481,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
           value={form.checkin_topic_link}
           onChange={(e) => set("checkin_topic_link", e.target.value)}
           onBlur={() => touchedFields("checkin_topic_link")}
-          placeholder="https://t.me/c/<chat_id>/<thread_id>"
+          placeholder="Вставь ссылку на топик"
           inputMode="url"
         />
       </FieldRow>
@@ -498,7 +498,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
           value={form.notifications_topic_link}
           onChange={(e) => set("notifications_topic_link", e.target.value)}
           onBlur={() => touchedFields("notifications_topic_link")}
-          placeholder="https://t.me/c/<chat_id>/<thread_id>"
+          placeholder="Вставь ссылку на топик"
           inputMode="url"
         />
       </FieldRow>

@@ -240,16 +240,21 @@ class HabitService:
                 "notifications_topic_link", None
             )
 
-            resolved_chat_id = habit.chat_id
+            existing_chat_id = habit.chat_id
 
             if new_checkin_link is not None:
                 topic = parse_telegram_topic_link(new_checkin_link)
-                if topic.chat_id != resolved_chat_id:
-                    raise HabitTopicMismatchError(
-                        "chat_id в ссылке на топик чек-инов не совпадает "
-                        "с chat_id клуба"
-                    )
                 fields["checkin_topic_thread_id"] = topic.thread_id
+                if existing_chat_id == 0:
+                    fields["chat_id"] = topic.chat_id
+                    existing_chat_id = topic.chat_id
+                elif topic.chat_id != existing_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Топик чек-инов находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба). "
+                        "Укажи ссылку на топик внутри той же группы, "
+                        "что привязана к клубу."
+                    )
             else:
                 fields["checkin_topic_thread_id"] = (
                     habit.checkin_topic_thread_id
@@ -257,16 +262,23 @@ class HabitService:
 
             if new_notifications_link is not None:
                 topic = parse_telegram_topic_link(new_notifications_link)
-                if topic.chat_id != resolved_chat_id:
-                    raise HabitTopicMismatchError(
-                        "chat_id в ссылке на топик уведомлений не совпадает "
-                        "с chat_id клуба"
-                    )
                 fields["notifications_topic_thread_id"] = topic.thread_id
+                if existing_chat_id == 0:
+                    fields["chat_id"] = topic.chat_id
+                    existing_chat_id = topic.chat_id
+                elif topic.chat_id != existing_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Топик уведомлений находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба). "
+                        "Укажи ссылку на топик внутри той же группы, "
+                        "что привязана к клубу."
+                    )
             else:
                 fields["notifications_topic_thread_id"] = (
                     habit.notifications_topic_thread_id
                 )
+
+            resolved_chat_id = fields.get("chat_id", existing_chat_id)
 
             if (
                 fields["checkin_topic_thread_id"]

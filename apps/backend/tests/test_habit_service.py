@@ -18,6 +18,7 @@ from app.core.constants import ProofType
 from app.core.exceptions import (
     HabitArchivedError,
     HabitNotFoundError,
+    HabitTopicMismatchError,
     HabitValidationError,
 )
 from app.services.habit_service import HabitService
@@ -359,3 +360,52 @@ class TestSetActive:
         svc, _, _ = _make_service()
         with pytest.raises(HabitNotFoundError):
             await svc.set_active(admin_id=42, habit_id=str(uuid4()), is_active=True)
+
+
+class TestUpdateTopics:
+    async def test_update_accepts_topics_matching_habit_chat(self) -> None:
+        svc, _, _ = _make_service()
+        habit = await svc.create(admin_id=42, **_base_kwargs())
+        updated = await svc.update(
+            admin_id=42,
+            habit_id=habit.id,
+            fields={
+                "checkin_topic_link": "https://t.me/c/-1001234567890/100",
+                "notifications_topic_link": "https://t.me/c/-1001234567890/200",
+            },
+        )
+        assert updated.checkin_topic_thread_id == 100
+        assert updated.notifications_topic_thread_id == 200
+
+    async def test_update_rejects_topic_from_other_chat(self) -> None:
+        svc, _, _ = _make_service()
+        habit = await svc.create(admin_id=42, **_base_kwargs())
+        with pytest.raises(HabitTopicMismatchError):
+            await svc.update(
+                admin_id=42,
+                habit_id=habit.id,
+                fields={
+                    "checkin_topic_link": "https://t.me/c/-1007777777777/1",
+                },
+            )
+
+    async def test_update_swallows_chat_id_from_topic_when_zero(self) -> None:
+        """Если habit.chat_id был 0 (клубы до миграции), первая валидная
+        ссылка на топик привязывает чат клуба к часу из ссылки."""
+        from uuid import uuid4
+        from tests.fakes import make_habit
+
+        svc, repo, _ = _make_service()
+        orphan = make_habit(id=str(uuid4()), chat_id=0)
+        repo.add(orphan)
+        updated = await svc.update(
+            admin_id=42,
+            habit_id=orphan.id,
+            fields={
+                "checkin_topic_link": "https://t.me/c/-1001234567890/5",
+                "notifications_topic_link": "https://t.me/c/-1001234567890/6",
+            },
+        )
+        assert updated.chat_id == -1001234567890
+        assert updated.checkin_topic_thread_id == 5
+        assert updated.notifications_topic_thread_id == 6
