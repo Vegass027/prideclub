@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
 
-from app.core.constants import MembershipStatus, ProofType
+from app.core.constants import CheckinStatus, MembershipStatus, ProofType
 from app.core.exceptions import (
     CheckinWindowClosedError,
-    HabitNotFoundError,
     MembershipNotActiveError,
-    MembershipNotFoundError,
 )
+from app.models.checkin import Checkin
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage, ProofValidationError
 from tests.fakes import (
@@ -29,7 +28,7 @@ def _proof(*, duration: int | None = 5, msg_date: datetime | None = None) -> Pro
         proof_type=ProofType.VIDEO_NOTE,
         video_note_duration=duration,
         photo_sizes=0,
-        message_date=msg_date or datetime.now(tz=timezone.utc),
+        message_date=msg_date or datetime.now(tz=UTC),
     )
 
 
@@ -57,7 +56,7 @@ async def test_checkin_happy_path() -> None:
         habit_id=str(habit.id),
         proof=_proof(),
         proof_message_id=42,
-        now_utc=datetime.now(tz=timezone.utc),
+        now_utc=datetime.now(tz=UTC),
     ))
     assert checkin.status.value == "done"
     assert checkin.proof_message_id == 42
@@ -80,7 +79,7 @@ async def test_checkin_idempotent_same_day() -> None:
         checkin_repo=checkin_repo,
     )
 
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     await _wrap(service.process_checkin(
         user_id=1,
         habit_id=str(habit.id),
@@ -122,7 +121,7 @@ async def test_checkin_rejects_paused_membership() -> None:
             habit_id=str(habit.id),
             proof=_proof(),
             proof_message_id=1,
-            now_utc=datetime.now(tz=timezone.utc),
+            now_utc=datetime.now(tz=UTC),
         )
 
 
@@ -147,7 +146,7 @@ async def test_checkin_window_closed() -> None:
 
     # 12:00 по Москве → вне окна (8:00–9:00 МСК)
     # msg_date оставляем "сейчас", чтобы не словить stale_message раньше окна.
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     habit.timezone = "Europe/Moscow"
 
     with pytest.raises(CheckinWindowClosedError):
@@ -181,10 +180,79 @@ async def test_checkin_wrong_proof_type() -> None:
             habit_id=str(habit.id),
             proof=_proof(),  # video_note, но habit ждёт photo
             proof_message_id=1,
-            now_utc=datetime.now(tz=timezone.utc),
+            now_utc=datetime.now(tz=UTC),
         )
     assert exc.value.code == "wrong_type"
 
 
 async def _wrap(coro):
     return await coro
+
+
+@pytest.mark.asyncio
+async def test_get_today_status_streak_counts_consecutive_done_days() -> None:
+    """Streak = подряд идущие done-дни, заканчивающиеся club_date.
+
+    T4: использует FakeCheckinRepo.get_recent_dates — без SELECT
+    через session.execute.
+    """
+    habit = make_habit(proof=ProofType.VIDEO_NOTE)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    session = FakeSession(checkin_repo)
+
+    # 3 done-дня подряд: 2026-01-10, 2026-01-09, 2026-01-08.
+    # 2026-01-07 — pending/missing → streak прерывается на 3.
+    for d in (date(2026, 1, 10), date(2026, 1, 9), date(2026, 1, 8)):
+        checkin_repo._store[(str(m.id), d)] = Checkin(
+            id=str(uuid4()),
+            membership_id=str(m.id),
+            date=d,
+            status=CheckinStatus.DONE,
+            proof_message_id=1,
+        )
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    # now_utc = 2026-01-09 21:00 UTC = 2026-01-10 00:00 МСК → club_date = 2026-01-10
+    _habit, _m, status, streak = await service.get_today_status(
+        user_id=1,
+        habit_id=str(habit.id),
+        now_utc=datetime(2026, 1, 9, 21, 0, tzinfo=UTC),
+    )
+    assert streak == 3
+    assert status == "done"
+
+
+@pytest.mark.asyncio
+async def test_get_today_status_streak_zero_when_no_checkins() -> None:
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+
+    _habit, _m, status, streak = await service.get_today_status(
+        user_id=1,
+        habit_id=str(habit.id),
+        now_utc=datetime(2026, 1, 9, 21, 0, tzinfo=UTC),
+    )
+    assert streak == 0
+    assert status == "pending"  # окно чек-ина [00:00, 23:59] в make_habit — открыто в 00:00 МСК

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.core.exceptions import (
@@ -8,8 +8,8 @@ from app.core.exceptions import (
     CheckinWindowClosedError,
     HabitArchivedError,
     HabitNotFoundError,
-    MembershipNotFoundError,
     MembershipNotActiveError,
+    MembershipNotFoundError,
 )
 from app.core.logging import get_logger
 from app.models.checkin import Checkin
@@ -156,29 +156,14 @@ class CheckinService:
     async def _compute_streak(self, membership_id: str, up_to) -> int:
         """Считаем серию done-чекинов до up_to.
 
-        Дешёвая реализация: один запрос в БД.
+        До T4 — SELECT к Checkin делался прямо в сервисе. После T4 —
+        только Python-цикл по датам из CheckinRepository.get_recent_dates().
         """
-        from sqlalchemy import select
-
-        from app.models.checkin import Checkin
-
-        result = await self._session.execute(
-            select(Checkin.date)
-            .where(
-                Checkin.membership_id == membership_id,
-                Checkin.date <= up_to,
-                Checkin.status == "done",
-            )
-            .order_by(Checkin.date.desc())
-            .limit(90)
-        )
-        dates = [row[0] for row in result.all()]
+        dates = await self._checkin_repo.get_recent_dates(membership_id, up_to)
         if not dates:
             return 0
         streak = 0
         expected = up_to
-        from datetime import timedelta
-
         for d in dates:
             if d == expected:
                 streak += 1

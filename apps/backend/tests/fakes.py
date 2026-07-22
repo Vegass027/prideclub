@@ -1,31 +1,32 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, time
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from app.core.constants import (
     CheckinStatus,
     MembershipStatus,
-    PenaltyReason,
     ProofType,
 )
 from app.models.checkin import Checkin
 from app.models.habit import Habit
 from app.models.membership import Membership
 from app.models.penalty import Penalty
-from app.models.transaction import Transaction
 from app.models.user import User
 
 
 class FakeUserRepo:
+    """Замена UserRepository. Тест задаёт пользователей через `add(user)`.
+
+    Покрывает контракт T3 BonusService (`user_repo.get(user_id)`).
+    """
+
     def __init__(self) -> None:
         self._store: dict[int, User] = {}
 
-    async def upsert(self, *, id: int, first_name: str, username: str | None) -> User:
-        u = User(id=id, first_name=first_name, username=username)
-        self._store[id] = u
-        return u
+    def add(self, user: User) -> None:
+        self._store[user.id] = user
 
     async def get(self, user_id: int) -> User | None:
         return self._store.get(user_id)
@@ -256,6 +257,26 @@ class FakeCheckinRepo:
     async def get_for_date(self, membership_id: str, on_date: date) -> Checkin | None:
         return self._store.get((membership_id, on_date))
 
+    async def get_recent_dates(
+        self,
+        membership_id: str,
+        up_to,
+        *,
+        limit: int = 90,
+    ) -> list[date]:
+        """Зеркалит прод-репозиторий: только DONE-чекины, ≤ up_to, по убыванию."""
+        out: list[date] = []
+        for (m_id, d), c in self._store.items():
+            if m_id != membership_id:
+                continue
+            if d > up_to:
+                continue
+            if c.status != CheckinStatus.DONE:
+                continue
+            out.append(d)
+        out.sort(reverse=True)
+        return out[:limit]
+
     async def get_or_create_done(
         self, *, membership_id: str, on_date: date, proof_message_id: int
     ) -> tuple[Checkin, bool]:
@@ -311,25 +332,18 @@ class FakeBonusRuleRepo:
         return self._rules.get((event_type, threshold))
 
 
-class FakeUserRepo:
-    """Замена UserRepository. Тест задаёт пользователей через `add(user)`."""
-
-    def __init__(self) -> None:
-        self._store: dict[int, Any] = {}
-
-    def add(self, user: Any) -> None:
-        self._store[user.id] = user
-
-    async def get(self, user_id: int) -> Any:
-        return self._store.get(user_id)
-
-
 class FakeSession:
-    """Минимальный session для SELECT-эмиттирующих методов сервиса streak."""
+    """Минимальный session для CheckinService.process_checkin.
+
+    До T4 — нужен был execute() для стрика. После T4 SELECT ушёл в
+    FakeCheckinRepo.get_recent_dates, и FakeSession нужен только ради
+    add/commit/rollback/flush, чтобы сервис мог собраться.
+    """
 
     def __init__(self, checkin_repo: FakeCheckinRepo) -> None:
         self._checkin_repo = checkin_repo
         self.committed = False
+        self.flushed = 0
 
     async def commit(self) -> None:
         self.committed = True
@@ -337,24 +351,11 @@ class FakeSession:
     async def rollback(self) -> None:
         pass
 
+    async def flush(self) -> None:
+        self.flushed += 1
+
     async def execute(self, stmt: Any) -> Any:
-        # сервис делает один SELECT streak — эмулируем через FakeCheckinRepo.
-        from sqlalchemy import select
-
-        from app.models.checkin import Checkin
-
-        if isinstance(stmt, select(Checkin).where(Checkin.membership_id == None).__class__):
-            pass
-
-        # Загружаем стрик из FakeCheckinRepo, фильтруя по ключу.
-        dates: list[date] = []
-        for (m_id, d), c in self._checkin_repo._store.items():
-            if c.status == CheckinStatus.DONE:
-                dates.append(d)
-        dates.sort(reverse=True)
-
-        class _Result:
-            def all(self_inner) -> list[tuple[date]]:
-                return [(d,) for d in dates]
-
-        return _Result()
+        raise NotImplementedError(
+            "After T4 CheckinService no longer SELECTs via session.execute; "
+            "streak dates come via CheckinRepository.get_recent_dates()."
+        )
