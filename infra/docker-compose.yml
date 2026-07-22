@@ -128,8 +128,8 @@ services:
       dockerfile: infra/docker/worker.Dockerfile
     container_name: habit-worker
     restart: unless-stopped
-    mem_limit: 640m
-    memswap_limit: 768m
+    mem_limit: 768m
+    memswap_limit: 1024m
     cpus: 1.0
     environment:
       <<: *worker-env

@@ -679,9 +679,9 @@ class CharacterConfig:
 | **T3** | `apps/backend/app/services/bonus_service.py:36-52` + `:130-135` | Конструктор принимает 4 опц. lookup-коллбэка (`penalty_lookup`, `user_lookup`, `rule_lookup`, `suspicious_blocker`). Лишний `if self._session is not None:` перед `await self._session.flush()` (конструктор уже требует `AsyncSession` — ветка всегда true). Переделать на fakes-based DI (как `tests/fakes.py` для habit_service): инжектить `PenaltyRepo / UserRepo / BonusRuleRepo / SuspiciousPairsRepo` явно, а не через lookup-коллбэки. | 🟡 P1 ✅ сделано | косвенно — мешает читаемости reward-цепочки, в которую Фаза B добавит stat-points |
 | **T4** | `apps/backend/app/services/checkin_service.py:156-188` | `_compute_streak` — SQL прямо в сервисе (полный `select` по `Checkin` в сервисном методе). Вынести в `CheckinRepository.get_recent_dates(membership_id, up_to, limit=90) -> list[date]`. Цикл в Python оставить в сервисе. | 🟡 P1 ✅ сделано | да — иначе Фаза B в `checkin_service` положит ещё один `select`, и будет неразборчиво |
 | **T5** | `apps/worker/worker/tasks/process_penalty.py:47-58` | `redis_port=None` оставлен — без него `apply_catch` пропускает rate-limit (`if self._redis is not None`). Это fail-disabled. Сейчас оправдано тестами (Redis не поднимаем), но в проде должна быть явная опция. Решение: в worker-обёртке `_build_production_redis_port()` упасть на `None` (raise + Celery retry), а не идти без rate-limit. | 🟢 P2 ✅ сделано | нет |
-| **T6** | `apps/worker/tests/conftest.py:98-145` | `_remap_postgres_types_for_sqlite()` мутирует модели глобально на импорт модуля (строка 145 — вызов сразу после объявления). При Фазе B добавится новая модель `UserStats` и `UserStatus` — **забыть положить её в список `models` на строках 120-133 означает, что `tbl.create` упадёт с `TypeError: SQLite does not support type UUID/JSONB/INET`**. Действие: расширить список, не исправлять сам механизм (он работает, хоть и мутирует). | 🟢 P2 | да — критично для тестов Фазы B |
-| **T7** | `infra/docker-compose.yml:131` (`worker`) | `worker.mem_limit: 640m`. Сейчас работает. Фаза B добавит `freeze_inactive_stats` cron + новые bulk-операции; worker может OOM-нуть, как это было с ботом (`commit d3adac9` поднял mem_limit до 768m). Поднять превентивно до `768m` / `memswap_limit: 1024m` — как у бота. | 🟢 P2 | косвенно (без теста под нагрузкой) |
-| **T8** | `apps/backend/tests/conftest.py` | Аналог T6 для backend — `_remap_postgres_types_for_sqlite` (или похожая логика) + нужен аналогичный список моделей. Сейчас backend тесты проходят (`test_admin_habits_api.py`, `test_habit_gates.py`) через свой файл. Проверить, что Фаза B-тесты наследуют правильный паттерн. | 🟢 P2 | да — новые `test_character_*` сломаются без этой проверки |
+| **T6** | `apps/worker/tests/conftest.py:98-145` | `_remap_postgres_types_for_sqlite()` мутирует модели глобально на импорт модуля (строка 145 — вызов сразу после объявления). При Фазе B добавится новая модель `UserStats` и `UserStatus` — **забыть положить её в список `models` на строках 120-133 означает, что `tbl.create` упадёт с `TypeError: SQLite does not support type UUID/JSONB/INET`**. Действие: расширить список, не исправлять сам механизм (он работает, хоть и мутирует). | 🟢 P2 → 🔵 перенесено в Фазу B | да — критично для тестов Фазы B |
+| **T7** | `infra/docker-compose.yml:131` (`worker`) | `worker.mem_limit: 640m`. Сейчас работает. Фаза B добавит `freeze_inactive_stats` cron + новые bulk-операции; worker может OOM-нуть, как это было с ботом (`commit d3adac9` поднял mem_limit до 768m). Поднять превентивно до `768m` / `memswap_limit: 1024m` — как у бота. | 🟢 P2 ✅ сделано | косвенно (без теста под нагрузкой) |
+| **T8** | `apps/backend/tests/conftest.py` | Аналог T6 для backend — `_remap_postgres_types_for_sqlite` (или похожая логика) + нужен аналогичный список моделей. Сейчас backend тесты проходят (`test_admin_habits_api.py`, `test_habit_gates.py`) через свой файл. Проверить, что Фаза B-тесты наследуют правильный паттерн. | 🟢 P2 → 🔵 перенесено в Фазу B | да — новые `test_character_*` сломаются без этой проверки |
 | **T9** | `docs/09-prod-readiness.md` §3 | 4 пункта техдолга частично или полностью неактуальны после U1–U7. Полная перепись не нужна, но таблица со ссылками на ветхое — удалить. | 🟢 P2 | нет |
 | **T10** | `apps/backend/app/core/constants.py` | Сейчас `CharacterConfig`-блока нет. Перед Фазой B его **лучше не создавать заранее** — без него проще принимать решения по умолчанию (по §2 TZ). Когда пишете `character_service.py` — тогда и вносите единым патчем. | (информация) | — |
 | **T11** *(deferred)* | `apps/backend/app/services/penalty_service.py:48, 85` | Legacy ruff-errors, оставшиеся после T1 (не мои — были в `main@64f231c`): F821 `Any` без импорта в сигнатуре `__init__` (строка 48); F841 + E501 на неиспользуемой `idempotency_key = ...` (строка 85). Скорее всего заготовки под будущую `SuspiciousPairsService`-интеграцию (есть docstring «для авто-flag»). E501 на 112 уйдёт сам при T2 (станет короче). Можно почистить в одной PR после Фазы B. | 🟢 P3 | нет |
@@ -696,7 +696,7 @@ class CharacterConfig:
 - [ ] `checkin_repository.get_recent_dates` существует, `checkin_service._compute_streak` состоит из импорта + Python-цикла.
 - [ ] `make test` зелёный.
 
-T6 (список моделей) и T8 (backend conftest) — **обязательная часть** коммита с 009 миграцией, иначе новые тесты падают с непонятным traceback.
+T6 и T8 (список моделей в `_remap_postgres_types_for_sqlite`) — **обязательная часть** коммита с 009 миграцией, но делаются в Фазе B, не в pre-B списке. Сегодня whitelist актуален для существующих моделей, делать нечего.
 
 ### Что осознанно НЕ включаем в этот список
 
@@ -743,7 +743,8 @@ T6 (список моделей) и T8 (backend conftest) — **обязател
 models/user_status.py, repositories/user_stats_repository.py, services/character_service.py,
 api/v1/character.py, alembic/versions/009_user_statuses_seed.py, apps/worker/worker/tasks/freeze_inactive_stats.py.
 Начни с миграции 009 + models. Перед правкой CheckinService и PenaltyService — сначала
-закрой техдолг §8.1 (T1, T2, T4, T6), иначе наслоишь кашу.»**
+закрой техдолг §8.1 (T1, T2, T4 — закрыты 22.07; T6 в Фазе B),
+иначе наслоишь кашу.»**
 
 Полный контекст для нового AI-агента — `AGENTS.md` + `TZ_kharakteristiki_personazha.md`
 (этот файл) + `.kilo/skills/habit-club-dev/SKILL.md` (если доступен).
