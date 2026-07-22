@@ -133,6 +133,48 @@ class FakeHabitRepo:
         habit.is_active = is_active
 
 
+class FakeSuspiciousPairsRepository:
+    """Замена SuspiciousPairsRepository для unit-тестов PenaltyService.
+
+    Тест задаёт множество пар через `flag(a, b)` (или напрямую редактирует
+    `_pairs`); `lookup_flagged` возвращает True ровно для flagged-пар.
+    """
+
+    def __init__(self) -> None:
+        self._pairs: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _canonical(a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a <= b else (b, a)
+
+    def flag(self, a: str, b: str) -> None:
+        self._pairs.add(self._canonical(a, b))
+
+    def clear(self, a: str, b: str) -> None:
+        self._pairs.discard(self._canonical(a, b))
+
+    async def lookup_flagged(self, a: str, b: str) -> bool:
+        if a == b:
+            return False
+        return self._canonical(a, b) in self._pairs
+
+    async def get(self, a: str, b: str):  # pragma: no cover
+        return None
+
+    async def ban(self, *, a: str, b: str, reason: str):  # pragma: no cover
+        self._pairs.add(self._canonical(a, b))
+        return None
+
+    async def list_flagged(
+        self,
+        *,
+        status: str | None = "flagged",
+        limit: int = 100,
+        offset: int = 0,
+    ):  # pragma: no cover
+        return []
+
+
 def make_habit(
     *, id: str | None = None, chat_id: int = 100, proof: ProofType = ProofType.VIDEO_NOTE
 ) -> Habit:

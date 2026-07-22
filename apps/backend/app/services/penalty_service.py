@@ -25,6 +25,7 @@ from app.models.transaction import Transaction
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 
 
 class RedisPort(Protocol):
@@ -43,19 +44,15 @@ class PenaltyService:
         habit_repo: HabitRepository,
         membership_repo: MembershipRepository,
         checkin_repo: CheckinRepository,
+        suspicious_repo: SuspiciousPairsRepository,
         redis_port: RedisPort | None = None,
-        suspicious_lookup=None,
-        suspicious_service: Any | None = None,
     ) -> None:
-        """suspicious_service: Optional[SuspiciousPairsService] — для авто-flag
-        по асимметрии ловов. Если None — флагование не выполняется (для тестов)."""
         self._session = session
         self._habit_repo = habit_repo
         self._membership_repo = membership_repo
         self._checkin_repo = checkin_repo
+        self._suspicious_repo = suspicious_repo
         self._redis = redis_port
-        self._suspicious_lookup = suspicious_lookup
-        self._suspicious_service = suspicious_service
         self._logger = get_logger("penalty_service")
 
     async def apply_catch(
@@ -82,8 +79,6 @@ class PenaltyService:
             raise HabitNotFoundError()
 
         # Идемпотентность: уникальный ключ (membership_id, date, reason).
-        idempotency_key = f"penalty:{violator_membership_id}:{club_date}:{PenaltyReason.CAUGHT.value}"
-
         existing = await self._session.execute(
             Penalty.__table__.select().where(
                 Penalty.membership_id == violator_membership_id,
@@ -109,22 +104,9 @@ class PenaltyService:
         await self._habit_repo.add_to_prize_pool(str(habit.id), amount)
 
         # Применяется ли кэтчер-бонус — отдельная проверка suspicious_pairs (см. apply_catch_bonus).
-        grant_catcher_bonus = not await self._is_suspicious(catcher_membership_id, violator_membership_id)
-
-        # Авто-flag по асимметрии ловов (после записи пенальти, чтобы счётчик видел этот catch).
-        if self._suspicious_service is not None and catcher_membership_id is not None:
-            try:
-                await self._suspicious_service.evaluate_after_catch(
-                    catcher_membership_id=catcher_membership_id,
-                    violator_membership_id=violator_membership_id,
-                    club_date=club_date,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Антифрод-эвристика не должна ломать основной catch-flow.
-                self._logger.warning(
-                    "suspicious_evaluate_failed",
-                    extra={"err": str(exc)},
-                )
+        grant_catcher_bonus = not await self._suspicious_repo.lookup_flagged(
+            catcher_membership_id, violator_membership_id
+        )
 
         penalty = Penalty(
             id=str(uuid4()),
@@ -247,22 +229,3 @@ class PenaltyService:
             },
         )
         return penalty
-
-    async def _is_suspicious(self, a: str | None, b: str | None) -> bool:
-        if a is None or b is None or a == b:
-            return False
-        if self._suspicious_lookup is not None:
-            return await self._suspicious_lookup(a, b)
-        from sqlalchemy import or_, select
-
-        from app.models.auxiliary import SuspiciousPair
-
-        stmt = select(SuspiciousPair).where(
-            or_(
-                (SuspiciousPair.membership_id_a == a) & (SuspiciousPair.membership_id_b == b),
-                (SuspiciousPair.membership_id_a == b) & (SuspiciousPair.membership_id_b == a),
-            ),
-            SuspiciousPair.status == "flagged",
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none() is not None

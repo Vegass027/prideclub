@@ -9,23 +9,20 @@ import pytest
 from app.core.constants import (
     MembershipStatus,
     PenaltyConfig,
-    PenaltyReason,
     TransactionType,
 )
 from app.core.exceptions import (
     CannotCatchSelfError,
     PenaltyAlreadyProcessedError,
-    TooManyCatchAttemptsError,
 )
-from app.models.habit import Habit
-from app.models.membership import Membership
 from app.models.penalty import Penalty
 from app.models.transaction import Transaction
 from app.services.penalty_service import PenaltyService
 from tests.fakes import (
+    FakeCheckinRepo,
     FakeHabitRepo,
     FakeMembershipRepo,
-    FakeCheckinRepo,
+    FakeSuspiciousPairsRepository,
     make_habit,
 )
 
@@ -84,16 +81,13 @@ async def test_apply_catch_happy_path() -> None:
     limiter = _NoopLimiter()
     session = _NoStreakSession()
 
-    async def no_suspicious(*_a, **_kw):
-        return False
-
     service = PenaltyService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
         redis_port=limiter,
-        suspicious_lookup=no_suspicious,
     )
 
     penalty = await service.apply_catch(
@@ -121,6 +115,7 @@ async def test_apply_catch_cannot_catch_self() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
     )
 
     with pytest.raises(CannotCatchSelfError):
@@ -142,15 +137,12 @@ async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
     violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     violator.deposit_balance = 0  # депозит исчерпан — membership должен быть paused
 
-    async def no_suspicious(*_a, **_kw):
-        return False
-
     service = PenaltyService(
         session=_NoStreakSession(),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=FakeCheckinRepo(),
-        suspicious_lookup=no_suspicious,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
     )
 
     with pytest.raises(PenaltyAlreadyProcessedError) as exc:

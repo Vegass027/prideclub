@@ -35,11 +35,14 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
     checkin_repo = __import__(
         "app.repositories.checkin_repository", fromlist=["CheckinRepository"]
     ).CheckinRepository(session)
+    from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
+
     penalty_service = PenaltyService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        suspicious_repo=SuspiciousPairsRepository(session),
     )
 
     penalized = 0

@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from typing import Annotated
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_db, current_user_internal
+from app.api.v1.users import current_user_db
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
-from app.core.logging import get_logger
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
 from app.db.session import get_session
-from app.models.habit import Habit
-from app.models.membership import Membership
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.catch_rate_limiter import RedisCatchRateLimiter
 from app.services.penalty_service import PenaltyService
-from redis.asyncio import Redis
-
 
 router = APIRouter()
 
@@ -66,7 +62,7 @@ async def list_members(
 
     memberships = await membership_repo.list_for_habit(habit_id)
     members: list[MemberRowOut] = []
-    club_date = habit.club_date(datetime.now(tz=timezone.utc))
+    club_date = habit.club_date(datetime.now(tz=UTC))
 
     # Хак: достаём user.first_name из БД. В шаге 6 добавим UserRepository.
     user_id_to_name = await _user_names(session, [m.user_id for m in memberships])
@@ -76,7 +72,7 @@ async def list_members(
         if existing is not None:
             status = existing.status.value
         else:
-            status = "pending" if habit.is_within_checkin_window(datetime.now(tz=timezone.utc)) else "missed"
+            status = "pending" if habit.is_within_checkin_window(datetime.now(tz=UTC)) else "missed"
 
         members.append(
             MemberRowOut(
@@ -115,16 +111,18 @@ async def catch_violator(
     habit_repo = HabitRepository(session)
     membership_repo = MembershipRepository(session)
     checkin_repo = CheckinRepository(session)
+    suspicious_repo = SuspiciousPairsRepository(session)
     service = PenaltyService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        suspicious_repo=suspicious_repo,
         redis_port=RedisCatchRateLimiter(redis),
     )
 
     catcher_membership = await membership_repo.get_for_user_in_habit(user.id, habit_id)
-    club_date = (await habit_repo.get(habit_id)).club_date(datetime.now(tz=timezone.utc))  # type: ignore[union-attr]
+    club_date = (await habit_repo.get(habit_id)).club_date(datetime.now(tz=UTC))  # type: ignore[union-attr]
 
     try:
         penalty = await service.apply_catch(

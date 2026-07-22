@@ -21,6 +21,22 @@ class SuspiciousPairsRepository:
     def _canonical(a: str, b: str) -> tuple[str, str]:
         return (a, b) if a <= b else (b, a)
 
+    async def lookup_flagged(self, a: str, b: str) -> bool:
+        """Возвращает True, если пара (a, b) сейчас в статусе 'flagged'.
+
+        Канонический ключ (min, max) берётся из `_canonical`, поэтому
+        пары (A,B) и (B,A) дают один и тот же ответ. Пары в статусе
+        'banned' сюда **не** входят — это отдельное состояние. Пары,
+        у которых нет строки, → False.
+
+        Используется в `penalty_service` (T2 рефакторинг: раньше
+        сервис делал SQL сам).
+        """
+        if a == b:
+            return False
+        pair = await self.get(a, b)
+        return pair is not None and pair.status == "flagged"
+
     async def get(self, a: str, b: str) -> SuspiciousPair | None:
         ca, cb = self._canonical(a, b)
         result = await self._session.execute(

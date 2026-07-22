@@ -11,6 +11,7 @@ from app.models.membership import Membership
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.penalty_service import PenaltyService
 from db.session import async_session_factory  # type: ignore[import-not-found]
 
@@ -69,6 +70,7 @@ async def _process(
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),
                 checkin_repo=CheckinRepository(session),
+                suspicious_repo=SuspiciousPairsRepository(session),
                 redis_port=redis_port,
             )
             penalty = await service.apply_catch(
