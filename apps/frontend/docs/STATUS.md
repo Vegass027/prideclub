@@ -1,7 +1,14 @@
 # Frontend Status — что сделано и что работает
 
+> Snapshot от 2026-07-22. Включает **Admin Mini App** (введено в коммите `ad0267b`).
+> Vite обновлён с 5 до 6. **Платежи = мок на фронте** (`PaymentModal.setTimeout`,
+> `TopUpModal.alert`), бот не вызывает `bot.send_invoice`. См.
+> [09-prod-readiness.md](../../../docs/09-prod-readiness.md).
+
 > Telegram Mini App для Habit Club (PrideClub). React 18 + TypeScript + Vite + Tailwind + React Query + Zustand.
-> **Production**: `https://app.prideclub.fun/`
+> **Production**:
+> - User Mini App: `https://app.prideclub.fun/`
+> - Admin Mini App: `https://admin.prideclub.fun/` (owner-only, через `OWNER_TELEGRAM_ID`)
 
 ---
 
@@ -10,12 +17,12 @@
 | Слой | Технология |
 |------|------------|
 | Framework | React 18, TypeScript (strict) |
-| Build | Vite 5 |
+| Build | Vite **6** (multi-stage Docker: node:20-alpine → nginx:1.27-alpine) |
 | Стили | TailwindCSS 3, кастомная палитра (canvas / card / accent) |
-| State (server) | TanStack Query v5 |
-| State (UI) | Zustand |
-| Routing | React Router v6 |
-| Telegram | `@telegram-apps/sdk` через `window.Telegram.WebApp` |
+| State (server) | TanStack Query **v5** |
+| State (UI) | Zustand **v5** |
+| Routing | React Router **v6** |
+| Telegram | `@telegram-apps/sdk` **3.3** через `window.Telegram.WebApp` |
 
 ---
 
@@ -38,11 +45,18 @@ apps/frontend/src/
 │   └── Profile/
 │
 ├── shared/
-│   ├── api/          # fetch-клиент + типизированные endpoint'ы
+│   ├── api/          # axios-клиент + типизированные endpoint'ы
 │   ├── hooks/        # useQuery / useMutation обёртки
-│   ├── telegram/     # TMA bootstrap, getUser, getUserPhoto
+│   ├── telegram/     # TMA bootstrap, getUser, getUserPhoto (через @telegram-apps/sdk 3.3)
 │   ├── ui/           # BottomNav, HabitNav, Avatar, Modal'ы, ...
-│   └── types/        # API DTO
+│   ├── types/        # API DTO
+│   └── utils/        # formatKopecks и др.
+│
+├── admin/            # Admin Mini App (отдельный роутер, отдельный nginx endpoint)
+│   ├── api/          # adminHabitsApi (CRUD, activate, archive, restore)
+│   ├── components/   # AdminHabitCard
+│   ├── hooks.ts      # useAdminHabits, useActivateHabit, useDeleteHabit, useRestoreHabit, usePermanentDeleteHabit
+│   └── pages/        # HabitsListPage (с фильтрами Активные/Скрытые/Архив), HabitCreatePage, HabitEditForm
 │
 └── index.css         # Tailwind directives + safe-area переменные
 ```
@@ -54,7 +68,7 @@ apps/frontend/src/
 | Path | Страница | Назначение |
 |------|----------|------------|
 | `/onboarding` | OnboardingPage | Редирект: 1 клуб → `/habits/:id/today`, иначе → `/my-habits` |
-| `/marketplace` | MarketplacePage | Каталог клубов, вступление через PaymentModal |
+| `/marketplace` | MarketplacePage | Каталог клубов, вступление через **мок-PaymentModal** |
 | `/my-habits` | MyHabitsPage | Список клубов, в которых состоит юзер |
 | `/habits/:id/today` | TodayPage | Статус чек-ина на сегодня |
 | `/habits/:id/members` | MembersPage | Участники + кнопка «спалить» |
@@ -76,7 +90,10 @@ apps/frontend/src/
 ### ✅ Marketplace
 - Список клубов из `GET /marketplace`.
 - Карточка: title, description, окно чек-ина, штраф, подписка, фонд, кол-во участников.
-- **Вступить** → `PaymentModal` (мок, 3 шага: review → processing → success) → `POST /habits/:id/join` → переход в Today.
+- **Вступить** → `PaymentModal` (**мок**, 3 шага: review → processing → success через
+  `setTimeout(1200)`) → `POST /habits/:id/join` → переход в Today. В моде текст
+  явно: *"Сейчас платёжный шлюз не подключён"*. Реальный платёжный провайдер
+  не подключён.
 - **Уже состоит** → кнопка «Открыть клуб →».
 - Кнопка «Подробнее» раскрывает описание.
 
@@ -115,10 +132,23 @@ apps/frontend/src/
 - **Депозит**:
   - Буллеты: «Депозит покрывает штрафы в клубах», «Если депозит пуст — ты выбываешь из клуба ☹️».
   - Сумма + история транзакций (последние N).
-  - Кнопка «+ Пополнить» → `TopUpModal` (4 пресета 299/599/999/1999 ₽).
+  - Кнопка «+ Пополнить» → `TopUpModal` (**мок**, 4 пресета 299/599/999/1999 ₽,
+    `alert("Пополнение на N ₽ скоро будет доступно")`).
 - **Мои клубы**: карточки с описанием и кнопкой «Открыть клуб →».
 - **Все клубы →**: secondary кнопка → Marketplace.
 - Всегда отображается **BottomNav** (не HabitNav) — глобальный контекст.
+- **AI-комендант и "Удалить аккаунт"** — **отсутствуют** в MVP (запланировано в v2).
+
+### ✅ Admin Mini App (`src/admin/`)
+
+- **Хост:** `https://admin.prideclub.fun/` (отдельный nginx endpoint, отдельный `admin.html`).
+- **Owner-gate:** через `OWNER_TELEGRAM_ID` в `core/middleware.py`.
+- **Функционал:**
+  - `HabitsListPage` — список клубов с фильтрами **Активные / Скрытые / Архив** (фильтр "Все" удалён).
+  - `HabitCreatePage` — форма создания клуба (title, description, photo upload, окно чек-ина, цена, штраф, timezone, proof_type).
+  - `HabitEditForm` — редактирование существующего клуба.
+  - `AdminHabitCard` — карточка с toggle is_active, кнопками **delete / restore / permanent delete**.
+  - `uploads.ts` API — загрузка фото (`POST /admin/v1/uploads`), файл попадает в volume `club_uploads` и отдаётся nginx'ом.
 
 ### ✅ Bottom Navigation
 - `fixed bottom-0 inset-x-0`, `pb-[env(safe-area-inset-bottom)]`, `bg-canvas/95 backdrop-blur`, `z-40`.
@@ -155,8 +185,8 @@ apps/frontend/src/
 | `StatusBadge` / `StatusDot` | статус чек-ина |
 | `EmptyState` | пустое состояние |
 | `Skeleton` | loading placeholder |
-| `PaymentModal` | bottom-sheet для оплаты (мок) |
-| `TopUpModal` | bottom-sheet для пополнения (мок) |
+| `PaymentModal` | bottom-sheet для оплаты (**мок**, `setTimeout(1200)`) |
+| `TopUpModal` | bottom-sheet для пополнения (**мок**, `alert()`) |
 
 ---
 
@@ -203,13 +233,14 @@ apps/frontend/src/
 
 | Что | Статус |
 |-----|--------|
-| Реальная интеграция ЮKassa / Telegram Stars | ⏳ мок PaymentModal |
-| Реальное пополнение депозита | ⏳ мок TopUpModal |
-| Загрузка чекин-медиа (фото/video_note) | ❌ только статус, без UI |
+| Реальная интеграция ЮKassa / Telegram Stars | ❌ мок PaymentModal (бэк/bot код подготовлен, но бот не вызывает send_invoice) |
+| Реальное пополнение депозита | ❌ мок TopUpModal (`alert()`) |
+| Загрузка чекин-медиа (фото/video_note) на клиенте | ❌ только статус, без UI загрузки |
 | Push-уведомления через бота | ❌ |
 | Локализация (i18n) | ❌ только ru-RU |
 | Dark/Light theme switch | ❌ только dark |
-| Onboarding tutorial | ❌ |
+| Onboarding tutorial | ❌ редирект-страница только |
+| AI-комендант / "Удалить мои данные" | ❌ в v2 |
 | A11y audit | ⏳ базовая (aria-labels, tabindex) |
 | E2E тесты (Playwright) | ❌ |
 | Unit-тесты (Vitest) | ❌ |
@@ -224,23 +255,28 @@ cd apps/frontend
 npm install
 npm run build       # → dist/
 
-# Деплой на сервер
-rsync -az apps/frontend/src/ root@169.58.52.78:/app/apps/frontend/src/
-rsync -az apps/frontend/dist/ root@169.58.52.78:/app/apps/frontend/dist/
+# Деплой на сервер — только src/, dist/ собирается внутри Docker:
+rsync -az apps/frontend/ root@169.58.52.78:/app/apps/frontend/
 ssh root@169.58.52.78 'cd /app/infra && docker compose build frontend --no-cache && docker compose up -d frontend'
 ```
 
+> ⚠️ `dist/` на хосте (`/app/apps/frontend/dist/`) — артефакт локальных сборок,
+> **не** используется контейнером. Контейнер собирает свой `dist` внутри multi-stage
+> `node:20-alpine` → `nginx:1.27-alpine`. Не путать при диагностике.
+
 CI:
-- `npm run build` в `.github/workflows/frontend-ci.yml` (если есть).
+- `npm run build` в `.github/workflows/frontend-ci.yml`.
 - TypeScript strict — `npx tsc --noEmit` проходит.
 
 ---
 
-## Метрики
+## Метрики (последний локальный билд, 2026-07-22)
 
-- **Bundle**: ~346 KB JS (gzip ~110 KB), 14 KB CSS (gzip ~4 KB).
-- **Страниц**: 9.
-- **Компонентов UI**: 13.
-- **Хуков**: 11.
+- **Bundle**: `index-*.js` ~309 KB (gzip ~102 KB), `admin-*.js` ~27 KB (gzip ~7 KB),
+  `main-*.js` ~39 KB (gzip ~10 KB), `index-*.css` ~14 KB (gzip ~4 KB).
+- **Страниц user Mini App**: 8 (Onboarding, Marketplace, MyHabits, Today, Members, Leaderboard, GlobalLeaderboard, Profile).
+- **Страниц Admin Mini App**: 3 (HabitsListPage, HabitCreatePage, HabitEditForm).
+- **Компонентов UI**: ~13 (`shared/ui/`).
+- **Хуков**: ~11 (user) + 5 admin-хуков.
 - **TS strict**: ✅.
-- **Lint (eslint)**: ✅ (если настроен).
+- **Lint (eslint)**: ✅.

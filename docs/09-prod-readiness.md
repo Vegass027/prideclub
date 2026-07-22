@@ -26,12 +26,12 @@
 | 1 | **Аутентификация** initData + JWT для /internal | ✅ Работает | E2E на сервере, 161 backend тестов |
 | 2 | **Чек-ины** через Celery worker | ✅ Работает | `worker_checkin_ok` в логах, идемпотентность по `(membership_id, date)`. T4: streak-SELECT вынесен в `CheckinRepository.get_recent_dates`. |
 | 3 | **Кэтчер-механика** через worker | ✅ Работает | `process_penalty` через `/internal/penalties/catch` → penalty + transaction в БД. T2: `_is_suspicious` в репо. T5: fail-closed без Redis. |
-| 4 | **Telegram Payments webhook** | ✅ Работает | `process_payment` идемпотентно через `charge_id` |
+| 4 | **Telegram Payments webhook** | ⏸ Код готов, не вызывается | `process_payment` идемпотентен через `charge_id`, но `bot.send_invoice` в коде отсутствует, фронт использует мок `PaymentModal`; в БД `transactions=0` |
 | 5 | **Депозит + штрафы** | ✅ Работает | FK-фикс (penalty → transaction в одной транзакции) |
 | 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
-| 9 | **PostgreSQL** (8 миграций, расширения) | ✅ Работает | `000_extensions` → `008_character_and_club_fields` |
+| 9 | **PostgreSQL** (9 миграций, расширения) | ✅ Работает | `000_extensions` → `009_chat_id_partial_unique` |
 | 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py`. T1: `parse_rate_limit_spec` в `core/utils.py`. |
 | 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` + T2 `SuspiciousPairsRepository.lookup_flagged` |
 | 12 | **Season prize distribution** | ✅ Работает | `close_season` через worker |

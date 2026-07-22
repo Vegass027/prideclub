@@ -1,5 +1,9 @@
 # 04 — Стандарты кода и архитектурные паттерны
 
+> Snapshot от 2026-07-22. Правила и паттерны актуальны; примеры кода иллюстрируют
+> **текущий** стиль (с DI через репозитории, без `commit()` в сервисах, с `send_task`
+> через Celery producer).
+
 Принципы и правила, единые для всех сервисов проекта. Цель — масштабируемая кодовая
 база без дублирования логики, удобная для добавления новых привычек и фич.
 
@@ -49,7 +53,8 @@ async def create_checkin(data: CheckinIn, db: AsyncSession = Depends(get_db)):
 ```python
 # services/checkin_service.py
 class CheckinService:
-    def __init__(self, membership_repo, habit_repo, checkin_repo):
+    def __init__(self, session: AsyncSession, membership_repo, habit_repo, checkin_repo):
+        self._session = session
         self._membership_repo = membership_repo
         self._habit_repo = habit_repo
         self._checkin_repo = checkin_repo
@@ -68,7 +73,10 @@ class CheckinService:
 
 # api/checkins.py
 @router.post("/checkins")
-async def create_checkin(data: CheckinIn, service: CheckinService = Depends(get_checkin_service)):
+async def create_checkin(
+    data: CheckinIn,
+    service: CheckinService = Depends(get_checkin_service),
+):
     checkin = await service.create_checkin(data.user_id, data.habit_id)
     return CheckinOut.model_validate(checkin)
 ```
@@ -112,19 +120,23 @@ class Habit:
 
 ```python
 class PenaltyService:
+    def __init__(self, db: AsyncSession):
+        self._db = db
+
     async def apply_penalty(self, membership_id, amount):
         result = await self._db.execute(
             select(Membership).where(Membership.id == membership_id)
         )
         membership = result.scalar_one()
         membership.deposit_balance -= amount
-        await self._db.commit()
+        await self._db.commit()  # ❌ commit() в сервисе нарушает "одна транзакция = один handler"
 ```
 
-Сервис знает про SQLAlchemy, про то, как строится запрос. При добавлении кэша в Redis
-нужно менять каждый сервис.
+Сервис знает про SQLAlchemy, про то, как строится запрос, и **сам коммитит транзакцию** —
+это нарушает инвариант "коммит делает middleware или framework-слой". При добавлении
+кэша в Redis нужно менять каждый сервис.
 
-### ✅ Хорошо — доступ через репозиторий
+### ✅ Хорошо — доступ через репозиторий, без `commit()` в сервисе
 
 ```python
 # repositories/membership_repository.py
@@ -133,24 +145,45 @@ class MembershipRepository:
         self._db = db
         self._cache = cache
 
+    async def lock_for_update(self, membership_id: UUID) -> Membership:
+        """SELECT ... FOR UPDATE — атомарный лок строки для транзакции штрафа."""
+        result = await self._db.execute(
+            select(Membership).where(Membership.id == membership_id).with_for_update()
+        )
+        return result.scalar_one()
+
     async def decrease_deposit(self, membership_id: UUID, amount: int) -> Membership:
-        membership = await self._db.get(Membership, membership_id)
+        membership = await self.lock_for_update(membership_id)
         membership.deposit_balance -= amount
-        await self._db.commit()
-        await self._cache.delete(f"membership:{membership_id}")  # инвалидация кэша
+        await self._db.flush()  # flush, не commit — коммит в handler
         return membership
 
 
 # services/penalty_service.py
 class PenaltyService:
-    def __init__(self, membership_repo: MembershipRepository):
+    def __init__(self, session: AsyncSession, membership_repo: MembershipRepository):
+        self._session = session
         self._membership_repo = membership_repo
 
     async def apply_penalty(self, membership_id: UUID, amount: int) -> Membership:
         return await self._membership_repo.decrease_deposit(membership_id, amount)
+
+
+# api/penalties.py — коммит здесь (или в middleware / Celery-задаче)
+@router.post("/penalties")
+async def create_penalty(
+    payload: PenaltyIn,
+    service: PenaltyService = Depends(get_penalty_service),
+):
+    m = await service.apply_penalty(payload.membership_id, payload.amount)
+    await service._session.commit()  # коммит на границе handler
+    return PenaltyOut.model_validate(m)
 ```
 
-Сервис не знает деталей хранения. Изменения — только в репозитории.
+Сервис не знает деталей хранения. Изменения — только в репозитории. **Исключение:**
+в admin-эндпоинтах допускается `await service._session.commit()` в самом handler
+(`/admin/v1/habits` использует это после `service.create(...)` — единственный
+публичный кейс, помечен комментарием в коде).
 
 ---
 
@@ -352,9 +385,65 @@ async def validate_proof(habit: Habit, message: Message) -> bool:
 
 Добавление привычки "Медитация" — это новая строка в БД, без изменения кода.
 
----
+## 9. Celery `send_task` — backend НЕ импортирует worker-модули
 
-## 9. Тестирование — сервисы независимо от API и БД
+В этом проекте backend и worker — **отдельные контейнеры**, и backend **не должен**
+импортировать worker-таски напрямую (иначе при старте API подтягивается всё дерево
+зависимостей worker'а, конфликты версий, лишний startup cost).
+
+Правильный паттерн: backend кладёт задачи в очередь по **строковому имени**.
+
+```python
+# apps/backend/app/services/celery_producer.py
+_TASK_NAMES: dict[str, str] = {
+    "checkin": "worker.tasks.process_checkin.run",
+    "penalty": "worker.tasks.process_penalty.run",
+    "payment": "worker.tasks.process_payment.run",
+}
+
+
+def send_task(task_kind: str, payload: dict) -> str:
+    if task_kind not in _TASK_NAMES:
+        raise ValueError(f"Unknown task kind: {task_kind!r}")
+    task_name = _TASK_NAMES[task_kind]
+    result = _get_app().send_task(task_name, kwargs={"payload": payload})
+    return result.id
+
+
+# Celery-инстанс на стороне backend:
+_app = Celery(
+    "habit_club_backend_producer",
+    broker=broker,
+    backend=result_backend,
+    include=[],   # НИКАКИХ автоимпортов тасок в backend
+)
+```
+
+```python
+# apps/worker/worker/celery_app.py — здесь worker РЕГИСТРИРУЕТ таски
+celery_app = Celery(
+    "habit_club_worker",
+    broker=broker,
+    include=[
+        "worker.tasks.process_checkin",
+        "worker.tasks.process_penalty",
+        "worker.tasks.process_payment",
+        "worker.tasks.apply_catch_bonus",
+        "worker.tasks.close_catch_window",
+        "worker.tasks.expire_bonus_points",
+    ],
+)
+```
+
+**Что важно:**
+- Backend может вызвать `send_task("checkin", {...})`, **не зная**, что код живёт в
+  worker-контейнере.
+- Worker-таски не имеют обратной связи с backend через импорты — могут развиваться
+  независимо.
+- Добавление новой таски: 1) написать `worker/tasks/<name>.py`, 2) добавить в
+  `celery_app.include`, 3) добавить имя в `_TASK_NAMES` в backend. Три точки
+  изменения, не одна.
+- Для cron-тасок имя указывается прямо в `beat_schedule`, без producer'а.
 
 ```python
 # tests/test_checkin_service.py
@@ -370,14 +459,13 @@ async def test_checkin_rejected_outside_window():
 Сервисы получают репозитории через DI (конструктор), в тестах подставляются фейки —
 тесты быстрые, не зависят от инфраструктуры.
 
+**Текущее покрытие (2026-07-22):** 161 backend-тест + 34 worker-теста (2 legacy
+fail в `test_close_catch_window.py`, не связано с текущей разработкой). Прогоняются
+локально + в CI (GitHub Actions), **не** на проде.
+
 ---
 
-## 10. Правила проекта (сводка)
-
-| Делаем | Не делаем |
-|---|---|
-| Бизнес-логику в сервисах | Логику в роутах/хендлерах |
-| Правила в domain-методах | Копируем условия в несколько мест |
+## 11. Правила проекта (сводка)
 | Доступ к данным через репозитории | SQL/ORM-запросы в сервисах |
 | Константы и enum'ы в `core/constants.py` | Магические числа в коде |
 | Переиспользуемые UI в `shared/ui` | Копипаста JSX/стилей |
@@ -396,7 +484,7 @@ async def test_checkin_rejected_outside_window():
 
 ---
 
-## 11. Python-specific правила (для backend/bot/worker)
+## 12. Python-specific правила (для backend/bot/worker)
 
 ### Async-only I/O
 - Никаких `time.sleep` в async-коде — только `asyncio.sleep`.

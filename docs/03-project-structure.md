@@ -1,5 +1,7 @@
 # 03 — Структура проекта
 
+> Snapshot от 2026-07-22. Актуальная раскладка монорепо.
+
 Монорепо с общими типами между backend и frontend. При росте команды можно разнести
 на отдельные репозитории без изменения внутренней структуры сервисов.
 
@@ -40,86 +42,115 @@ frontend/
 │   │   ├── providers/    # Theme, TelegramSDK, QueryClient
 │   │   └── router.tsx
 │   │
-│   ├── pages/
+│   ├── pages/            # 1 директория = 1 экран (user Mini App)
 │   │   ├── Onboarding/
 │   │   ├── Marketplace/
+│   │   ├── MyHabits/
 │   │   ├── Today/
 │   │   ├── Members/
-│   │   ├── Leaderboard/
-│   │   ├── Balance/
+│   │   ├── Leaderboard/        # внутри клуба
+│   │   ├── GlobalLeaderboard/  # рейтинг по всем клубам юзера
 │   │   └── Profile/
+│   │
+│   ├── admin/            # Admin Mini App (отдельный роутер, отдельный nginx endpoint)
+│   │   ├── api/          # adminHabitsApi
+│   │   ├── components/   # AdminHabitCard
+│   │   ├── hooks.ts
+│   │   └── pages/        # HabitsListPage, HabitCreatePage, HabitEditForm
 │   │
 │   ├── widgets/          # Составные блоки (HabitCard, MemberRow, DepositWidget)
 │   │
 │   ├── shared/
-│   │   ├── ui/           # Атомарные (Button, Badge, Timer, Modal, Toast, Skeleton)
-│   │   ├── api/          # axios-клиент + react-query hooks
-│   │   ├── telegram/     # Обёртка tma.js (initData, mainButton, haptics)
-│   │   ├── theme/        # Цветовые токены, синхронизация с темой Telegram
-│   │   ├── hooks/        # Общие хуки (useUser, useHabits, useCheckin)
-│   │   └── types/        # TS-типы (синхронизированы с backend)
+│   │   ├── ui/           # Атомарные (Button, BottomNav, HabitNav, Avatar, Tabs, Modal, Skeleton, …)
+│   │   ├── api/          # axios-клиент + типизированные endpoint'ы
+│   │   ├── telegram/     # Обёртка @telegram-apps/sdk (initData, mainButton, haptics)
+│   │   ├── hooks/        # useQuery / useMutation обёртки
+│   │   ├── types/        # TS-типы (синхронизированы с backend)
+│   │   └── utils/        # formatKopecks и т.п.
 │   │
-│   ├── assets/           # Иконки, изображения, Lottie
+│   ├── assets/           # Иконки, изображения
+│   ├── docs/             # apps/frontend/docs/STATUS.md (специфика фронта)
 │   └── main.tsx
 │
-├── package.json
+├── package.json          # React 18, Vite 6, Tailwind 3, React Query 5, Zustand 5
 ├── tsconfig.json
 ├── vite.config.ts
 └── tailwind.config.js
 ```
 
 **Ключевые решения:**
-- **Vite** — быстрый dev-сервер, оптимален для Mini Apps.
-- **React Query** — кэширование, повторные запросы, синхронизация без перерисовок.
-- **Zustand** — лёгкий глобальный стейт (текущий пользователь, выбранные привычки).
+- **Vite 6** — быстрый dev-сервер, multi-stage Docker build (node:20-alpine → nginx:1.27-alpine).
+- **React Query 5** — кэширование, повторные запросы, синхронизация без перерисовок.
+- **Zustand 5** — лёгкий глобальный UI-стейт (выбранный месяц, открытые модалки).
 - **`shared/telegram/`** — изоляция вызовов Telegram SDK от остального кода.
+- **Admin Mini App** живёт в `src/admin/`, маршруты регистрируются отдельным блоком
+  в `router.tsx`, отдаётся nginx'ом как `admin.html` на `admin.prideclub.fun`.
 
 ## 3. Backend API (apps/backend)
 
 ```
 backend/
 ├── app/
-│   ├── main.py                    # Точка входа FastAPI
+│   ├── main.py                    # Точка входа FastAPI, lifespan, CORS, middleware
 │   ├── core/
 │   │   ├── config.py              # Pydantic Settings (переменные окружения)
 │   │   ├── security.py            # validate_init_data, validate_service_token, JWT
-│   │   ├── logging.py             # Структурированное логирование
+│   │   ├── middleware.py          # auth_middleware: initData / service_token / owner-gate
+│   │   ├── logging.py             # Структурированное логирование (structlog)
 │   │   ├── exceptions.py          # Доменные исключения + глобальный обработчик
 │   │   └── constants.py           # Enums, конфиги (PenaltyConfig, MembershipStatus)
 │   │
 │   ├── api/
-│   │   └── v1/
-│   │       ├── users.py
-│   │       ├── habits.py
-│   │       ├── memberships.py
-│   │       ├── checkins.py
-│   │       ├── penalties.py
-│   │       ├── leaderboard.py
-│   │       ├── payments.py
-│   │       └── health.py          # /health, /ready
+│   │   ├── v1/                    # user-контур (/api/v1/*, initData)
+│   │   │   ├── users.py
+│   │   │   ├── habits.py
+│   │   │   ├── memberships.py
+│   │   │   ├── checkins.py
+│   │   │   ├── penalties.py
+│   │   │   ├── leaderboard.py
+│   │   │   ├── balance.py
+│   │   │   ├── internal_bot.py
+│   │   │   ├── internal_checkins.py
+│   │   │   ├── internal_penalties.py
+│   │   │   ├── internal_payments.py
+│   │   │   ├── admin_suspicious_pairs.py
+│   │   │   └── health.py          # /health, /ready, /metrics
+│   │   │
+│   │   └── admin/                 # admin-контур (/admin/v1/*, initData + OWNER_TELEGRAM_ID)
+│   │       └── v1/
+│   │           ├── habits.py      # CRUD, activate, archive, restore, preview/refresh chat
+│   │           └── uploads.py     # POST /admin/v1/uploads (фото клубов)
 │   │
 │   ├── models/                    # SQLAlchemy модели
-│   ├── schemas/                   # Pydantic-схемы запросов/ответов
+│   ├── schemas/                   # Pydantic-схемы запросов/ответов (включая AdminHabitOut)
 │   ├── services/                  # Бизнес-логика
 │   │   ├── checkin_service.py
 │   │   ├── penalty_service.py
-│   │   ├── deposit_service.py
+│   │   ├── habit_service.py       # в т.ч. admin: create, list_including_archived
+│   │   ├── membership_service.py
+│   │   ├── payment_service.py     # prepare/deprecated: мок на фронте, код готов
 │   │   ├── bonus_service.py
 │   │   ├── season_service.py
-│   │   └── leaderboard_service.py
+│   │   ├── suspicious_pairs_service.py
+│   │   ├── proof_validator.py
+│   │   ├── today_cache.py
+│   │   ├── catch_rate_limiter.py  # Lua: 10 catches / 10s
+│   │   ├── http_rate_limiter.py
+│   │   └── celery_producer.py     # backend send_task(...) → worker по имени
 │   │
 │   ├── repositories/              # Слой доступа к данным
 │   ├── db/
 │   │   ├── session.py             # Подключение к PostgreSQL (async)
 │   │   └── redis.py               # Подключение к Redis
 │   │
-│   └── tasks/                     # Сериализация задач для Celery
+│   └── tasks/                     # (зарезервировано)
 │
 ├── alembic/
-│   ├── versions/
+│   ├── versions/                  # 000_extensions → 009_chat_id_partial_unique
 │   └── env.py
-├── tests/
-├── requirements.txt
+├── tests/                         # 161 тест (pytest + fakeredis + aiosqlite)
+├── scripts/                       # register_webhook.py, seed_dev_data.py
+├── requirements.txt               # fastapi 0.115.5, sqlalchemy 2.0.36, asyncpg 0.30
 ├── alembic.ini
 └── pyproject.toml
 ```
@@ -127,89 +158,129 @@ backend/
 **Ключевые решения:**
 - **Слоистая архитектура:** `api → services → repositories → models`. Каждый слой знает
   только о слое ниже.
-- **Async SQLAlchemy** для неблокирующей работы с БД.
+- **Async SQLAlchemy 2.0** для неблокирующей работы с БД.
 - **Alembic** для версионирования схемы.
-- **Pydantic** как единый источник правды для валидации.
+- **Pydantic 2.10** как единый источник правды для валидации.
+- **Celery `send_task` по имени**: backend НЕ импортирует worker-модули (`include=[]`),
+  кладёт задачи по строковому имени через `app.services.celery_producer`.
+- **Двухконтурный API**: `/api/v1/*` (initData) + `/internal/*` (service_token JWT) +
+  `/admin/v1/*` (initData + owner-gate по `OWNER_TELEGRAM_ID`).
 
 ## 4. Bot Gateway (apps/bot)
 
 ```
 bot/
 ├── bot/
-│   ├── main.py                    # Запуск aiogram-диспетчера
+│   ├── main.py                    # aiohttp webhook-сервер на :8080
 │   ├── handlers/
-│   │   ├── start.py               # /start — приветствие, открытие Mini App
-│   │   ├── checkin.py             # Обработка video_note/photo в чатах клубов
-│   │   ├── payments.py            # Успешные платежи Telegram Payments
+│   │   ├── start.py               # /start, приветствие, открытие Mini App
+│   │   ├── checkin.py             # Обработка video_note/photo в чатах клубов → /internal/checkins/process
+│   │   ├── payments.py            # pre_checkout_query + successful_payment → /internal/payments/confirm
+│   │   ├── chat_member.py         # Бот добавлен/удалён из чата клуба (Redis-кэш available_chats)
 │   │   └── admin.py               # Команды администратора
 │   │
 │   ├── middlewares/
-│   │   ├── membership_check.py
-│   │   └── rate_limit.py
+│   │   ├── rate_limit.py
+│   │   └── __init__.py
 │   │
-│   ├── services/
-│   │   └── api_client.py          # Клиент Backend API (с service_token)
-│   │
-│   └── config.py
+│   ├── services/                  # (зарезервировано)
+│   ├── logging_setup.py
+│   └── config.py                  # pydantic-settings: BOT_TOKEN, WEBHOOK_BASE_URL, SERVICE_SECRET
 │
-├── webhook_server.py
-├── requirements.txt
-└── Dockerfile
+├── requirements.txt               # aiogram 3.30, aiohttp 3.13, PyJWT 2.10, structlog 24
+└── (Dockerfile — в infra/docker/bot.Dockerfile)
 ```
 
 **Ключевые решения:**
-- **Webhook-режим** (не long polling).
-- **Bot Gateway не обращается к БД напрямую** — только через Backend API с `service_token`.
-- Все "тяжёлые" операции делегируются в очередь, не обрабатываются синхронно.
+- **Webhook-режим на aiohttp** (не long polling). Endpoint: `https://api.prideclub.fun/bot/webhook`.
+- **Bot НЕ обращается к БД напрямую** — только через Backend API с `X-Service-Token` JWT.
+- **Bot НЕ выставляет счета** (`bot.send_invoice` / `bot.create_invoice_link` в коде
+  отсутствуют). На проде платежи = мок на фронте; backend и worker код для
+  `process_payment` подготовлен, но контракт `internal_payments.py` имеет
+  известный баг (`chat_id` vs `habit_id`). См. [09-prod-readiness.md](09-prod-readiness.md).
+- Все "тяжёлые" операции делегируются через `POST /internal/*` на backend, который
+  кладёт задачи в Celery. Бот НЕ пишет в Redis напрямую.
 
 ## 5. Worker — фоновые задачи (apps/worker)
 
 ```
 worker/
 ├── worker/
-│   ├── celery_app.py              # Конфигурация Celery
+│   ├── celery_app.py              # Celery 5.4, broker=redis://redis:6379/1, --pool=solo
+│   ├── config.py                  # pydantic-settings
+│   ├── logging_setup.py           # structlog JSON
+│   │
 │   ├── tasks/
-│   │   ├── process_checkin.py
-│   │   ├── close_catch_window.py  # Cron: фиксация нарушений без улова
-│   │   ├── process_penalty.py     # Обработка штрафа
-│   │   ├── recalculate_leaderboard.py
-│   │   ├── close_season.py        # Cron: распределение призов
-│   │   ├── expire_stale_bonus_points.py
-│   │   └── send_notifications.py
+│   │   ├── process_checkin.py           # ad-hoc: от backend через send_task("checkin", ...)
+│   │   ├── process_penalty.py           # ad-hoc: от backend через send_task("penalty", ...)
+│   │   ├── process_payment.py           # ad-hoc: подготовлен, контракт сломан, в MVP не вызывается
+│   │   ├── apply_catch_bonus.py         # ad-hoc: после process_penalty, проверяет suspicious_pairs
+│   │   ├── close_catch_window.py        # cron: crontab(minute=5) каждый час
+│   │   ├── expire_bonus_points.py       # cron: crontab(hour=3, minute=0) — сгорание 90+ дней
+│   │   ├── integrity_check_bonus_transactions.py  # cron: crontab(hour=4, minute=0)
+│   │   └── close_season.py              # cron: crontab(hour=5, minute=0)
 │   │
 │   └── beat_schedule.py
 │
-├── requirements.txt
-└── Dockerfile
+├── db/
+│   └── session.py                 # собственный async_session_factory, дублирует apps/backend/app/db/session.py
+│
+├── tests/                         # 34 тест (2 legacy fail в test_close_catch_window.py)
+├── pyproject.toml
+└── requirements.txt
 ```
+
+**Ключевые решения:**
+- **Celery 5.4** + Redis 7 (broker `redis://redis:6379/1`, result backend `:6379/2`).
+- **`--pool=solo`** — один процесс, async внутри. Блокирует горизонтальное масштабирование;
+  замена на `prefork` отложена до роста.
+- **8 ad-hoc тасок + 4 cron-таски** (см. таблицу в [02-architecture.md](02-architecture.md) §2).
+- **Идемпотентность** через уникальные индексы в БД: `checkins(membership_id, date)`,
+  `penalties(membership_id, date, reason)`, `transactions.idempotency_key`.
 
 ## 6. Инфраструктура (infra/)
 
 ```
 infra/
 ├── docker/
-│   ├── frontend.Dockerfile
-│   ├── backend.Dockerfile
-│   ├── bot.Dockerfile
-│   └── worker.Dockerfile
-├── nginx/
-│   └── nginx.conf
-├── backup/
+│   ├── frontend.Dockerfile   # multi-stage: node:20-alpine → nginx:1.27-alpine
+│   ├── backend.Dockerfile    # python:3.12-slim
+│   ├── bot.Dockerfile        # python:3.12-slim
+│   └── worker.Dockerfile     # python:3.12-slim
+├── nginx/                    # референсные конфиги (на проде nginx на хосте, не в контейнере)
+│   ├── nginx.conf
+│   ├── frontend.nginx.conf
+│   ├── nginx.prideclub.conf
+│   ├── nginx.prod.conf
+│   └── prideclub.tls.conf
+├── postgres/
+│   └── postgresql-tuning.conf
+├── backup/                   # backup_cron.sh готов, НЕ развёрнут (см. 07-security-and-ops.md §4)
 │   ├── backup_cron.sh
-│   ├── rotate_backups.py
-│   └── restore_test.sh
-└── docker-compose.yml
+│   ├── restore_test.sh
+│   └── rotate_backups.py
+├── scripts/
+│   ├── setup_tls_prideclub.sh
+│   └── ssh_to_vps.sh
+├── deploy.sh                 # деплой: rsync + build + migrate + up -d + register webhook
+├── setup_server.sh           # первоначальная подготовка Ubuntu 24.04
+└── docker-compose.yml        # 7 сервисов: postgres, redis, backend, bot, worker, frontend, pgweb
 ```
 
-### Сервисы docker-compose
+### Сервисы docker-compose (7)
 
-- `postgres` — основная БД
-- `redis` — кэш и брокер очередей
-- `backend` — FastAPI приложение
-- `bot` — aiogram Bot Gateway
-- `worker` — Celery worker + Beat
-- `nginx` — reverse proxy + HTTPS (в проде)
-- `frontend` — dev-сервер Vite (в проде собирается в статику)
+- `postgres` (`postgres:16-alpine`) — основная БД, volume `pgdata`
+- `redis` (`redis:7-alpine`, AOF, 256MB cap) — кэш + Celery broker + result backend
+- `backend` (`habit-club-backend`) — FastAPI 0.115 + uvicorn ×2, `/health` 200
+- `bot` (`habit-club-bot`) — aiogram 3.30 + aiohttp webhook, `:8080`
+- `worker` (`habit-club-worker`) — Celery 5.4 + `--pool=solo`, 8 tasks + 4 cron
+- `frontend` (`habit-club-frontend`) — multi-stage build, nginx 1.27, отдаёт статику на 80
+- `pgweb` (`sosedoff/pgweb`) — UI к БД на `db.prideclub.fun` (basic auth)
+
+**Сеть:** одна bridge `habit-club_default` (172.18.0.0/16), DNS по именам сервисов.
+**Volumes:** `pgdata`, `redisdata`, `club_uploads` (расшарен между backend и frontend).
+
+Подробности по deploy-процедуре — в [10-deploy.md](10-deploy.md).
 
 ## 7. Порядок разработки MVP
 

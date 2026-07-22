@@ -1,5 +1,9 @@
 # 06 — Модель данных
 
+> Snapshot от 2026-07-22. Схема таблиц и антифрод актуальны. **Список миграций
+> расширен до 9** (000 → 009), см. §3. Финансовая идемпотентность — через
+> уникальные индексы, см. §5.
+
 Финальная схема БД, миграции, антифрод и идемпотентность. Все решения здесь — результат
 6 итераций ревью, готовы к применению.
 
@@ -188,120 +192,26 @@ PRIMARY KEY (user_id, offer_version_id)
 
 ## 3. Полный набор миграций
 
-### 000_extensions.sql
-```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
-```
+> На проде применена голова `009_chat_id_partial_unique` (см.
+> [09-prod-readiness.md](09-prod-readiness.md) §1.1). Файлы миграций лежат в
+> `apps/backend/alembic/versions/`. Для upgrade/downgrade используется
+> `make migrate` / `make migrate-test`.
 
-### 001_initial_schema.sql
-Создание всех таблиц из раздела 1 (users, habits, memberships, checkins, penalties,
-transactions, seasons, season_stats) с правильными типами и индексами.
+| # | Файл | Что делает |
+|---|---|---|
+| `000_extensions` | `000_extensions.py` | `pgcrypto`, `pg_stat_statements` |
+| `001_initial_schema` | `001_initial_schema.py` | Все таблицы раздела 1 + правильные типы и индексы |
+| `002_bonus_and_penalty_fixes` | `002_bonus_and_penalty_fixes.py` | `penalties.{bonus_applied, reason, date}` + UNIQUE `(membership_id, date, reason)`, `users.bonus_points`, `memberships.auto_renew_enabled`, `seasons.prize_rules_snapshot`, таблицы `daily_streak_snapshots`, `suspicious_pairs`, `bonus_rules`, `season_prize_rules`, `pricing_rules`, `offer_versions`, `user_consents` |
+| `003_migrate_bonus_points` | `003_migrate_bonus_points.py` | Sanity-check + перенос `memberships.bonus_points` → `users.bonus_points` |
+| `004_notifications_and_offer` | `004_notifications_and_offer.py` | `users.notifications_enabled`, `accepted_offer_at`, `deleted_at`, `data_anonymized`; `habits.timezone='Europe/Moscow'` default |
+| `005_users_gdpr_columns` | `005_users_gdpr_columns.py` | GDPR-специфичные колонки (расширение 004) |
+| `006_suspicious_pairs_index` | `006_suspicious_pairs_index.py` | Доп. индексы по `suspicious_pairs` для антифрод-эвристик |
+| `007_habit_admin_fields` | `007_habit_admin_fields.py` | Поля для Admin Mini App: `habits.photo_url`, `habits.telegram_invite_link`, `habits.member_limit`, `habits.curator_id`, `habits.stat_*` |
+| `008_character_and_club_fields` | `008_character_and_club_fields.py` | `habits.stat_name`, `habits.stat_icon`, `habits.stat_gain_per_checkin`, `habits.stat_loss_per_miss` — характеристики и персонаж (TZ) |
+| `009_chat_id_partial_unique` | `009_chat_id_partial_unique.py` | Частичный UNIQUE-индекс на `habits.chat_id` (только `WHERE chat_id IS NOT NULL`) — гарантирует, что у двух активных клубов не может быть одного Telegram-чата |
 
-### 002_bonus_and_penalty_fixes.sql
-```sql
-ALTER TABLE penalties ADD COLUMN bonus_applied BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE penalties ADD COLUMN reason VARCHAR NOT NULL DEFAULT 'caught';
-ALTER TABLE penalties ADD COLUMN date DATE NOT NULL DEFAULT CURRENT_DATE;
-
-CREATE UNIQUE INDEX uq_penalty_per_day_reason
-ON penalties (membership_id, date, reason);
-
-ALTER TABLE users ADD COLUMN bonus_points BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE users ADD COLUMN bonus_points_updated_at TIMESTAMPTZ;
-ALTER TABLE memberships ADD COLUMN bonus_points BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE memberships ADD COLUMN auto_renew_enabled BOOLEAN NOT NULL DEFAULT false;
-
-ALTER TABLE seasons ADD COLUMN prize_rules_snapshot JSONB;
-
-CREATE TABLE daily_streak_snapshots (
-    membership_id UUID NOT NULL REFERENCES memberships(id),
-    date DATE NOT NULL,
-    streak_days INT NOT NULL,
-    PRIMARY KEY (membership_id, date)
-);
-
-CREATE TABLE suspicious_pairs (
-    membership_id_a UUID NOT NULL REFERENCES memberships(id),
-    membership_id_b UUID NOT NULL REFERENCES memberships(id),
-    reason VARCHAR NOT NULL,
-    detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status VARCHAR NOT NULL DEFAULT 'flagged',
-    PRIMARY KEY (membership_id_a, membership_id_b)
-);
-
-CREATE TABLE bonus_rules (
-    id UUID PRIMARY KEY,
-    event_type VARCHAR NOT NULL,
-    threshold INT NOT NULL,
-    reward_type VARCHAR NOT NULL,
-    reward_value INT NOT NULL
-);
-
-CREATE TABLE season_prize_rules (
-    id UUID PRIMARY KEY,
-    habit_id UUID NOT NULL REFERENCES habits(id),
-    rank_from INT NOT NULL,
-    rank_to INT NOT NULL,
-    metric VARCHAR NOT NULL,
-    percentage NUMERIC(5,2) NOT NULL,
-    UNIQUE (habit_id, metric, rank_from, rank_to)
-);
-
-CREATE TABLE pricing_rules (
-    id UUID PRIMARY KEY,
-    habit_rank INT NOT NULL,
-    price_month INT NOT NULL,
-    active_from TIMESTAMPTZ NOT NULL DEFAULT now(),
-    active_to TIMESTAMPTZ
-);
-
-CREATE TABLE offer_versions (
-    id UUID PRIMARY KEY,
-    version VARCHAR NOT NULL,
-    effective_from TIMESTAMPTZ NOT NULL,
-    document_url TEXT NOT NULL
-);
-
-CREATE TABLE user_consents (
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    offer_version_id UUID NOT NULL REFERENCES offer_versions(id),
-    accepted_at TIMESTAMPTZ NOT NULL,
-    ip_address INET,
-    PRIMARY KEY (user_id, offer_version_id)
-);
-```
-
-### 003_migrate_bonus_points.sql
-```sql
--- Sanity-check перед миграцией
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM memberships WHERE bonus_points < 0) THEN
-        RAISE EXCEPTION 'negative bonus_points found — manual cleanup required';
-    END IF;
-    IF EXISTS (SELECT 1 FROM users WHERE bonus_points > 0) THEN
-        RAISE EXCEPTION 'users.bonus_points already populated — manual review required';
-    END IF;
-END $$;
-
--- Перенос бонусов с memberships на users
-UPDATE users u SET bonus_points = COALESCE((
-    SELECT SUM(m.bonus_points) FROM memberships m WHERE m.user_id = u.id
-), 0)
-WHERE EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id AND m.bonus_points > 0);
-
-UPDATE memberships SET bonus_points = 0 WHERE bonus_points > 0;
-```
-
-### 004_notifications_and_offer.sql
-```sql
-ALTER TABLE users ADD COLUMN notifications_enabled BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE users ADD COLUMN accepted_offer_at TIMESTAMPTZ;
-ALTER TABLE users ADD COLUMN deleted_at TIMESTAMPTZ;
-ALTER TABLE users ADD COLUMN data_anonymized BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE habits ADD COLUMN timezone VARCHAR NOT NULL DEFAULT 'Europe/Moscow';
-```
+> SQL-блоки 000–004 в старой версии этого документа устарели (не отражают 005–009).
+> Реальный код — в `apps/backend/alembic/versions/`.
 
 ---
 

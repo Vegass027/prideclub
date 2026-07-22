@@ -51,7 +51,16 @@ htmlcov/
 *.cover
 
 # Kilo / IDE-assistant
-.kilo/
+# Skills (auto-loaded by Kilo) MUST be tracked — see .kilo/skills/habit-club-dev/SKILL.md.
+# Per-project rules MUST be tracked — see .kilo/rules/PRIVICHKI.md (loaded via kilo.jsonc → instructions).
+# Local IDE state (node_modules, bun.lock, package.json, .kilo/kilo.json, .kilo/agent-manager.json, scratch) stays local.
+.kilo/skills/
+!.kilo/skills/
+.kilo/rules/
+!.kilo/rules/
+.kilo/kilo.json
+.kilo/agent-manager.json
+.kilo/scratch/
 .opencode/
 .kilocode/
 

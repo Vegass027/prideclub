@@ -5,8 +5,14 @@
 
 ## 1. Подключение
 
+**Пароль SSH не хранится в этом документе** — он в локальном файле
+`~/.config/kilo/privichki-bootstrap.md` (вне репозитория). Пример команды:
+
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78
+# Из локальной машины (пароль подставляется sshpass из локального файла):
+sshpass -p "$(cat ~/.config/kilo/privichki-bootstrap.md | grep '^Password:' | cut -d' ' -f2)" \
+  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  root@169.58.52.78 'echo OK'
 ```
 
 ## 2. Структура на сервере

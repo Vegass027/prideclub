@@ -20,11 +20,12 @@ Habit Club — Telegram Mini App для дисциплины по привычк
 ## Ключевые правила для агентов
 
 ### Стек
-- **Backend:** Python 3.11+, FastAPI, SQLAlchemy 2.0 async, asyncpg, Alembic, Pydantic
-- **Bot:** aiogram 3.13+, webhook (не long polling)
-- **Worker:** Celery + Redis
-- **Frontend:** React + TypeScript, Vite, TailwindCSS, React Query, Zustand
-- **БД:** PostgreSQL 14+
+- **Backend:** Python 3.12, FastAPI 0.115, SQLAlchemy 2.0 async, asyncpg 0.30, Alembic 1.14, Pydantic 2.10, structlog 24
+- **Bot:** aiogram 3.30, aiohttp 3.13 (webhook, не long polling), PyJWT 2.10
+- **Worker:** Celery 5.4 + Redis (broker `redis://redis:6379/1`), `--pool=solo`, structlog 24
+- **Frontend:** React 18 + TypeScript, Vite 6, TailwindCSS 3, React Query 5, Zustand 5, React Router 6, `@telegram-apps/sdk` 3.3
+- **БД:** PostgreSQL 16, Redis 7
+- **Nginx (reverse proxy):** на хосте (Ubuntu 24.04), не в контейнере; плюс nginx 1.27-alpine внутри `habit-club-frontend` (multi-stage build)
 
 ### Архитектурные принципы
 1. **Layered Architecture:** api → services → repositories → models. Не перепрыгивать слои.
@@ -41,8 +42,11 @@ Habit Club — Telegram Mini App для дисциплины по привычк
 - `user_id` берётся ТОЛЬКО из `request.state.telegram_user` (после валидации initData).
 - Никогда не принимать `user_id` параметром запроса.
 - Для bot/worker используется JWT service-token с `aud`/`iss`/`exp`.
-- Секреты в `.env` с `chmod 600`, не в репозитории.
-- Хранение ПДн только в РФ (Selectel).
+- Секреты в `.env` с `chmod 600`, не в репозитории. SSH-пароль — в
+  `~/.config/kilo/privichki-bootstrap.md` (вне репо), ни в каких коммитах.
+- Сервер на 2026-07-22 — Contabo (Германия), не РФ. Миграция на Selectel / Yandex
+  Cloud — план; см. [07-security-and-ops.md](docs/07-security-and-ops.md) §1 и
+  [09-prod-readiness.md](docs/09-prod-readiness.md) §1.
 
 ### Антифрод (обязательно)
 - Один чек-ин в сутки (уникальный индекс).

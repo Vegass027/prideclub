@@ -1,5 +1,9 @@
 # 07 — Безопасность и операционные процессы
 
+> Snapshot от 2026-07-22. **Хостинг = Contabo VPS 4 (Германия), не Selectel (РФ)** —
+> см. §1. Бэкапы и Sentry/Grafana **не развёрнуты** на проде, см. §4 и §7.
+> Auth-контур в §2 актуален и работает.
+
 Хостинг, аутентификация, ФЗ-152, бэкапы, секреты, мониторинг. Все решения закрыты
 для соответствия требованиям production-системы с денежной механикой.
 
@@ -7,43 +11,69 @@
 
 ## 1. Хостинг
 
-### Решение: VPS в РФ (Selectel) на старте
+### Текущая конфигурация: Contabo Cloud VPS 4 (Германия, **не РФ**)
 
-| Критерий | VPS в РФ | Yandex Cloud | Зарубежный |
+> ⚠️ **Расхождение с конценцией.** Документ изначально описывал план хостинга
+> (Selectel VPS в РФ), но на 2026-07-22 фактический сервер — **Contabo Cloud VPS 4**
+> (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`, Ubuntu 24.04. Это **нарушает
+> предполагавшееся правило** "никакая часть проекта с ПДн российских пользователей
+> не размещается за пределами РФ". Миграция на Selectel managed / Yandex Cloud
+> — в плане, но не выполнена. На проде сейчас 10 users / 0 habits / 0 transactions
+> (только тест-регистрации), реальных ПДн клиентов нет.
+
+| Параметр | Значение |
+|---|---|
+| Провайдер | Contabo Cloud VPS 4 |
+| IP | `169.58.52.78` |
+| OS | Ubuntu 24.04 LTS |
+| CPU | 4 vCPU |
+| RAM | 8 GB |
+| Диск | 100 GB SSD |
+| Регион | Германия (ЕС) |
+
+### Целевая конфигурация (в плане, не выполнена): VPS в РФ (Selectel)
+
+| Критерий | VPS в РФ | Yandex Cloud | Зарубежный (текущее) |
 |---|---|---|---|
-| Соответствие ФЗ-152 | ✅ | ✅ | ❌ блокер |
-| Стоимость на MVP | Низкая | Средняя–высокая | Низкая (но нелегитимно) |
+| Соответствие ФЗ-152 | ✅ | ✅ | ❌ под риском |
+| Стоимость на MVP | Низкая | Средняя–высокая | Низкая |
 | Ops-нагрузка | Высокая | Низкая | Низкая |
-| Путь роста | Миграция на managed | Готов сразу | Недопустим |
+| Путь роста | Миграция на managed | Готов сразу | Недопустимо для прод-нагрузки |
 
-**Обоснование:** минимизирует расходы на старте без подтверждённой выручки, полностью
-закрывает 152-ФЗ. При росте — миграция на **Yandex Cloud managed PostgreSQL/Redis**
-без изменения кода приложения (тот же Docker-образ).
+**План:** при росте — миграция на **Yandex Cloud managed PostgreSQL/Redis** без
+изменения кода приложения (тот же Docker-образ).
 
 ### Правило
 **Никакая часть проекта, хранящая ПДн российских пользователей, не размещается за
 пределами РФ** — при масштабировании мигрирует инфраструктура, не география хранения.
 
-### Инфраструктура
+### Инфраструктура на текущем сервере
 
 ```
 infra/
-├── docker-compose.prod.yml
-├── nginx/nginx.conf             # HTTPS через Let's Encrypt
-├── backup/
+├── docker-compose.yml          # 7 сервисов (postgres, redis, backend, bot, worker, frontend, pgweb)
+├── nginx/                      # референсные конфиги (на проде nginx на хосте, не в контейнере)
+│   ├── frontend.nginx.conf
+│   └── nginx.conf, nginx.prideclub.conf, nginx.prod.conf, prideclub.tls.conf
+├── backup/                     # backup_cron.sh готов, НЕ развёрнут (см. §4)
 │   ├── backup_cron.sh
 │   ├── rotate_backups.py
 │   └── restore_test.sh
-└── docker/
-    ├── backend.Dockerfile
-    ├── bot.Dockerfile
-    ├── worker.Dockerfile
-    └── frontend.Dockerfile
+├── docker/
+│   ├── backend.Dockerfile      # python:3.12-slim
+│   ├── bot.Dockerfile          # python:3.12-slim
+│   ├── worker.Dockerfile       # python:3.12-slim
+│   └── frontend.Dockerfile     # multi-stage: node:20-alpine → nginx:1.27-alpine
+├── deploy.sh                   # rsync + build + up -d + register webhook
+└── setup_server.sh             # первоначальная настройка Ubuntu 24.04
 ```
 
-- PostgreSQL и Redis — контейнеры на том же VPS (для MVP до нескольких тысяч пользователей).
-- `ufw`/firewall: открыты только 443 (HTTPS) и SSH по ключу.
-- HTTPS через Let's Encrypt (Certbot) с автопродлением.
+- PostgreSQL 16 и Redis 7 — контейнеры на том же VPS.
+- `ufw`/firewall: открыты 80, 443 (Let's Encrypt) и 22 (SSH).
+- HTTPS через Let's Encrypt (Certbot) с автопродлением, по сертификату на домен.
+- На хосте **двухслойный nginx**: `/etc/nginx/sites-enabled/habit-club` проксирует
+  на `127.0.0.1:{5173,8000,8080,8081}`, а внутри `habit-frontend` крутится
+  собственный `nginx:1.27-alpine` для отдачи статики.
 
 ---
 
@@ -220,7 +250,7 @@ async def ready(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_r
 
 ## 4. Бэкапы
 
-### Стратегия
+### Стратегия (план)
 
 - Ежедневный `pg_dump` → шифрование (age/gpg) → загрузка в **Selectel Object Storage**
   (отдельный от VPS ресурс, тот же регион РФ — соответствие ФЗ-152 сохраняется).
@@ -230,6 +260,15 @@ async def ready(db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_r
 - Heartbeat-файл `heartbeat/last_success.txt` перезаписывается при каждом успешном
   бэкапе — внешний мониторинг проверяет свежесть раз в час, алертит если старше 26 часов.
 - Ротация: 7 ежедневных + 4 еженедельных + 12 месячных ≈ 23 архива.
+
+### Текущий статус (2026-07-22): **бэкапы НЕ развёрнуты**
+
+- `infra/backup/backup_cron.sh` готов (pg_dump | gzip | age | s3).
+- На сервере **нет** `aws` CLI (не установлен).
+- В `/app/.env` **нет** `S3_*` env-переменных (нет endpoint, bucket, ключей).
+- Cron-задача `/etc/cron.d/habit-backup` **не зарегистрирована**.
+- **Текущая защита данных:** только Docker volume `habit-club_pgdata` на хосте. При
+  потере VPS — потеря всех данных (БД + Redis + uploads).
 
 ### backup_cron.sh
 
@@ -311,7 +350,22 @@ rm -f "$DUMP_FILE" "${DUMP_FILE}.age"
 
 ## 7. Мониторинг и алерты
 
-### Метрики (Prometheus)
+### Текущий статус (2026-07-22)
+
+- **Sentry:** SDK подключён в backend (`sentry-sdk[fastapi]==2.19.2` в
+  `apps/backend/requirements.txt`). На проде `SENTRY_DSN` пуст → **no-op**.
+  Ошибки в Sentry **не отправляются**.
+- **Prometheus:** endpoint `/metrics` отдаёт дефолтные метрики Python +
+  процесса (`prometheus_client`). **Кастомные метрики** (`habit_*`) **не
+  заведены**.
+- **Grafana:** **не развёрнута** на сервере.
+- **Алерты в Telegram:** **не настроены**.
+- **Структурированные логи:** structlog + JSONRenderer в `apps/backend/app/core/logging.py`
+  и `apps/worker/worker/logging_setup.py` — backend и worker пишут JSON в stdout.
+  **Bot логирует plain text** (`bot/main.py:25` использует `logging.basicConfig` вместо
+  structlog-JSON) — не соответствует backend/worker.
+
+### Целевая схема (план)
 
 | Метрика | Тип | Назначение |
 |---|---|---|

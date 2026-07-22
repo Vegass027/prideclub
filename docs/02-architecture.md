@@ -1,150 +1,247 @@
 # 02 — Архитектура
 
+> Snapshot от 2026-07-22. Описывает **реально работающую** систему. Концептуальные
+> разделы (принципы, потоки) сохранены — они не изменились, только уточнены детали.
+
 ## 1. Принципы
 
-- **Разделение слоёв:** чат (события) ↔ бот (обработка событий) ↔ backend (бизнес-логика) ↔ Mini App (UI).
-- **Асинхронность через очереди** — приём события не блокирует ответ пользователю.
-- **Кэширование горячих данных** (лидерборды, статусы "сегодня") в Redis.
+- **Разделение слоёв:** чат (события) ↔ бот (валидация + приём) ↔ backend (бизнес-логика, в одну транзакцию) ↔ worker (фоновые операции через Celery) ↔ Mini App (UI).
+- **Асинхронность через очереди** — приём события не блокирует ответ пользователю. Backend кладёт задачи в Celery через `app.services.celery_producer.send_task(...)` (по имени, без импорта worker-модулей).
+- **Кэширование горячих данных** (лидерборды, статусы "сегодня", catch rate-limit) в Redis.
 - **Stateless-сервисы** для горизонтального масштабирования за балансировщиком.
-- **Наблюдаемость с первого дня** — мониторинг и логирование обязательны.
+- **Наблюдаемость** — структурированные JSON-логи (structlog) в backend и worker. Bot логирует plain text.
 
 ## 2. Тех-стек
 
-### Frontend (Mini App)
-- React + TypeScript
-- Telegram Web App SDK (tma.js)
-- TailwindCSS
-- Vite (сборщик)
-- React Query (TanStack Query) — кэширование запросов
-- Zustand — глобальный UI-стейт
+### Frontend — User Mini App
+- React 18 + TypeScript
+- `@telegram-apps/sdk` (через `window.Telegram.WebApp` в `shared/telegram/tma.ts`)
+- TailwindCSS 3
+- Vite 6 (сборщик, multi-stage build в Docker)
+- React Query 5 (TanStack) — кэширование запросов
+- Zustand 5 — глобальный UI-стейт
+- React Router v6
 
-### Backend
-- Python 3.11+ + FastAPI (async)
-- SQLAlchemy 2.0 (async) + asyncpg
-- Alembic — миграции
-- Pydantic — валидация + схемы
-- pytest — тесты
+### Frontend — Admin Mini App (`apps/frontend/src/admin/`)
+- Тот же стек, отдельная секция роутера, отдельный `admin.html` на nginx.
+- Хостится на `admin.prideclub.fun`, owner-gate в backend middleware через
+  `OWNER_TELEGRAM_ID` (`request.state.telegram_user.id`).
 
-### Bot Gateway
-- aiogram 3.13+
-- Webhook-режим (не long polling)
+### Backend (`apps/backend/`)
+- **Python 3.12** (`FROM python:3.12-slim` во всех Dockerfile'ах)
+- FastAPI 0.115 + Uvicorn (2 workers, `--proxy-headers`)
+- SQLAlchemy 2.0 (async) + asyncpg 0.30
+- Alembic 1.14 — миграции (текущая голова: `009_chat_id_partial_unique`)
+- Pydantic 2.10 + pydantic-settings
+- redis 5.2 (PyJWT для service-token, aiohttp для исходящих к Telegram API)
+- structlog 24 + prometheus-client + sentry-sdk[fastapi] (no-op без DSN)
+- pytest 8 / pytest-asyncio / fakeredis / aiosqlite — 161 тест
+
+### Bot Gateway (`apps/bot/`)
+- **aiogram 3.30** + aiohttp 3.13 (webhook, не long polling)
+- PyJWT 2.10 — генерация service-token для вызовов backend
+- structlog 24 (но в `main.py` пока обычный `logging.basicConfig`)
+- Один бот на проде, второй admin-бот (`BOT_TOKEN_ADMIN`) — отдельный контур
 
 ### Хранение данных
-- **PostgreSQL 14+** — основная БД (пользователи, клубы, подписки, депозиты, транзакции, чек-ины).
-- **Redis** — кэш + брокер очередей.
-- **Selectel Object Storage** (S3-совместимое) — резервные копии; медиа-кружки не хранятся
-  долгосрочно (живут в чате Telegram).
+- **PostgreSQL 16** (`postgres:16-alpine` в compose) — основная БД
+  (users, habits, memberships, checkins, penalties, transactions, seasons, season_stats,
+  suspicious_pairs, offer_versions, user_consents, pricing_rules, bonus_rules,
+  season_prize_rules, daily_streak_snapshots).
+- **Redis 7** (`redis:7-alpine`, AOF, `--maxmemory 256mb --maxmemory-policy allkeys-lru`)
+  — кэш + брокер очередей Celery + today cache + catch rate-limit (Lua).
+- **Медиа-кружки** не хранятся долгосрочно — живут в чате Telegram.
+- **Аплоады клубов** (фото для Admin Mini App) — Docker volume `club_uploads`,
+  расшарен между `habit-backend:/app/static` и `habit-frontend:/usr/share/nginx/html/static`
+  (статика отдаётся nginx'ом, без отдельного S3).
+- **Резервные копии** — `infra/backup/backup_cron.sh` готов, но **не развёрнут**:
+  `aws` CLI не установлен, `S3_*` env-переменных нет, cron-задача не зарегистрирована.
 
 ### Очереди и фоновые задачи
-- Redis + Celery — обработка длительных операций (проверка чек-ина, расчёт штрафов, уведомления).
-- Celery Beat — периодические задачи (закрытие окна чек-ина, пересчёт лидербордов, сезонные выплаты).
+- Redis (broker `redis://redis:6379/1`, result backend `redis://redis:6379/2`) + Celery 5.4
+- Celery Beat расписание (`apps/worker/worker/celery_app.py`):
+
+| Задача | Cron | Что делает |
+|---|---|---|
+| `close_catch_window` | `crontab(minute=5)` каждый час | Штрафы без улова (`INSERT ... ON CONFLICT DO NOTHING`) для клубов с закрывшимся окном |
+| `expire_bonus_points` | `crontab(hour=3, minute=0)` | Сгорание бонусов старше 90 дней |
+| `integrity_check_bonus_transactions` | `crontab(hour=4, minute=0)` | Аудит `bonus_applied=true` без связанной `transactions` |
+| `close_season` | `crontab(hour=5, minute=0)` | Распределение призов в конце сезона |
+
+- Воркеры также обрабатывают ad-hoc задачи, положенные backend'ом через
+  `app.services.celery_producer.send_task(...)`:
+
+| Task kind | Worker-таска | Откуда вызывается |
+|---|---|---|
+| `checkin` | `worker.tasks.process_checkin.run` | Backend `POST /internal/checkins/process` (от бота) |
+| `penalty` | `worker.tasks.process_penalty.run` | Backend `POST /internal/penalties/catch` (от бота) |
+| `payment` | `worker.tasks.process_payment.run` | Backend `POST /internal/payments/confirm` (от бота, **контракт сломан** — см. ниже) |
+
+- Worker запускается с `--pool=solo` (sync-pool, async внутри). На проде — 1 процесс.
 
 ### Платежи
-- Telegram Payments API / Telegram Stars — приём подписки и депозитов.
-- Резервный вариант — ЮKassa / CloudPayments (если нужна работа с фиатом вне Stars).
+- **В MVP — мок на фронте.** `PaymentModal`/`TopUpModal` показывают текст
+  "платёжный шлюз не подключён" и `setTimeout(1200)` имитируют оплату.
+- Backend и bot код для Telegram Payments **подготовлен** (есть `/internal/payments/confirm`,
+  `process_payment` worker-таска, `PaymentService` с `idempotency_key = charge_id`,
+  обработчик `successful_payment` в `bot/bot/handlers/payments.py`), но:
+  - Бот **не вызывает** `bot.send_invoice(...)` / `bot.create_invoice_link(...)` —
+    счёт не выставляется.
+  - В `/app/.env` нет `PROVIDER_TOKEN` / `PAYMENT_PROVIDER_TOKEN` /
+    `YOOKASSA_*` / `TELEGRAM_STARS_*`.
+  - В БД `transactions` — 0 строк (никто не платил).
+- **Известный баг:** `internal_payments.py` ожидает `chat_id: int` в payload, а бот
+  шлёт `habit_id: str`. Без `chat_id` эндпоинт вернёт `habit_not_found`.
 
 ### Инфраструктура
-- Docker-контейнеры для каждого сервиса.
-- Nginx как reverse proxy + Let's Encrypt для HTTPS.
-- **VPS в РФ (Selectel)** на старте → миграция на Yandex Cloud managed при росте.
-- Подробности в [07-security-and-ops.md](07-security-and-ops.md).
+- **Сервер:** Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`,
+  Ubuntu 24.04 LTS. **Не Selectel, не в РФ** — ФЗ-152 под риском для ПДн
+  российских пользователей. Миграция на Selectel managed / Yandex Cloud — в плане,
+  но не сделана.
+- **Docker Compose** (`infra/docker-compose.yml`): 7 сервисов
+  (`postgres, redis, backend, bot, worker, frontend, pgweb`).
+  Одна bridge-сеть `habit-club_default` (172.18.0.0/16), DNS по именам сервисов.
+- **Nginx** — на **хосте** (Ubuntu 24.04, `/etc/nginx/sites-enabled/habit-club`),
+  **не** в контейнере. Слушает 80/443, проксирует по доменам.
+  Внутри `habit-frontend` — **отдельный** `nginx:1.27-alpine` (multi-stage build),
+  отдаёт статику на 80.
+- **TLS:** Let's Encrypt, по сертификату на домен, автопродление через cron-certbot.
+- **Домены:** `prideclub.fun` (основной, www.), `app.prideclub.fun` (user Mini App),
+  `admin.prideclub.fun` (admin Mini App), `api.prideclub.fun` (backend API + bot webhook),
+  `db.prideclub.fun` (pgweb, basic auth).
+- Подробности по деплою — в [10-deploy.md](10-deploy.md).
 
 ### Мониторинг
-- Sentry — ошибки в реальном времени.
-- Prometheus + Grafana — метрики нагрузки, времени ответа, ошибок.
-- Структурированные логи с контекстом (user_id, request_id).
+- **Sentry:** SDK подключён (`sentry-sdk[fastapi]==2.19.2`), но `SENTRY_DSN` пуст
+  → no-op. **Sentry не отправляет ошибки.**
+- **Prometheus:** `/metrics` отдаёт дефолтные метрики Python + процесса.
+  **Кастомных метрик нет** (`habit_*` не заведены).
+- **Grafana:** не развёрнута.
+- **Алерты в Telegram:** не настроены.
+- **Структурированные логи:** structlog + JSONRenderer в backend и worker.
+  Bot логирует plain text (в `main.py` `logging.basicConfig`).
 
 ## 3. Схема компонентов
 
 ```
-                  ┌─────────────────────┐
-                  │   Telegram Servers   │
-                  └──────────┬──────────┘
-                             │ Webhook (HTTPS)
-                             ▼
-                  ┌─────────────────────┐
-                  │   Bot Gateway (aiogram)│ ← приём кружков, оплат, команд
-                  └──────────┬──────────┘
-                             │ ставит задачу в очередь
-                             ▼
-                  ┌─────────────────────┐
-                  │   Redis Queue        │
-                  └──────────┬──────────┘
-                             │ забирает задачу
-                             ▼
-                  ┌─────────────────────┐
-                  │   Worker (Celery)    │ ← проверка чек-ина, штрафы, начисления
-                  └──────────┬──────────┘
-                             │ читает/пишет
-                             ▼
-                  ┌─────────────────────┐
-                  │   PostgreSQL         │ ← users, habits, memberships,
-                  │                       │     checkins, penalties, transactions
-                  └──────────┬──────────┘
-                             │ кэш
-                             ▼
-                  ┌─────────────────────┐
-                  │   Redis Cache        │ ← статусы "сегодня", лидерборды
-                  └──────────┬──────────┘
-                             │ REST API
-                             ▼
-                  ┌─────────────────────┐
-                  │   Backend API (FastAPI)│
-                  └──────────┬──────────┘
-                             │ HTTPS
-                             ▼
-                  ┌─────────────────────┐
-                  │   Mini App (React)   │ ← экраны маркетплейса, "Сегодня",
-                  │                       │     участники, лидерборд, баланс
-                  └─────────────────────┘
+                ┌──────────────────────┐
+                │   Telegram servers    │
+                └────┬───────────┬─────┘
+                     │ webhook   │ webhook (admin bot)
+                     ▼           ▼
+              ┌────────────────────────┐
+              │   Bot Gateway (aiogram) │  ← приём кружков, команд, успешных оплат
+              │   :8080 aiohttp         │     (НЕ выставляет счета)
+              └────┬───────────────────┘
+                   │ POST /internal/*  (X-Service-Token JWT)
+                   ▼
+              ┌────────────────────────┐         ┌────────────────────────┐
+              │   Backend API (FastAPI) │ ◄────── │  Admin Mini App (React) │
+              │   :8000, 2 workers      │         │  admin.prideclub.fun    │
+              └──┬─────┬──────────┬────┘         │  owner-gate по           │
+                 │     │          │              │  OWNER_TELEGRAM_ID       │
+   user requests │     │          │ send_task   └────────────────────────┘
+    /api/v1/*    │     │          │ (Celery producer)
+                 │     │          ▼
+                 │     │     ┌────────────────────────┐
+                 │     │     │   Redis 7              │ ← broker + result backend
+                 │     │     │   :6379                │   + today cache + rate-limit
+                 │     │     └────┬───────────────────┘
+                 │     │          │ забирает задачу
+                 │     │          ▼
+                 │     │     ┌────────────────────────┐
+                 │     │     │   Worker (Celery)      │ ← process_checkin,
+                 │     │     │   --pool=solo          │   process_penalty,
+                 │     │     │   8 tasks + 4 cron     │   process_payment,
+                 │     │     └────┬───────────────────┘   apply_catch_bonus,
+                 │     │          │                       close_catch_window,
+                 │     │          │ asyncpg               close_season,
+                 │     │          │                       expire_bonus_points,
+                 │     │          │                       integrity_check_*_tx
+                 │     │          ▼
+                 │     │     ┌────────────────────────┐
+                 │     │     │   PostgreSQL 16        │ ← users, habits, memberships,
+                 │     │     │   :5432                │     checkins, penalties,
+                 │     │     │   volume: pgdata       │     transactions, seasons,
+                 │     │     └────────────────────────┘     season_stats, ...
+                 │     │
+                 │     └────► pgweb (:8081) ← db.prideclub.fun (basic auth)
+                 │
+                 └────► User Mini App (React)
+                       app.prideclub.fun
+                       X-Telegram-Init-Data в каждом запросе
 ```
+
+Все сервисы — в одной compose-сети `habit-club_default` (bridge, 172.18.0.0/16).
+Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8000 (backend),
+8080 (bot), 8081 (pgweb). Postgres (5432) и Redis (6379) наружу не отдаются.
 
 ## 4. Поток обработки чек-ина
 
 1. Пользователь отправляет кружок в чат клуба.
-2. Telegram отправляет webhook-событие на Bot Gateway.
-3. Bot Gateway валидирует базовые параметры (chat_id, тип сообщения) и кладёт задачу в Redis.
-4. Worker забирает задачу:
-   - проверяет membership пользователя (активен ли);
-   - проверяет попадание времени в `checkin_window` (TZ клуба);
-   - валидирует медиа (тип, длительность кружка, не forwarded);
-   - записывает строку в `checkins` со статусом `done`;
-   - обновляет кэш "статус сегодня" в Redis.
-5. Mini App при открытии экрана "Сегодня" читает статус из Redis (быстро).
+2. Telegram отправляет webhook-событие на Bot Gateway
+   (`https://api.prideclub.fun/bot/webhook`).
+3. Bot Gateway валидирует базовые параметры (chat_id, тип сообщения, membership
+   пользователя, попадание в `checkin_window`, медиа — `proof_validator.py`)
+   и **сам НЕ кладёт в Redis** — шлёт `POST /internal/checkins/process` на backend.
+4. Backend (handler `internal_checkins.py`) кладёт задачу в Celery через
+   `send_task("checkin", payload={...})` (`services/celery_producer.py`).
+5. Worker (`worker.tasks.process_checkin.run`) забирает задачу:
+   - берёт `membership` под `SELECT ... FOR UPDATE`;
+   - валидирует медиа (тип, длительность, **отклоняет forwarded**);
+   - пишет строку в `checkins` со статусом `done` (уникальный индекс
+     `(membership_id, date)` — один чек-ин в сутки);
+   - обновляет кэш "статус сегодня" в Redis (`services/today_cache.py`).
+6. Mini App при открытии экрана "Сегодня" читает статус из Redis (быстро),
+   при промахе — из БД.
 
 ## 5. Поток обработки штрафа
 
-1. **Cron-задача `close_catch_window`** в конце окна чек-ина + 1 час помечает всех, кто
-   не отправил доказательство, статусом `missed`.
-2. Участники клуба видят нарушителей в Mini App (экран "Участники") с кнопкой "Спалить".
-3. Другой участник нажимает "Спалить" → запрос на Backend API.
-4. Backend API кладёт задачу в очередь.
-5. **Worker в одной транзакции PostgreSQL** (`FOR UPDATE` на membership):
-   - списывает `amount` с `deposit_balance` нарушителя (или остаток, если депозит меньше);
-   - зачисляет сумму в `prize_pool` клуба;
-   - создаёт запись в `penalties`;
+1. **Cron `close_catch_window`** каждый час в `:05` помечает всех, кто не отправил
+   доказательство, статусом `missed` и **создаёт `penalties` с
+   `reason = 'window_closed_no_catch'`** через `INSERT ... ON CONFLICT (membership_id,
+   date, reason) DO NOTHING` (идемпотентно). Это происходит **внутри cron-таски**,
+   а не в отдельной `expire_penalties` (такого имени в коде нет — есть
+   `expire_bonus_points` для протухания бонусов).
+2. Участники клуба видят нарушителей в Mini App (экран "Участники") с кнопкой
+   "Спалить".
+3. Другой участник нажимает "Спалить" → `POST /internal/penalties/catch` на
+   backend. Rate-limit: 10/10s на пользователя (`catch_rate_limiter.py`).
+4. Backend кладёт задачу в Celery (`send_task("penalty", payload)`).
+5. **Worker `worker.tasks.process_penalty.run`** в **одной транзакции PostgreSQL**
+   (`SELECT ... FOR UPDATE` на membership нарушителя):
+   - списывает `amount` с `deposit_balance` (или остаток, если депозит меньше);
+   - зачисляет в `prize_pool` клуба;
+   - создаёт запись в `penalties` с `idempotency_key = penalty:{membership_id}:{date}`;
    - создаёт запись в `transactions` с `balance_after`;
    - если депозит опустился до 0 — `membership.status = paused`.
-6. **Cron-задача `expire_penalties`** для нарушителей, которых никто не спалил за окно:
-   - создаёт `penalties` с `reason = 'window_closed_no_catch'` через
-     `INSERT ... ON CONFLICT DO NOTHING` (идемпотентно).
+6. **Отдельная таска `apply_catch_bonus`** (вызывается после `process_penalty`)
+   начисляет бонусные поинты ловцу, проверяя `suspicious_pairs` — если пара
+   в списке, бонус не начисляется и в лидерборд улов не идёт.
 
-**Окно спаливания = окно чек-ина + 1 час после.** Все нарушители видны всем одновременно.
-Защита от сговора — через эвристику `suspicious_pairs` (см. [06-data-model.md](06-data-model.md)).
+**Окно спаливания = окно чек-ина клуба + 1 час после.** Все нарушители видны
+всем одновременно. Защита от сговора — `suspicious_pairs` (см.
+[06-data-model.md](06-data-model.md)).
 
 ## 6. Масштабируемость
 
 | Этап | Архитектура |
 |---|---|
-| **MVP (1 клуб, до ~500 пользователей)** | Один бот, монолит FastAPI, одна PostgreSQL, без отдельного Redis-кэша (можно обойтись прямыми запросами). |
-| **Рост (несколько клубов, тысячи пользователей)** | Добавляется Redis для кэша и очередей, выделяются worker-процессы, внедряется Sentry. |
-| **Масштаб (десятки тысяч)** | Backend разбивается на модули/сервисы (авторизация, платежи, чек-ины, лидерборды), горизонтальное масштабирование bot gateway и backend, партиционирование `checkins` по дате/клубу при необходимости. |
+| **MVP (текущее, до ~500 пользователей)** | 1 бот, монолитный FastAPI (2 workers), 1 PostgreSQL 16, 1 Redis 7, 1 worker-процесс (`--pool=solo`). Сервер Contabo 4 vCPU / 8 GB. |
+| **Рост (несколько клубов, тысячи пользователей)** | Worker на `prefork` пул, выделить второй worker-процесс для cron-задач, бэкапы на S3, подключить Sentry (DSN) и кастомные Prometheus-метрики. |
+| **Масштаб (десятки тысяч)** | Партиционирование `checkins` по дате, отдельный инстанс worker'а для тяжёлых тасок (`close_season`, `process_penalty`), managed PostgreSQL (Selectel), read-replica для лидербордов. |
 
-**Все состояния** (сессии, статусы) — в Redis/PostgreSQL, **не в памяти процесса**.
-Stateless-сервисы позволяют свободно добавлять инстансы без потери данных.
+**Состояния** — в Redis/PostgreSQL, **не в памяти процесса**. На проде worker
+использует `--pool=solo` (1 процесс), что формально не "stateless" в смысле
+горизонтального масштабирования — увеличение количества worker'ов потребует
+переключения на `prefork` или `gevent`. Celery-задачи идемпотентны через
+уникальные индексы (`checkins(membership_id, date)`,
+`penalties(membership_id, date, reason)`, `transactions.idempotency_key`),
+поэтому кратный запуск одной задачи безопасен.
 
-Индексы в PostgreSQL на `user_id`, `habit_id`, `date`, `(membership_id, date)` —
-критичны для производительности.
+Индексы в PostgreSQL: `users.id` (PK), `habits.id` (PK), `memberships(user_id, habit_id)`,
+`checkins(membership_id, date)` UNIQUE, `penalties(membership_id, date, reason)` UNIQUE,
+`transactions.idempotency_key` UNIQUE.
 
 ## 7. Ключевые решения
 
@@ -152,20 +249,47 @@ Stateless-сервисы позволяют свободно добавлять 
 |---|---|
 | Webhook вместо long polling | Ниже задержка, меньше нагрузка на пике (07:00 утра). |
 | Redis-очереди для всех "тяжёлых" операций | Защита от пиков (массовая отправка кружков в одно окно). |
-| Bot Gateway → Backend API, не к БД напрямую | Бизнес-логика в одном месте, упрощает тестирование. |
+| Bot → Backend API, не к БД напрямую | Бизнес-логика в одном месте, упрощает тестирование и повторное использование (тот же код работает из cron-задач). |
 | Кэш статусов "сегодня" в Redis | Снижает нагрузку на БД на 80–90% при правильной инвалидации. |
+| **Двухконтурная auth** | `/api/v1/*` — `X-Telegram-Init-Data` (HMAC-SHA256, `WebAppData`), `/internal/*` — `X-Service-Token` (JWT HS256, `aud=backend-api`, `iss=bot/worker`, TTL 60s, leeway 30s). |
+| **Owner-gate** для admin | Middleware проверяет `request.state.telegram_user.id == settings.OWNER_TELEGRAM_ID` для всех `/admin/v1/*` эндпоинтов. |
+| **Celery `send_task` по имени** | Backend НЕ импортирует worker-модули (`include=[]`), кладёт задачи по строковому имени. Worker их регистрирует через `include=[...]` в `celery_app.py`. Изоляция зависимостей. |
+| **Volume `club_uploads` расшарен между backend и frontend** | Фото клубов пишутся backend'ом, отдаются nginx'ом frontend'а. Без отдельного S3 на MVP. |
+| **Деньги — `int` копейки** | Никогда `float`/`Decimal` для monetary полей (`deposit_balance`, `penalty_amount`, `prize_pool`, `amount`). |
+| **Idempotency через `idempotency_key`** | `transactions.idempotency_key = charge_id` (UNIQUE), `penalties.idempotency_key = penalty:{membership_id}:{date}`. |
+| **Worker `--pool=solo`** | На MVP ок (async внутри), но блокирует горизонтальное масштабирование. Замена на `prefork` — при росте. |
 
-## 8. Итоговый стек (кратко)
+## 8. Итоговый стек (актуально на 2026-07-22)
 
-| Слой | Технология |
-|---|---|
-| Frontend (Mini App) | React + TypeScript + tma.js + TailwindCSS + Vite + React Query + Zustand |
-| Backend API | Python FastAPI + SQLAlchemy 2.0 + asyncpg + Alembic |
-| Bot Gateway | aiogram (webhook) |
-| Очереди/фон | Redis + Celery + Celery Beat |
-| БД | PostgreSQL 14+ |
-| Кэш | Redis |
-| Платежи | Telegram Payments / Telegram Stars |
-| Хостинг | VPS в РФ (Selectel) → миграция на Yandex Cloud |
-| Мониторинг | Sentry + Prometheus/Grafana + структурированные логи |
-| CI/CD | GitHub Actions + Dependabot |
+| Слой | Технология | Версия |
+|---|---|---|
+| Frontend (user Mini App) | React + TypeScript + @telegram-apps/sdk + TailwindCSS 3 + Vite 6 + React Query 5 + Zustand 5 + React Router 6 | — |
+| Frontend (admin Mini App) | Тот же стек, отдельный роутер, owner-gate | — |
+| Backend API | Python 3.12 + FastAPI 0.115 + SQLAlchemy 2.0 + asyncpg 0.30 + Alembic 1.14 + Pydantic 2.10 + structlog 24 + prometheus-client + sentry-sdk | 161 тест passed |
+| Bot Gateway | aiogram 3.30 + aiohttp 3.13 (webhook) + PyJWT 2.10 | — |
+| Worker | Celery 5.4 + asyncpg + structlog, `--pool=solo`, 8 tasks + 4 cron | 34 тест passed |
+| Очереди | Redis 7 (broker + result backend + cache + rate-limit) | — |
+| БД | PostgreSQL 16, 9 миграций (000 → 009) | 16 таблиц |
+| Админка БД | sosedoff/pgweb (basic auth, `db.prideclub.fun`) | — |
+| Reverse proxy | nginx на хосте (Ubuntu) + nginx 1.27 внутри frontend-контейнера | — |
+| TLS | Let's Encrypt, по сертификату на домен | 89 дней до продления |
+| Платежи | Мок на фронте; backend/bot код подготовлен, бот не выставляет счета | — |
+| Хостинг | Contabo VPS 4 (Германия, **НЕ РФ**) | — |
+| Мониторинг | Sentry SDK без DSN (no-op), Prometheus /metrics без кастомных метрик, Grafana отсутствует, structlog JSON в backend/worker | — |
+| CI/CD | GitHub Actions (lint + test) + Dependabot | — |
+| Резервные копии | `backup_cron.sh` готов, **не развёрнут** (нет aws CLI, нет S3 env) | — |
+
+## 9. Известные проблемы и долги (snapshot 2026-07-22)
+
+| Что | Где | Статус |
+|---|---|---|
+| Платежи мок | `PaymentModal.tsx`, `TopUpModal.tsx` | Мок, Telegram Payments не подключён |
+| Контракт `chat_id` vs `habit_id` | `internal_payments.py` ↔ `bot/handlers/payments.py` | Сломано, требует фикса перед включением платежей |
+| `SENTRY_DSN` пуст | `.env` | Sentry no-op |
+| Бэкапы не развёрнуты | `infra/backup/`, `.env` | Сценарий в плане, не выполнен |
+| Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker |
+| Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет |
+| Server в Германии | `169.58.52.78` (Contabo) | ФЗ-152 под риском; миграция в Selectel — план |
+| `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов, сегодня) vs `SELECT count(*) FROM habits` | Clubs не созданы, POST /admin/v1/habits не отрабатывал — расследовать |
+| `SERVICE_TOKEN_TTL_SECONDS=60`, `INIT_DATA_MAX_AGE_SECONDS=86400` | `.env` | Стандартно, см. `core/constants.py` |
+| Admin Mini App `OWNER_TELEGRAM_ID=0` по умолчанию | `docker-compose.yml` | Без явного ID в env owner-gate пускает никого — правильно. |
