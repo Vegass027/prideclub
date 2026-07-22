@@ -23,6 +23,10 @@ export interface AdminHabit {
   stat_loss_per_miss: number;
   member_limit: number | null;
   curator_id: number | null;
+  checkin_topic_thread_id: number | null;
+  notifications_topic_thread_id: number | null;
+  checkin_topic_link: string | null;
+  notifications_topic_link: string | null;
   archived_at: string | null;
   created_at: string;
   active_members_count: number;
@@ -100,6 +104,8 @@ export interface AdminHabitCreatePayload {
   stat_loss_per_miss: number;
   member_limit: number | null;
   curator_id: number | null;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
 }
 
 export interface AdminHabitUpdatePayload {
@@ -117,6 +123,8 @@ export interface AdminHabitUpdatePayload {
   stat_loss_per_miss?: number;
   member_limit?: number | null;
   chat_id?: number | null;
+  checkin_topic_link?: string;
+  notifications_topic_link?: string;
 }
 
 export const adminHabitsApi = {

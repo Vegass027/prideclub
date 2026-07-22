@@ -23,6 +23,10 @@ class HabitOut(BaseModel):
     is_active: bool
     photo_url: str | None = None
     telegram_invite_link: str | None = None
+    checkin_topic_thread_id: int | None = None
+    notifications_topic_thread_id: int | None = None
+    checkin_topic_link: str | None = None
+    notifications_topic_link: str | None = None
 
 
 class MarketplaceResponse(BaseModel):
@@ -59,6 +63,7 @@ class CheckinIngestPayload(BaseModel):
 
     user_id: int
     chat_id: int
+    message_thread_id: int | None = None
     message_id: int
     proof_type: str  # video_note | photo | text
     message_sent_at: datetime
@@ -76,6 +81,11 @@ class AdminHabitCreateRequest(BaseModel):
     """POST /admin/v1/habits — создание клуба (TZ §3.6.4).
 
     `is_active` намеренно отсутствует: при создании всегда False.
+
+    Topic-scoped (migration 010):
+    - `checkin_topic_link` и `notifications_topic_link` обязательны — клуб
+      нельзя создать без привязки к топикам форума. Формат
+      `https://t.me/c/<chat_id>/<thread_id>`.
     """
 
     title: str = Field(min_length=3, max_length=128)
@@ -95,6 +105,8 @@ class AdminHabitCreateRequest(BaseModel):
     stat_loss_per_miss: int = Field(default=1, gt=0)
     member_limit: int | None = Field(default=None, gt=0)
     curator_id: int | None = None
+    checkin_topic_link: str = Field(min_length=1, max_length=512)
+    notifications_topic_link: str = Field(min_length=1, max_length=512)
 
 
 class AdminHabitUpdateRequest(BaseModel):
@@ -121,6 +133,8 @@ class AdminHabitUpdateRequest(BaseModel):
     stat_loss_per_miss: int | None = Field(default=None, gt=0)
     member_limit: int | None = Field(default=None, gt=0)
     curator_id: int | None = None
+    checkin_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
+    notifications_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class AdminHabitToggleRequest(BaseModel):
@@ -150,6 +164,10 @@ class AdminHabitOut(BaseModel):
     stat_loss_per_miss: int
     member_limit: int | None
     curator_id: int | None
+    checkin_topic_thread_id: int | None
+    notifications_topic_thread_id: int | None
+    checkin_topic_link: str | None
+    notifications_topic_link: str | None
     archived_at: datetime | None
     created_at: datetime
     active_members_count: int = 0

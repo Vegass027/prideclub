@@ -6,6 +6,7 @@ from typing import Protocol
 from app.core.exceptions import (
     CheckinAlreadyExistsError,
     CheckinWindowClosedError,
+    CheckinWrongTopicError,
     HabitArchivedError,
     HabitNotFoundError,
     MembershipNotActiveError,
@@ -56,6 +57,7 @@ class CheckinService:
         proof: ProofMessage,
         proof_message_id: int,
         now_utc: datetime,
+        message_thread_id: int | None = None,
     ) -> tuple[Checkin, bool]:
         habit = await self._habit_repo.get(habit_id)
         if habit is None:
@@ -66,6 +68,24 @@ class CheckinService:
             raise MembershipNotFoundError()
         if membership.status.value != "active":
             raise MembershipNotActiveError()
+
+        # Topic-scoped (migration 010): если у клуба задан
+        # checkin_topic_thread_id — принимаем только сообщения из этого
+        # топика. Иначе (старый режим) — принимаем всё в чате клуба.
+        if (
+            habit.checkin_topic_thread_id is not None
+            and message_thread_id != habit.checkin_topic_thread_id
+        ):
+            self._logger.info(
+                "checkin_wrong_topic",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "expected_thread_id": habit.checkin_topic_thread_id,
+                    "got_thread_id": message_thread_id,
+                },
+            )
+            raise CheckinWrongTopicError()
 
         # Антифрод — медиа должно соответствовать типу привычки.
         # proof.proof_type приходит из бота и проверяется здесь как

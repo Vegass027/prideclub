@@ -59,6 +59,13 @@ class Habit(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    checkin_topic_thread_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+    notifications_topic_thread_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

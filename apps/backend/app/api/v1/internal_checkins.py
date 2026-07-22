@@ -19,6 +19,7 @@ router = APIRouter()
 class CheckinEnqueueRequest(BaseModel):
     user_id: int
     chat_id: int
+    message_thread_id: int | None = None
     proof_type: str
     message_id: int
     message_sent_at: datetime
@@ -60,6 +61,7 @@ async def enqueue_checkin(
             "user_id": payload.user_id,
             "habit_id": str(habit.id),
             "chat_id": payload.chat_id,
+            "message_thread_id": payload.message_thread_id,
             "proof_type": payload.proof_type,
             "message_id": payload.message_id,
             "message_sent_at": payload.message_sent_at.isoformat(),

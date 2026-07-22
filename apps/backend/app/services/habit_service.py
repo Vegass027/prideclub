@@ -17,19 +17,21 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.exceptions import (
     HabitArchivedError,
     HabitNotFoundError,
+    HabitTopicDuplicateError,
+    HabitTopicMismatchError,
     HabitValidationError,
 )
 from app.core.logging import get_logger
+from app.core.telegram_links import parse_telegram_topic_link
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
-
 
 _TELEGRAM_INVITE_RE = re.compile(r"^https://(t\.me|telegram\.me)/[A-Za-z0-9_+\-/]+$")
 
@@ -70,8 +72,15 @@ class HabitService:
         stat_loss_per_miss: int,
         member_limit: int | None,
         curator_id: int | None,
+        checkin_topic_link: str,
+        notifications_topic_link: str,
     ) -> Any:
-        """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4)."""
+        """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4).
+
+        Topic-scoped: обязательны ссылки на топики чек-инов и
+        уведомлений (https://t.me/c/<chat_id>/<thread_id>).
+        Бот ничего не создаёт — топики делает владелец в Telegram.
+        """
         _validate_title(title)
         _validate_stat_name(stat_name)
         if stat_icon is not None:
@@ -86,17 +95,55 @@ class HabitService:
         )
         _validate_member_limit(member_limit)
 
-        existing = await self._habit_repo.get_by_chat_id(chat_id)
+        checkin_topic = parse_telegram_topic_link(checkin_topic_link)
+        notifications_topic = parse_telegram_topic_link(notifications_topic_link)
+
+        if chat_id != 0 and chat_id != checkin_topic.chat_id:
+            raise HabitTopicMismatchError(
+                "chat_id в ссылке на топик чек-инов не совпадает с chat_id клуба"
+            )
+        if chat_id != 0 and chat_id != notifications_topic.chat_id:
+            raise HabitTopicMismatchError(
+                "chat_id в ссылке на топик уведомлений не совпадает с chat_id клуба"
+            )
+        if checkin_topic.thread_id == notifications_topic.thread_id:
+            raise HabitValidationError(
+                "Топик чек-инов и топик уведомлений должны различаться",
+                code="habit_topics_must_differ",
+            )
+
+        resolved_chat_id = (
+            chat_id if chat_id != 0 else checkin_topic.chat_id
+        )
+
+        existing = await self._habit_repo.get_by_chat_id(resolved_chat_id)
         if existing is not None:
             raise HabitValidationError(
-                f"Клуб с chat_id={chat_id} уже существует",
+                f"Клуб с chat_id={resolved_chat_id} уже существует",
                 code="habit_chat_id_duplicate",
+            )
+
+        duplicate = await self._habit_repo.get_by_chat_and_thread(
+            checkin_topic.chat_id, checkin_topic.thread_id
+        )
+        if duplicate is not None:
+            raise HabitTopicDuplicateError(
+                f"Топик {checkin_topic.thread_id} уже привязан к клубу "
+                f"«{duplicate.title}»"
+            )
+        duplicate_notif = await self._habit_repo.get_by_chat_and_thread(
+            notifications_topic.chat_id, notifications_topic.thread_id
+        )
+        if duplicate_notif is not None:
+            raise HabitTopicDuplicateError(
+                f"Топик уведомлений {notifications_topic.thread_id} "
+                f"уже привязан к клубу «{duplicate_notif.title}»"
             )
 
         fields: dict[str, Any] = {
             "title": title.strip(),
             "description": description,
-            "chat_id": chat_id,
+            "chat_id": resolved_chat_id,
             "checkin_window_start": checkin_window_start,
             "checkin_window_end": checkin_window_end,
             "timezone": timezone_str,
@@ -114,6 +161,8 @@ class HabitService:
             "member_limit": member_limit,
             "curator_id": curator_id,
             "archived_at": None,
+            "checkin_topic_thread_id": checkin_topic.thread_id,
+            "notifications_topic_thread_id": notifications_topic.thread_id,
         }
         habit = await self._habit_repo.create(fields=fields)
 
@@ -124,6 +173,8 @@ class HabitService:
                 "habit_id": habit.id,
                 "title": habit.title,
                 "chat_id": habit.chat_id,
+                "checkin_topic_thread_id": checkin_topic.thread_id,
+                "notifications_topic_thread_id": notifications_topic.thread_id,
             },
         )
         return habit
@@ -179,6 +230,67 @@ class HabitService:
         if "member_limit" in fields:
             _validate_member_limit(fields["member_limit"])
 
+        topic_link_changed = (
+            "checkin_topic_link" in fields
+            or "notifications_topic_link" in fields
+        )
+        if topic_link_changed:
+            new_checkin_link = fields.pop("checkin_topic_link", None)
+            new_notifications_link = fields.pop(
+                "notifications_topic_link", None
+            )
+
+            resolved_chat_id = habit.chat_id
+
+            if new_checkin_link is not None:
+                topic = parse_telegram_topic_link(new_checkin_link)
+                if topic.chat_id != resolved_chat_id:
+                    raise HabitTopicMismatchError(
+                        "chat_id в ссылке на топик чек-инов не совпадает "
+                        "с chat_id клуба"
+                    )
+                fields["checkin_topic_thread_id"] = topic.thread_id
+            else:
+                fields["checkin_topic_thread_id"] = (
+                    habit.checkin_topic_thread_id
+                )
+
+            if new_notifications_link is not None:
+                topic = parse_telegram_topic_link(new_notifications_link)
+                if topic.chat_id != resolved_chat_id:
+                    raise HabitTopicMismatchError(
+                        "chat_id в ссылке на топик уведомлений не совпадает "
+                        "с chat_id клуба"
+                    )
+                fields["notifications_topic_thread_id"] = topic.thread_id
+            else:
+                fields["notifications_topic_thread_id"] = (
+                    habit.notifications_topic_thread_id
+                )
+
+            if (
+                fields["checkin_topic_thread_id"]
+                == fields["notifications_topic_thread_id"]
+            ):
+                raise HabitValidationError(
+                    "Топик чек-инов и топик уведомлений должны различаться",
+                    code="habit_topics_must_differ",
+                )
+
+            for thread_id in (
+                fields["checkin_topic_thread_id"],
+                fields["notifications_topic_thread_id"],
+            ):
+                if thread_id is None:
+                    continue
+                dup = await self._habit_repo.get_by_chat_and_thread(
+                    resolved_chat_id, thread_id
+                )
+                if dup is not None and str(dup.id) != habit_id:
+                    raise HabitTopicDuplicateError(
+                        f"Топик {thread_id} уже привязан к клубу «{dup.title}»"
+                    )
+
         protected_fields = _FROZEN_AFTER_FIRST_MEMBER_FIELDS & set(fields.keys())
         if protected_fields:
             active_members = await self._habit_repo.count_active_members(habit_id)
@@ -212,7 +324,7 @@ class HabitService:
             raise HabitNotFoundError()
         if habit.archived_at is not None:
             return habit
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await self._habit_repo.archive(habit, archived_at=now)
         self._logger.info(
             "habit_archived",

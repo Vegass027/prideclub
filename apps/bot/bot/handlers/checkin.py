@@ -18,6 +18,7 @@ def _parse_proof(message: Message) -> dict[str, Any] | None:
     sent_at = (message.date or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
     base = {
         "chat_id": message.chat.id,
+        "message_thread_id": getattr(message, "message_thread_id", None),
         "message_id": message.message_id,
         "message_sent_at": sent_at.isoformat(),
     }

@@ -120,3 +120,25 @@ class HabitArchivedError(DomainError):
 class HabitMemberLimitReachedError(DomainError):
     status_code = 409
     code = "habit_member_limit_reached"
+
+
+class InvalidTopicLinkError(DomainError):
+    status_code = 422
+    code = "invalid_topic_link"
+
+
+class HabitTopicDuplicateError(DomainError):
+    status_code = 409
+    code = "habit_topic_duplicate"
+
+
+class HabitTopicMismatchError(DomainError):
+    status_code = 400
+    code = "habit_topic_chat_mismatch"
+
+
+class CheckinWrongTopicError(DomainError):
+    """Сообщение пришло не из того топика, что привязан к клубу."""
+
+    status_code = 422
+    code = "not_checkin_topic"

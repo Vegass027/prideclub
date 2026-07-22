@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 
 import aiohttp
 from fastapi import APIRouter, Depends, status
@@ -49,7 +48,6 @@ from app.schemas import (
 )
 from app.services.habit_service import HabitService
 
-
 logger = get_logger("admin.preview_chat")
 
 
@@ -70,6 +68,20 @@ def _get_habit_service(
 
 
 def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
+    from app.core.telegram_links import make_topic_link
+
+    checkin_topic_link = (
+        make_topic_link(habit.chat_id, habit.checkin_topic_thread_id)
+        if habit.checkin_topic_thread_id is not None
+        and habit.chat_id != 0
+        else None
+    )
+    notifications_topic_link = (
+        make_topic_link(habit.chat_id, habit.notifications_topic_thread_id)
+        if habit.notifications_topic_thread_id is not None
+        and habit.chat_id != 0
+        else None
+    )
     return AdminHabitOut(
         id=str(habit.id),
         title=habit.title,
@@ -91,6 +103,10 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         stat_loss_per_miss=habit.stat_loss_per_miss,
         member_limit=habit.member_limit,
         curator_id=habit.curator_id,
+        checkin_topic_thread_id=habit.checkin_topic_thread_id,
+        notifications_topic_thread_id=habit.notifications_topic_thread_id,
+        checkin_topic_link=checkin_topic_link,
+        notifications_topic_link=notifications_topic_link,
         archived_at=habit.archived_at,
         created_at=habit.created_at,
         active_members_count=active_members_count,
@@ -127,6 +143,8 @@ async def create_habit(
         stat_loss_per_miss=payload.stat_loss_per_miss,
         member_limit=payload.member_limit,
         curator_id=payload.curator_id,
+        checkin_topic_link=payload.checkin_topic_link,
+        notifications_topic_link=payload.notifications_topic_link,
     )
     await service._session.commit()  # noqa: SLF001 — admin endpoint, commit разрешён
     return _habit_to_out(habit)
@@ -174,7 +192,7 @@ async def _get_bot_id(bot_token: str) -> int | None:
             bot_id = int(data["result"]["id"])
             await redis.set(_BOT_ID_CACHE_KEY, str(bot_id), ex=86400)
             return bot_id
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         pass
     return None
 
@@ -205,7 +223,7 @@ async def _verify_chats_via_telegram(
                     params={"chat_id": chat_id, "user_id": bot_user_id},
                 ) as resp:
                     payload = await resp.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             return chat_id, {"_error": str(exc)}
 
         if not payload.get("ok"):
@@ -267,8 +285,8 @@ async def list_available_chats(
     ОБЪЯВЛЕН ДО /habits/{habit_id} — иначе FastAPI ловит
     'available_chats' как habit_id и пытается загрузить из БД.
     """
-    from app.core.config import get_settings
     from app.api.v1.internal_bot import _record_available_chat
+    from app.core.config import get_settings
 
     settings = get_settings()
     bot_token = settings.bot_token
@@ -463,7 +481,7 @@ async def refresh_chat(
         ) as session:
             async with session.get(api_url, params={"chat_id": chat_id}) as resp:
                 data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, aiohttp.ClientError) as exc:
         logger.warning("refresh_chat.http_failed", extra={"err": str(exc)})
         return AdminHabitRefreshChatResponse(
             ok=False,
@@ -792,7 +810,7 @@ async def preview_chat_by_invite(
         ) as session:
             async with session.get(api_url, params={"chat_id": target}) as resp:
                 data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, aiohttp.ClientError) as exc:
         logger.warning("preview_chat.http_failed", extra={"error": str(exc)})
         return AdminHabitPreviewChatResponse(
             ok=False,

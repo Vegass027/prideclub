@@ -50,6 +50,14 @@ class FakeHabitRepo:
                 return h
         return None
 
+    async def get_by_chat_and_thread(
+        self, chat_id: int, message_thread_id: int
+    ) -> Habit | None:
+        for h in self._store.values():
+            if h.chat_id == chat_id and h.checkin_topic_thread_id == message_thread_id:
+                return h
+        return None
+
     async def list_active(self) -> list[Habit]:
         return [
             h for h in self._store.values()

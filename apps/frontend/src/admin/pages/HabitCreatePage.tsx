@@ -62,6 +62,8 @@ interface FormState {
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
 }
 
 const INITIAL_STATE: FormState = {
@@ -82,6 +84,8 @@ const INITIAL_STATE: FormState = {
   stat_gain_per_checkin: "2",
   stat_loss_per_miss: "1",
   member_limit: "",
+  checkin_topic_link: "",
+  notifications_topic_link: "",
 };
 
 const rubToKopecks = (rub: string): number => {
@@ -116,6 +120,8 @@ interface RawForm {
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
 }
 
 const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
@@ -132,6 +138,23 @@ const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
   }
   if (!state.stat_name.trim()) {
     errors.stat_name = "Обязательно";
+  }
+  const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+  if (!topicLinkRe.test(state.checkin_topic_link.trim())) {
+    errors.checkin_topic_link =
+      "Формат https://t.me/c/<chat_id>/<thread_id>";
+  }
+  if (!topicLinkRe.test(state.notifications_topic_link.trim())) {
+    errors.notifications_topic_link =
+      "Формат https://t.me/c/<chat_id>/<thread_id>";
+  }
+  if (
+    state.checkin_topic_link.trim() &&
+    state.notifications_topic_link.trim() &&
+    state.checkin_topic_link.trim() === state.notifications_topic_link.trim()
+  ) {
+    errors.notifications_topic_link =
+      "Топик уведомлений должен отличаться от топика чек-инов";
   }
 
   if (!/^\d{2}:\d{2}$/.test(state.checkin_window_start)) {
@@ -240,6 +263,8 @@ export function HabitCreatePage() {
         stat_loss_per_miss: toIntOrNull(state.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(state.member_limit),
         curator_id: null,
+        checkin_topic_link: state.checkin_topic_link.trim(),
+        notifications_topic_link: state.notifications_topic_link.trim(),
       },
       {
         onSuccess: () => navigate("/habits"),
@@ -443,6 +468,53 @@ export function HabitCreatePage() {
               })}
             </ul>
           )}
+        </FieldRow>
+
+        <FieldRow
+          label="Ссылка на топик чек-инов"
+          error={
+            touched.checkin_topic_link ? errors.checkin_topic_link : undefined
+          }
+        >
+          <TextInput
+            value={state.checkin_topic_link}
+            onChange={(e) => set("checkin_topic_link", e.target.value)}
+            onBlur={() => markTouched("checkin_topic_link")}
+            placeholder="https://t.me/c/<chat_id>/<thread_id>"
+            inputMode="url"
+            aria-invalid={Boolean(
+              touched.checkin_topic_link && errors.checkin_topic_link,
+            )}
+          />
+          <p className="mt-1 text-xs text-muted">
+            Открой Telegram-группу как супергруппу с топиками, создай топик
+            «Чек-ины», скопируй ссылку на сообщение в этом топике и вставь сюда.
+          </p>
+        </FieldRow>
+
+        <FieldRow
+          label="Ссылка на топик уведомлений"
+          error={
+            touched.notifications_topic_link
+              ? errors.notifications_topic_link
+              : undefined
+          }
+        >
+          <TextInput
+            value={state.notifications_topic_link}
+            onChange={(e) => set("notifications_topic_link", e.target.value)}
+            onBlur={() => markTouched("notifications_topic_link")}
+            placeholder="https://t.me/c/<chat_id>/<thread_id>"
+            inputMode="url"
+            aria-invalid={Boolean(
+              touched.notifications_topic_link &&
+                errors.notifications_topic_link,
+            )}
+          />
+          <p className="mt-1 text-xs text-muted">
+            Сюда бот будет писать «{`👨🏽‍🦰 X словил(а) 👨🏽‍🦰 Y`}» и сообщения о
+            штрафах за пропуск.
+          </p>
         </FieldRow>
 
         <FieldRow label="Характеристика">

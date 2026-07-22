@@ -55,6 +55,8 @@ def _base_kwargs(**overrides) -> dict:
         stat_loss_per_miss=1,
         member_limit=None,
         curator_id=None,
+        checkin_topic_link="https://t.me/c/-1001234567890/1",
+        notifications_topic_link="https://t.me/c/-1001234567890/2",
     )
     base.update(overrides)
     return base

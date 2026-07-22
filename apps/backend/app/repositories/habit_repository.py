@@ -22,6 +22,26 @@ class HabitRepository:
         result = await self._session.execute(select(Habit).where(Habit.chat_id == chat_id))
         return result.scalar_one_or_none()
 
+    async def get_by_chat_and_thread(
+        self, chat_id: int, message_thread_id: int
+    ) -> Habit | None:
+        """Ищет клуб по (chat_id, message_thread_id).
+
+        Используется:
+        - в HabitService для проверки дубля пары (chat_id, thread_id)
+          между клубами (TopicDuplicateError);
+        - в CheckinService.process_checkin для маппинга
+          входящего сообщения → habit (после того, как message_thread_id
+          прошёл антифрод-фильтр).
+        """
+        result = await self._session.execute(
+            select(Habit).where(
+                Habit.chat_id == chat_id,
+                Habit.checkin_topic_thread_id == message_thread_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_invite_link(self, invite_link: str) -> Habit | None:
         result = await self._session.execute(
             select(Habit).where(Habit.telegram_invite_link == invite_link)

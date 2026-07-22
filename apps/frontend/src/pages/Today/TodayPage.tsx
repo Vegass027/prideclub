@@ -10,6 +10,7 @@ import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
+import { openCheckinTopic } from "@/shared/telegram/topicLink";
 
 const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
   video_note: {
@@ -148,9 +149,21 @@ export function TodayPage() {
           <h3 className="text-base font-semibold text-text">{proofCfg.title}</h3>
         </div>
         <p className="mb-3 text-sm text-muted">{proofCfg.hint}</p>
-        <Button onClick={handleOpenChat} className="w-full">
-          Открыть чат клуба
-        </Button>
+        {habit.checkin_topic_thread_id !== null ? (
+          <Button
+            onClick={() => {
+              hapticImpact("medium");
+              openCheckinTopic(habit.chat_id, habit.checkin_topic_thread_id);
+            }}
+            className="w-full"
+          >
+            🎬 Сделать чек-ин
+          </Button>
+        ) : (
+          <Button onClick={handleOpenChat} className="w-full">
+            Открыть чат клуба
+          </Button>
+        )}
       </section>
 
       <section className="mt-4 rounded-card border border-white/5 bg-surface p-4 text-sm text-muted">

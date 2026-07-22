@@ -71,6 +71,7 @@ async def _process(
                 proof=proof,
                 proof_message_id=payload["message_id"],
                 now_utc=datetime.now(tz=timezone.utc),
+                message_thread_id=payload.get("message_thread_id"),
             )
             await session.commit()
             log.info(
@@ -95,6 +96,7 @@ async def _process(
         except (
             ProofValidationError,
             CheckinWindowClosedError,
+            CheckinWrongTopicError,
             MembershipNotActiveError,
             MembershipNotFoundError,
         ) as exc:

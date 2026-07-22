@@ -58,6 +58,8 @@ interface FormState {
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
 }
 
 const EMPTY: FormState = {
@@ -76,6 +78,8 @@ const EMPTY: FormState = {
   stat_gain_per_checkin: "2",
   stat_loss_per_miss: "1",
   member_limit: "",
+  checkin_topic_link: "",
+  notifications_topic_link: "",
 };
 
 const toIntOrNull = (raw: string): number | null => {
@@ -105,6 +109,8 @@ function habitToForm(h: AdminHabit): FormState {
     stat_gain_per_checkin: String(h.stat_gain_per_checkin),
     stat_loss_per_miss: String(h.stat_loss_per_miss),
     member_limit: h.member_limit === null ? "" : String(h.member_limit),
+    checkin_topic_link: h.checkin_topic_link ?? "",
+    notifications_topic_link: h.notifications_topic_link ?? "",
   };
 }
 
@@ -203,6 +209,29 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         errors.member_limit = "Целое > 0";
       }
     }
+    const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+    if (
+      state.checkin_topic_link.trim() &&
+      !topicLinkRe.test(state.checkin_topic_link.trim())
+    ) {
+      errors.checkin_topic_link = "Формат https://t.me/c/<chat_id>/<thread_id>";
+    }
+    if (
+      state.notifications_topic_link.trim() &&
+      !topicLinkRe.test(state.notifications_topic_link.trim())
+    ) {
+      errors.notifications_topic_link =
+        "Формат https://t.me/c/<chat_id>/<thread_id>";
+    }
+    if (
+      state.checkin_topic_link.trim() &&
+      state.notifications_topic_link.trim() &&
+      state.checkin_topic_link.trim() ===
+        state.notifications_topic_link.trim()
+    ) {
+      errors.notifications_topic_link =
+        "Топик уведомлений должен отличаться от топика чек-инов";
+    }
     return errors;
   };
 
@@ -238,6 +267,9 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
         chat_id: currentChatId,
+        checkin_topic_link: form.checkin_topic_link.trim() || undefined,
+        notifications_topic_link:
+          form.notifications_topic_link.trim() || undefined,
       });
       navigate("/habits");
     } catch (err) {
@@ -439,6 +471,36 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
             })}
           </ul>
         )}
+      </FieldRow>
+
+      <FieldRow
+        label="Ссылка на топик чек-инов"
+        error={touched.checkin_topic_link ? errors.checkin_topic_link : undefined}
+      >
+        <TextInput
+          value={form.checkin_topic_link}
+          onChange={(e) => set("checkin_topic_link", e.target.value)}
+          onBlur={() => touchedFields("checkin_topic_link")}
+          placeholder="https://t.me/c/<chat_id>/<thread_id>"
+          inputMode="url"
+        />
+      </FieldRow>
+
+      <FieldRow
+        label="Ссылка на топик уведомлений"
+        error={
+          touched.notifications_topic_link
+            ? errors.notifications_topic_link
+            : undefined
+        }
+      >
+        <TextInput
+          value={form.notifications_topic_link}
+          onChange={(e) => set("notifications_topic_link", e.target.value)}
+          onBlur={() => touchedFields("notifications_topic_link")}
+          placeholder="https://t.me/c/<chat_id>/<thread_id>"
+          inputMode="url"
+        />
       </FieldRow>
 
       <FieldRow label="Характеристика">
