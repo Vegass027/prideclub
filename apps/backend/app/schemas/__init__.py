@@ -25,8 +25,10 @@ class HabitOut(BaseModel):
     telegram_invite_link: str | None = None
     checkin_topic_thread_id: int | None = None
     notifications_topic_thread_id: int | None = None
+    chat_topic_thread_id: int | None = None
     checkin_topic_link: str | None = None
     notifications_topic_link: str | None = None
+    chat_topic_link: str | None = None
     chat_link: str | None = None
 
 
@@ -108,7 +110,7 @@ class AdminHabitCreateRequest(BaseModel):
     curator_id: int | None = None
     checkin_topic_link: str = Field(min_length=1, max_length=512)
     notifications_topic_link: str = Field(min_length=1, max_length=512)
-    chat_link: str | None = Field(default=None, min_length=1, max_length=512)
+    chat_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class AdminHabitUpdateRequest(BaseModel):
@@ -137,7 +139,7 @@ class AdminHabitUpdateRequest(BaseModel):
     curator_id: int | None = None
     checkin_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
     notifications_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
-    chat_link: str | None = Field(default=None, min_length=1, max_length=512)
+    chat_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class AdminHabitToggleRequest(BaseModel):
@@ -171,7 +173,8 @@ class AdminHabitOut(BaseModel):
     notifications_topic_thread_id: int | None
     checkin_topic_link: str | None
     notifications_topic_link: str | None
-    chat_link: str | None
+    chat_topic_thread_id: int | None
+    chat_topic_link: str | None
     archived_at: datetime | None
     created_at: datetime
     active_members_count: int = 0

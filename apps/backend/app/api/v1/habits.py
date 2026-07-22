@@ -86,6 +86,7 @@ async def marketplace(
             photo_url=h.photo_url,
             telegram_invite_link=h.telegram_invite_link,
             checkin_topic_thread_id=h.checkin_topic_thread_id,
+            chat_topic_thread_id=h.chat_topic_thread_id,
         )
         for h, c in rows
     ]
@@ -119,6 +120,7 @@ async def today(
             photo_url=habit.photo_url,
             telegram_invite_link=habit.telegram_invite_link,
             checkin_topic_thread_id=habit.checkin_topic_thread_id,
+            chat_topic_thread_id=habit.chat_topic_thread_id,
         ),
         membership=MembershipOut.model_validate(m),
         checkin=CheckinStatusOut(
@@ -159,6 +161,7 @@ async def my_habits(
             photo_url=h.photo_url,
             telegram_invite_link=h.telegram_invite_link,
             checkin_topic_thread_id=h.checkin_topic_thread_id,
+            chat_topic_thread_id=h.chat_topic_thread_id,
         )
         for h in rows
     ]

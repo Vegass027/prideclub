@@ -64,7 +64,7 @@ interface FormState {
   member_limit: string;
   checkin_topic_link: string;
   notifications_topic_link: string;
-  chat_link: string;
+  chat_topic_link: string;
 }
 
 const INITIAL_STATE: FormState = {
@@ -87,7 +87,7 @@ const INITIAL_STATE: FormState = {
   member_limit: "",
   checkin_topic_link: "",
   notifications_topic_link: "",
-  chat_link: "",
+  chat_topic_link: "",
 };
 
 const rubToKopecks = (rub: string): number => {
@@ -124,7 +124,7 @@ interface RawForm {
   member_limit: string;
   checkin_topic_link: string;
   notifications_topic_link: string;
-  chat_link: string;
+  chat_topic_link: string;
 }
 
 const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
@@ -159,9 +159,26 @@ const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
     errors.notifications_topic_link =
       "Топик уведомлений должен отличаться от топика чек-инов";
   }
-  const chatLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/?$/;
-  if (state.chat_link.trim() && !chatLinkRe.test(state.chat_link.trim())) {
-    errors.chat_link = "Формат https://t.me/c/<chat_id>";
+  const chatLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+  if (
+    state.chat_topic_link.trim() &&
+    !chatLinkRe.test(state.chat_topic_link.trim())
+  ) {
+    errors.chat_topic_link = "Формат https://t.me/c/<chat_id>/<thread_id>";
+  }
+  if (
+    state.chat_topic_link.trim() &&
+    state.chat_topic_link.trim() === state.checkin_topic_link.trim()
+  ) {
+    errors.chat_topic_link =
+      "Топик чата должен отличаться от топика чек-инов";
+  }
+  if (
+    state.chat_topic_link.trim() &&
+    state.chat_topic_link.trim() === state.notifications_topic_link.trim()
+  ) {
+    errors.chat_topic_link =
+      "Топик чата должен отличаться от топика уведомлений";
   }
 
   if (!/^\d{2}:\d{2}$/.test(state.checkin_window_start)) {
@@ -272,7 +289,7 @@ export function HabitCreatePage() {
         curator_id: null,
         checkin_topic_link: state.checkin_topic_link.trim(),
         notifications_topic_link: state.notifications_topic_link.trim(),
-        chat_link: state.chat_link.trim() || null,
+        chat_topic_link: state.chat_topic_link.trim() || null,
       },
       {
         onSuccess: () => navigate("/habits"),
@@ -526,19 +543,22 @@ export function HabitCreatePage() {
         </FieldRow>
 
         <FieldRow
-          label="Ссылка на чат клуба"
-          error={touched.chat_link ? errors.chat_link : undefined}
+          label="Ссылка на топик чата"
+          error={touched.chat_topic_link ? errors.chat_topic_link : undefined}
         >
           <TextInput
-            value={state.chat_link}
-            onChange={(e) => set("chat_link", e.target.value)}
-            onBlur={() => markTouched("chat_link")}
-            placeholder="Вставь ссылку на чат"
+            value={state.chat_topic_link}
+            onChange={(e) => set("chat_topic_link", e.target.value)}
+            onBlur={() => markTouched("chat_topic_link")}
+            placeholder="Вставь ссылку на топик"
             inputMode="url"
-            aria-invalid={Boolean(touched.chat_link && errors.chat_link)}
+            aria-invalid={Boolean(
+              touched.chat_topic_link && errors.chat_topic_link,
+            )}
           />
           <p className="mt-1 text-xs text-muted">
-            Корневая ссылка на группу. Если уже выбрал группу выше — необязательно.
+            Сюда попадает кнопка «Перейти в чат» в User Mini App. Топик
+            должен быть в той же группе, что топики чек-инов и уведомлений.
           </p>
         </FieldRow>
 

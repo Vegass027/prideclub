@@ -28,6 +28,7 @@ export interface Habit {
   photo_url: string | null;
   telegram_invite_link: string | null;
   checkin_topic_thread_id: number | null;
+  chat_topic_thread_id: number | null;
 }
 
 export interface Membership {

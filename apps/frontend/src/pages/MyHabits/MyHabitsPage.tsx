@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useMyHabits } from "@/shared/hooks";
-import { openChatRoot, openCheckinTopic } from "@/shared/telegram/topicLink";
+import { openCheckinTopic } from "@/shared/telegram/topicLink";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -38,7 +38,7 @@ export function MyHabitsPage() {
             const canCheckIn =
               h.chat_id !== 0 && h.checkin_topic_thread_id !== null;
             const canOpenChat =
-              h.chat_id !== 0 || Boolean(h.telegram_invite_link);
+              h.chat_id !== 0 && h.chat_topic_thread_id !== null;
             return (
               <li key={h.id}>
                 <div className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
@@ -77,7 +77,7 @@ export function MyHabitsPage() {
                       <button
                         type="button"
                         onClick={() =>
-                          openChatRoot(h.chat_id, h.telegram_invite_link ?? null)
+                          openCheckinTopic(h.chat_id, h.chat_topic_thread_id)
                         }
                         className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2.5 text-sm font-medium text-text transition hover:border-white/20"
                       >

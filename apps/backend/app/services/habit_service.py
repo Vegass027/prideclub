@@ -29,10 +29,7 @@ from app.core.exceptions import (
     HabitValidationError,
 )
 from app.core.logging import get_logger
-from app.core.telegram_links import (
-    parse_telegram_chat_link,
-    parse_telegram_topic_link,
-)
+from app.core.telegram_links import parse_telegram_topic_link
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 
@@ -77,18 +74,14 @@ class HabitService:
         curator_id: int | None,
         checkin_topic_link: str,
         notifications_topic_link: str,
-        chat_link: str | None = None,
+        chat_topic_link: str | None = None,
     ) -> Any:
         """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4).
 
         Topic-scoped: обязательны ссылки на топики чек-инов и
         уведомлений (https://t.me/c/<chat_id>/<thread_id>).
+        Опционально — топик общего чата клуба в той же группе.
         Бот ничего не создаёт — топики делает владелец в Telegram.
-
-        `chat_link` — опциональная ссылка на корневой чат клуба
-        (https://t.me/c/<chat_id>). Используется как альтернативный
-        способ задать `chat_id`, если админ не выбрал группу из
-        списка available_chats.
         """
         _validate_title(title)
         _validate_stat_name(stat_name)
@@ -121,23 +114,28 @@ class HabitService:
                 code="habit_topics_must_differ",
             )
 
-        if chat_link is not None and chat_link.strip():
-            link_chat_id = parse_telegram_chat_link(chat_link)
-            if chat_id != 0 and link_chat_id != chat_id:
+        chat_topic_thread_id: int | None = None
+        if chat_topic_link is not None and chat_topic_link.strip():
+            chat_topic = parse_telegram_topic_link(chat_topic_link)
+            if chat_topic.chat_id != checkin_topic.chat_id:
                 raise HabitTopicMismatchError(
-                    "Ссылка на чат указывает на другую группу, "
-                    "не совпадает с chat_id клуба и топик-ссылками"
+                    "Ссылка на топик чата указывает на группу, отличную от "
+                    "группы топиков чек-инов и уведомлений"
                 )
-            if link_chat_id != checkin_topic.chat_id:
-                raise HabitTopicMismatchError(
-                    "Ссылка на чат указывает на группу, отличную от "
-                    "группы топика чек-инов"
+            if chat_topic.thread_id in (
+                checkin_topic.thread_id,
+                notifications_topic.thread_id,
+            ):
+                raise HabitValidationError(
+                    "Топик чата должен отличаться от топика чек-инов "
+                    "и топика уведомлений",
+                    code="habit_topics_must_differ",
                 )
-            resolved_chat_id = link_chat_id
-        else:
-            resolved_chat_id = (
-                chat_id if chat_id != 0 else checkin_topic.chat_id
-            )
+            chat_topic_thread_id = chat_topic.thread_id
+
+        resolved_chat_id = (
+            chat_id if chat_id != 0 else checkin_topic.chat_id
+        )
 
         existing = await self._habit_repo.get_by_chat_id(resolved_chat_id)
         if existing is not None:
@@ -186,6 +184,7 @@ class HabitService:
             "archived_at": None,
             "checkin_topic_thread_id": checkin_topic.thread_id,
             "notifications_topic_thread_id": notifications_topic.thread_id,
+            "chat_topic_thread_id": chat_topic_thread_id,
         }
         habit = await self._habit_repo.create(fields=fields)
 
@@ -198,6 +197,7 @@ class HabitService:
                 "chat_id": habit.chat_id,
                 "checkin_topic_thread_id": checkin_topic.thread_id,
                 "notifications_topic_thread_id": notifications_topic.thread_id,
+                "chat_topic_thread_id": chat_topic_thread_id,
             },
         )
         return habit
@@ -256,14 +256,14 @@ class HabitService:
         topic_link_changed = (
             "checkin_topic_link" in fields
             or "notifications_topic_link" in fields
-            or "chat_link" in fields
+            or "chat_topic_link" in fields
         )
         if topic_link_changed:
             new_checkin_link = fields.pop("checkin_topic_link", None)
             new_notifications_link = fields.pop(
                 "notifications_topic_link", None
             )
-            new_chat_link = fields.pop("chat_link", None)
+            new_chat_topic_link = fields.pop("chat_topic_link", None)
 
             existing_chat_id = habit.chat_id
 
@@ -303,20 +303,21 @@ class HabitService:
                     habit.notifications_topic_thread_id
                 )
 
-            if new_chat_link is not None and new_chat_link.strip():
-                link_chat_id = parse_telegram_chat_link(new_chat_link)
-                effective_chat_id = (
-                    fields["checkin_topic_thread_id"]
-                    if "chat_id" in fields
-                    else existing_chat_id
-                )
-                if effective_chat_id != 0 and link_chat_id != effective_chat_id:
+            if new_chat_topic_link is not None and new_chat_topic_link.strip():
+                chat_topic = parse_telegram_topic_link(new_chat_topic_link)
+                if existing_chat_id == 0:
+                    fields["chat_id"] = chat_topic.chat_id
+                    existing_chat_id = chat_topic.chat_id
+                elif chat_topic.chat_id != existing_chat_id:
                     raise HabitTopicMismatchError(
-                        "Ссылка на чат указывает на группу, отличную от "
-                        "чата клуба и топик-ссылок"
+                        "Топик чата находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба)."
                     )
-                fields["chat_id"] = link_chat_id
-                existing_chat_id = link_chat_id
+                fields["chat_topic_thread_id"] = chat_topic.thread_id
+            elif "chat_topic_link" in fields:
+                fields["chat_topic_thread_id"] = None
+            else:
+                fields["chat_topic_thread_id"] = habit.chat_topic_thread_id
 
             resolved_chat_id = fields.get("chat_id", existing_chat_id)
 
@@ -329,9 +330,21 @@ class HabitService:
                     code="habit_topics_must_differ",
                 )
 
+            chat_topic_tid = fields.get("chat_topic_thread_id")
+            if chat_topic_tid is not None and chat_topic_tid in (
+                fields["checkin_topic_thread_id"],
+                fields["notifications_topic_thread_id"],
+            ):
+                raise HabitValidationError(
+                    "Топик чата должен отличаться от топика чек-инов "
+                    "и топика уведомлений",
+                    code="habit_topics_must_differ",
+                )
+
             for thread_id in (
                 fields["checkin_topic_thread_id"],
                 fields["notifications_topic_thread_id"],
+                fields.get("chat_topic_thread_id"),
             ):
                 if thread_id is None:
                     continue

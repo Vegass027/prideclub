@@ -11,7 +11,6 @@ import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
 import { openCheckinTopic } from "@/shared/telegram/topicLink";
-import { openChatRoot } from "@/shared/telegram/topicLink";
 
 const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
   video_note: {
@@ -166,16 +165,18 @@ export function TodayPage() {
               Открыть чат клуба
             </Button>
           )}
-          <Button
-            variant="secondary"
-            onClick={() => {
-              hapticImpact("light");
-              openChatRoot(habit.chat_id, habit.telegram_invite_link ?? null);
-            }}
-            className="w-full"
-          >
-            💬 Перейти в чат
-          </Button>
+          {habit.chat_topic_thread_id !== null && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                hapticImpact("light");
+                openCheckinTopic(habit.chat_id, habit.chat_topic_thread_id);
+              }}
+              className="w-full"
+            >
+              💬 Перейти в чат
+            </Button>
+          )}
         </div>
       </section>
 

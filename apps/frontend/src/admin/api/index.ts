@@ -25,9 +25,10 @@ export interface AdminHabit {
   curator_id: number | null;
   checkin_topic_thread_id: number | null;
   notifications_topic_thread_id: number | null;
+  chat_topic_thread_id: number | null;
   checkin_topic_link: string | null;
   notifications_topic_link: string | null;
-  chat_link: string | null;
+  chat_topic_link: string | null;
   archived_at: string | null;
   created_at: string;
   active_members_count: number;
@@ -107,7 +108,7 @@ export interface AdminHabitCreatePayload {
   curator_id: number | null;
   checkin_topic_link: string;
   notifications_topic_link: string;
-  chat_link?: string | null;
+  chat_topic_link?: string | null;
 }
 
 export interface AdminHabitUpdatePayload {
@@ -127,7 +128,7 @@ export interface AdminHabitUpdatePayload {
   chat_id?: number | null;
   checkin_topic_link?: string;
   notifications_topic_link?: string;
-  chat_link?: string;
+  chat_topic_link?: string;
 }
 
 export const adminHabitsApi = {

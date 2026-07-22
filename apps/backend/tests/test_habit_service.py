@@ -58,7 +58,7 @@ def _base_kwargs(**overrides) -> dict:
         curator_id=None,
         checkin_topic_link="https://t.me/c/-1001234567890/1",
         notifications_topic_link="https://t.me/c/-1001234567890/2",
-        chat_link=None,
+        chat_topic_link=None,
     )
     base.update(overrides)
     return base
@@ -175,23 +175,35 @@ class TestCreate:
             await svc.create(admin_id=42, **_base_kwargs(title="Другой клуб"))
         assert exc_info.value.code == "habit_chat_id_duplicate"
 
-    async def test_chat_link_assigns_chat_id_when_zero(self) -> None:
+    async def test_chat_topic_link_optional(self) -> None:
+        svc, _, _ = _make_service()
+        habit = await svc.create(admin_id=42, **_base_kwargs())
+        assert habit.chat_topic_thread_id is None
+
+    async def test_chat_topic_link_assigned(self) -> None:
         svc, _, _ = _make_service()
         habit = await svc.create(
             admin_id=42,
-            **_base_kwargs(chat_id=0, chat_link="https://t.me/c/-1001234567890"),
+            **_base_kwargs(chat_topic_link="https://t.me/c/-1001234567890/3"),
         )
-        assert habit.chat_id == -1001234567890
+        assert habit.chat_topic_thread_id == 3
 
-    async def test_chat_link_must_match_topics(self) -> None:
+    async def test_chat_topic_must_be_in_same_chat(self) -> None:
         svc, _, _ = _make_service()
         with pytest.raises(HabitTopicMismatchError):
             await svc.create(
                 admin_id=42,
                 **_base_kwargs(
-                    chat_id=-1001234567890,
-                    chat_link="https://t.me/c/-1007777777777",
+                    chat_topic_link="https://t.me/c/-1007777777777/3",
                 ),
+            )
+
+    async def test_chat_topic_must_differ_from_other_topics(self) -> None:
+        svc, _, _ = _make_service()
+        with pytest.raises(HabitValidationError):
+            await svc.create(
+                admin_id=42,
+                **_base_kwargs(chat_topic_link="https://t.me/c/-1001234567890/1"),
             )
 
 
