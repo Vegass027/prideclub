@@ -8,7 +8,8 @@ import { AdminHabitCard } from "../components/AdminHabitCard";
 import {
   useActivateHabit,
   useAdminHabits,
-  useArchiveHabit,
+  useDeleteHabit,
+  usePermanentDeleteHabit,
   useRestoreHabit,
 } from "../hooks";
 import type { AdminHabit } from "../api";
@@ -25,6 +26,39 @@ const FILTERS: { id: Filter; label: string; emoji: string }[] = [
 const isFilter = (raw: string | null): raw is Filter =>
   raw === "all" || raw === "active" || raw === "inactive" || raw === "archived";
 
+function emptyTextFor(filter: Filter): {
+  icon: string;
+  title: string;
+  description: string;
+} {
+  switch (filter) {
+    case "archived":
+      return {
+        icon: "🗂",
+        title: "Архив пуст",
+        description: "Удалённые клубы появятся здесь.",
+      };
+    case "active":
+      return {
+        icon: "✅",
+        title: "Нет активных клубов",
+        description: "Создайте или активируйте клуб через переключатель.",
+      };
+    case "inactive":
+      return {
+        icon: "👁",
+        title: "Нет скрытых клубов",
+        description: "Скрытые клубы появятся здесь.",
+      };
+    default:
+      return {
+        icon: "🌱",
+        title: "Клубов пока нет",
+        description: "Создайте первый через кнопку выше.",
+      };
+  }
+}
+
 const FormButtonSecondary = (
   <Link
     to="/habits/new"
@@ -39,8 +73,9 @@ interface FilteredHabitsProps {
   data: AdminHabit[];
   filter: Filter;
   onToggle: (habitId: string, nextActive: boolean) => void;
-  onArchive: (habitId: string) => void;
+  onDelete: (habitId: string) => void;
   onRestore: (habitId: string) => void;
+  onPermanentDelete: (habitId: string) => void;
   busyHabitId: string;
   isBusy: boolean;
 }
@@ -49,8 +84,9 @@ function FilteredHabits({
   data,
   filter,
   onToggle,
-  onArchive,
+  onDelete,
   onRestore,
+  onPermanentDelete,
   busyHabitId,
   isBusy,
 }: FilteredHabitsProps) {
@@ -62,11 +98,12 @@ function FilteredHabits({
   }, [data, filter]);
 
   if (items.length === 0) {
+    const emptyText = emptyTextFor(filter);
     return (
       <EmptyState
-        icon="🌱"
-        title="Клубов пока нет"
-        description="Создайте первый через кнопку выше."
+        icon={emptyText.icon}
+        title={emptyText.title}
+        description={emptyText.description}
       />
     );
   }
@@ -78,8 +115,9 @@ function FilteredHabits({
           <AdminHabitCard
             habit={habit}
             onToggle={(id, next) => onToggle(id, next)}
-            onArchive={(id) => onArchive(id)}
+            onDelete={(id) => onDelete(id)}
             onRestore={(id) => onRestore(id)}
+            onPermanentDelete={(id) => onPermanentDelete(id)}
             busy={busyHabitId === habit.id && isBusy}
           />
         </li>
@@ -95,8 +133,9 @@ export function HabitsListPage() {
 
   const { data, isLoading, isError, error, refetch } = useAdminHabits();
   const activate = useActivateHabit();
-  const archive = useArchiveHabit();
+  const delete_ = useDeleteHabit();
   const restore = useRestoreHabit();
+  const permanentDelete = usePermanentDeleteHabit();
 
   const handleFilterChange = (next: Filter) => {
     const params = new URLSearchParams(searchParams);
@@ -106,8 +145,15 @@ export function HabitsListPage() {
   };
 
   const busyHabitId =
-    (activate.variables?.habitId ?? archive.variables ?? restore.variables) ?? "";
-  const isBusy = activate.isPending || archive.isPending || restore.isPending;
+    (activate.variables?.habitId ??
+      delete_.variables ??
+      restore.variables ??
+      permanentDelete.variables) ?? "";
+  const isBusy =
+    activate.isPending ||
+    delete_.isPending ||
+    restore.isPending ||
+    permanentDelete.isPending;
 
   return (
     <ScreenLayout>
@@ -166,8 +212,9 @@ export function HabitsListPage() {
           data={data.items}
           filter={filter}
           onToggle={(id, next) => activate.mutate({ habitId: id, isActive: next })}
-          onArchive={(id) => archive.mutate(id)}
+          onDelete={(id) => delete_.mutate(id)}
           onRestore={(id) => restore.mutate(id)}
+          onPermanentDelete={(id) => permanentDelete.mutate(id)}
           busyHabitId={busyHabitId}
           isBusy={isBusy}
         />

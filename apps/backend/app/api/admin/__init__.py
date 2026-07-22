@@ -11,10 +11,12 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.admin.v1 import habits as admin_habits
+from app.api.admin.v1 import uploads as admin_uploads
 
 
 api_router = APIRouter()
 api_router.include_router(admin_habits.router)
+api_router.include_router(admin_uploads.router)
 
 
 __all__ = ["api_router"]

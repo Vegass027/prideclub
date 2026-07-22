@@ -22,6 +22,12 @@ class HabitRepository:
         result = await self._session.execute(select(Habit).where(Habit.chat_id == chat_id))
         return result.scalar_one_or_none()
 
+    async def get_by_invite_link(self, invite_link: str) -> Habit | None:
+        result = await self._session.execute(
+            select(Habit).where(Habit.telegram_invite_link == invite_link)
+        )
+        return result.scalar_one_or_none()
+
     async def lock_for_update(self, habit_id: str) -> Habit | None:
         """SELECT ... FOR UPDATE — для атомарной проверки лимита/счётчика в join."""
         return await self._session.get(Habit, habit_id, with_for_update=True)
@@ -117,6 +123,21 @@ class HabitRepository:
         )
         return int(result.scalar_one())
 
+    async def list_chat_ids_for_reconcile(self) -> list[int]:
+        """Все `chat_id != 0` (любые клубы, включая архив).
+
+        Используется админским эндпоинтом `/available_chats` для reconcile
+        против живого Telegram: чаты, в которых бот больше не состоит,
+        обнуляются в БД при обновлении списка.
+
+        Возвращает именно chat_id (int), а не объекты Habit — потому что
+        единственное назначение метода — прогнать их по Telegram API.
+        """
+        result = await self._session.execute(
+            select(Habit.chat_id).where(Habit.chat_id != 0)
+        )
+        return [int(cid) for cid in result.scalars().all() if cid is not None]  
+
     async def create(self, *, fields: dict[str, Any]) -> Habit:
         habit = Habit(**fields)
         self._session.add(habit)
@@ -141,4 +162,11 @@ class HabitRepository:
 
     async def set_active(self, habit: Habit, *, is_active: bool) -> None:
         habit.is_active = is_active
+        await self._session.flush()
+
+    async def permanent_delete(self, habit: Habit) -> None:
+        """Hard delete строки из `habits`. Каскадные FK memberships/checkins
+        удалят связанные строки автоматически (см. миграции).
+        """
+        await self._session.delete(habit)
         await self._session.flush()

@@ -39,6 +39,49 @@ export interface AdminHabitActionResponse {
   archived_at: string | null;
 }
 
+export interface AdminHabitChatStatusResponse {
+  ok: boolean;
+  habit_id: string;
+  chat_id: number;
+  bound: boolean;
+  code: string | null;
+}
+
+export interface AdminHabitPreviewChatResponse {
+  ok: boolean;
+  chat_id: number | null;
+  title: string | null;
+  type: string | null;
+  invite_link: string;
+  already_used_by_habit_id: string | null;
+  code: string | null;
+  message: string | null;
+}
+
+export interface AdminHabitAvailableChat {
+  chat_id: number;
+  chat_title: string | null;
+  chat_type: string | null;
+  invite_link: string | null;
+  added_at: number;
+  bound_to_habit_id: string | null;
+  bound_to_habit_title: string | null;
+}
+
+export interface AdminHabitAvailableChatsResponse {
+  items: AdminHabitAvailableChat[];
+}
+
+export interface AdminHabitRefreshChatResponse {
+  ok: boolean;
+  chat_id: number;
+  chat_title: string | null;
+  chat_type: string | null;
+  invite_link: string | null;
+  code: string | null;
+  message: string | null;
+}
+
 export interface AdminHabitCreatePayload {
   title: string;
   description: string | null;
@@ -73,6 +116,7 @@ export interface AdminHabitUpdatePayload {
   stat_gain_per_checkin?: number;
   stat_loss_per_miss?: number;
   member_limit?: number | null;
+  chat_id?: number | null;
 }
 
 export const adminHabitsApi = {
@@ -111,10 +155,89 @@ export const adminHabitsApi = {
     );
     return data;
   },
+  delete: async (habitId: string): Promise<AdminHabitActionResponse> => {
+    const { data } = await adminApi.delete<AdminHabitActionResponse>(
+      `/habits/${habitId}`,
+    );
+    return data;
+  },
   restore: async (habitId: string): Promise<AdminHabitActionResponse> => {
     const { data } = await adminApi.post<AdminHabitActionResponse>(
       `/habits/${habitId}/restore`,
     );
     return data;
   },
+  permanentDelete: async (
+    habitId: string,
+  ): Promise<AdminHabitActionResponse> => {
+    const { data } = await adminApi.delete<AdminHabitActionResponse>(
+      `/habits/${habitId}/permanent`,
+    );
+    return data;
+  },
+  chatStatus: async (habitId: string): Promise<AdminHabitChatStatusResponse> => {
+    const { data } = await adminApi.get<AdminHabitChatStatusResponse>(
+      `/habits/${habitId}/chat_status`,
+    );
+    return data;
+  },
+  previewChatByInvite: async (
+    inviteLink: string,
+  ): Promise<AdminHabitPreviewChatResponse> => {
+    const { data } = await adminApi.post<AdminHabitPreviewChatResponse>(
+      "/habits/preview_chat_by_invite",
+      { invite_link: inviteLink },
+    );
+    return data;
+  },
+  availableChats: async (): Promise<AdminHabitAvailableChatsResponse> => {
+    const { data } = await adminApi.get<AdminHabitAvailableChatsResponse>(
+      "/habits/available_chats",
+    );
+    return data;
+  },
+  refreshChat: async (
+    chatId: number,
+  ): Promise<AdminHabitRefreshChatResponse> => {
+    const { data } = await adminApi.post<AdminHabitRefreshChatResponse>(
+      `/habits/refresh_chat/${chatId}`,
+      {},
+    );
+    return data;
+  },
+  uploadPhoto: async (
+    file: File,
+  ): Promise<AdminHabitUploadPhotoResponse> => {
+    const form = new FormData();
+    form.append("file", file);
+    const { data } = await adminApi.post<AdminHabitUploadPhotoResponse>(
+      "/habits/upload_photo",
+      form,
+      { headers: { "Content-Type": "multipart/form-data" } },
+    );
+    return data;
+  },
+  dismissChat: async (
+    chatId: number,
+  ): Promise<AdminHabitDismissChatResponse> => {
+    const { data } = await adminApi.post<AdminHabitDismissChatResponse>(
+      `/habits/dismiss_chat/${chatId}`,
+      {},
+    );
+    return data;
+  },
 };
+
+export interface AdminHabitUploadPhotoResponse {
+  ok: boolean;
+  url: string;
+  filename: string;
+  size: number;
+  content_type: string;
+}
+
+export interface AdminHabitDismissChatResponse {
+  ok: boolean;
+  chat_id: number;
+  removed_records: number;
+}

@@ -83,6 +83,8 @@ async def marketplace(
             prize_pool=h.prize_pool,
             members_count=c,
             is_active=h.is_active,
+            photo_url=h.photo_url,
+            telegram_invite_link=h.telegram_invite_link,
         )
         for h, c in rows
     ]
@@ -113,6 +115,8 @@ async def today(
             prize_pool=habit.prize_pool,
             members_count=0,
             is_active=habit.is_active,
+            photo_url=habit.photo_url,
+            telegram_invite_link=habit.telegram_invite_link,
         ),
         membership=MembershipOut.model_validate(m),
         checkin=CheckinStatusOut(
@@ -150,6 +154,8 @@ async def my_habits(
             prize_pool=h.prize_pool,
             members_count=0,
             is_active=h.is_active,
+            photo_url=h.photo_url,
+            telegram_invite_link=h.telegram_invite_link,
         )
         for h in rows
     ]

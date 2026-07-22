@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.admin import api_router as admin_api_router
 from app.api.v1 import (
@@ -12,6 +13,7 @@ from app.api.v1 import (
     balance,
     habits,
     health,
+    internal_bot,
     internal_checkins,
     internal_payments,
     internal_penalties,
@@ -90,6 +92,29 @@ def create_app() -> FastAPI:
             content={"code": exc.code, "message": exc.message},
         )
 
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: object, exc: Exception) -> JSONResponse:
+        """Глобальный fallback: любой необработанный сбой → JSON.
+
+        Без этого FastAPI отдаёт HTML/text, клиент (например, бот)
+        пытается распарсить как JSON → 500 internal client error.
+        С этим хендлером клиент всегда видит `{"code":"internal_error"}`
+        и может корректно ретраить/логировать.
+        """
+        get_logger("main").exception(
+            "unhandled_exception", extra={"path": getattr(request, "path", None)}
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"code": "internal_error", "message": "Внутренняя ошибка сервера"},
+        )
+
+    # Раздача загруженных медиа (фото клубов)
+    import os
+    _static_dir = os.environ.get("STATIC_DIR", "/app/static")
+    os.makedirs(_static_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
     app.include_router(health.router, tags=["health"])
     app.include_router(users.router, prefix="/api/v1", tags=["users"])
     app.include_router(habits.router, prefix="/api/v1", tags=["habits"])
@@ -99,6 +124,9 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard.router, prefix="/api/v1", tags=["leaderboard"])
     app.include_router(
         internal_checkins.router, prefix="/internal", tags=["internal"]
+    )
+    app.include_router(
+        internal_bot.router, prefix="/internal", tags=["internal"]
     )
     app.include_router(
         internal_payments.router, prefix="/internal", tags=["internal"]

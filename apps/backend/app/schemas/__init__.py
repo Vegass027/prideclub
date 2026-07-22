@@ -21,6 +21,8 @@ class HabitOut(BaseModel):
     prize_pool: int
     members_count: int = 0
     is_active: bool
+    photo_url: str | None = None
+    telegram_invite_link: str | None = None
 
 
 class MarketplaceResponse(BaseModel):
@@ -162,3 +164,73 @@ class AdminHabitActionResponse(BaseModel):
     habit_id: str
     is_active: bool | None = None
     archived_at: datetime | None = None
+
+
+class AdminHabitChatStatusResponse(BaseModel):
+    """Текущее состояние chat_id для клуба.
+
+    chat_id == 0 — бот ещё не добавлен в Telegram-группу.
+    chat_id != 0 — бот уже в группе, значение получено из my_chat_member.
+    """
+    ok: bool
+    habit_id: str
+    chat_id: int
+    bound: bool
+    code: str | None = None
+
+
+class AdminHabitPreviewChatRequest(BaseModel):
+    """POST /admin/v1/habits/preview_chat_by_invite — резолв invite-ссылки.
+
+    Используется в форме создания клуба ДО сохранения в БД.
+    Админ уже добавил @join_prideclub_bot в Telegram-группу и вставил
+    инвайт-ссылку — мы пробрасываем её в Telegram Bot API и получаем
+    chat_id, title, type.
+    """
+
+    invite_link: str = Field(min_length=1, max_length=512)
+
+
+class AdminHabitPreviewChatResponse(BaseModel):
+    """Результат резолва инвайт-ссылки.
+
+    ok=True, chat_id>0  — ссылка валидна и бот имеет доступ к чату.
+    ok=False            — ошибка (см. code и message).
+    """
+
+    ok: bool
+    chat_id: int | None = None
+    title: str | None = None
+    type: str | None = None
+    invite_link: str
+    already_used_by_habit_id: str | None = None
+    code: str | None = None
+    message: str | None = None
+
+
+class AdminHabitAvailableChat(BaseModel):
+    """Один чат, куда бот @join_prideclub_bot добавлен (по данным my_chat_member)."""
+
+    chat_id: int
+    chat_title: str | None = None
+    chat_type: str | None = None
+    invite_link: str | None = None
+    added_at: float  # unix timestamp
+    bound_to_habit_id: str | None = None
+    bound_to_habit_title: str | None = None
+
+
+class AdminHabitRefreshChatResponse(BaseModel):
+    """Результат ручного обновления чата из Telegram."""
+
+    ok: bool
+    chat_id: int
+    chat_title: str | None = None
+    chat_type: str | None = None
+    invite_link: str | None = None
+    code: str | None = None
+    message: str | None = None
+
+
+class AdminHabitAvailableChatsResponse(BaseModel):
+    items: list[AdminHabitAvailableChat]

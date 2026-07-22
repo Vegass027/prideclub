@@ -25,6 +25,8 @@ export interface Habit {
   prize_pool: number;
   members_count: number;
   is_active: boolean;
+  photo_url: string | null;
+  telegram_invite_link: string | null;
 }
 
 export interface Membership {

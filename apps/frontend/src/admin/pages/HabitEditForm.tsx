@@ -8,6 +8,7 @@ import {
   TextArea,
   TextInput,
 } from "../components/Form";
+import { useAvailableChats, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
 
@@ -40,8 +41,6 @@ const TIMEZONE_OPTIONS = [
   "Asia/Tehran",
   "UTC",
 ];
-
-const TR_TELEGRAM_RE = /^https:\/\/t\.me\/(\+|[A-Za-z0-9_]+)/;
 
 interface FormState {
   title: string;
@@ -121,11 +120,20 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [currentChatId, setCurrentChatId] = useState<number>(habit?.chat_id ?? 0);
+  const [currentChatTitle, setCurrentChatTitle] = useState<string>(habit?.title ?? "");
+  const uploadPhoto = useUploadPhoto();
+  const availableChatsQuery = useAvailableChats();
 
   useEffect(() => {
     if (habit) {
       setForm(habitToForm(habit));
       setTouched({});
+      setCurrentChatId(habit.chat_id);
+      const fromList = availableChatsQuery.data?.items.find(
+        (c) => c.chat_id === habit.chat_id,
+      );
+      setCurrentChatTitle(fromList?.chat_title ?? habit.title);
     }
   }, [habit]);
 
@@ -175,15 +183,6 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
     }
     if (!state.stat_name.trim()) {
       errors.stat_name = "Обязательно";
-    }
-    if (!state.photo_url.trim()) {
-      errors.photo_url = "Обязательно";
-    }
-    if (
-      state.telegram_invite_link.trim() &&
-      !TR_TELEGRAM_RE.test(state.telegram_invite_link.trim())
-    ) {
-      errors.telegram_invite_link = "Ссылка должна быть https://t.me/...";
     }
     if (!/^\d{2}:\d{2}$/.test(state.checkin_window_start)) {
       errors.checkin_window_start = "HH:MM";
@@ -238,6 +237,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
+        chat_id: currentChatId,
       });
       navigate("/habits");
     } catch (err) {
@@ -268,22 +268,177 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
       </FieldRow>
 
-      <FieldRow label="Фото клуба" error={touched.photo_url ? errors.photo_url : undefined}>
-        <TextInput
-          type="url"
-          value={form.photo_url}
-          onChange={(e) => set("photo_url", e.target.value)}
-          onBlur={() => touchedFields("photo_url")}
-        />
+      <FieldRow label="Фото клуба">
+        <div className="flex flex-col gap-3">
+          {form.photo_url ? (
+            <div className="relative w-full overflow-hidden rounded-card border border-white/10 bg-surface">
+              {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+              <img
+                src={form.photo_url}
+                alt="Превью фото клуба"
+                className="block w-full max-h-64 object-cover"
+              />
+              <button
+                type="button"
+                onClick={() => set("photo_url", "")}
+                className="absolute right-2 top-2 min-h-[32px] rounded-card bg-black/60 px-3 py-1 text-xs font-medium text-white transition hover:bg-black/80"
+                aria-label="Удалить фото"
+              >
+                Удалить
+              </button>
+            </div>
+          ) : (
+            <label
+              className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed transition ${
+                uploadPhoto.isPending
+                  ? "border-primary/40 bg-primary/5"
+                  : "border-white/20 bg-surface hover:border-white/40"
+              }`}
+            >
+              <span className="text-2xl" aria-hidden="true">🖼️</span>
+              <span className="text-sm font-medium text-text">
+                {uploadPhoto.isPending ? "Загружаю..." : "Загрузить фото"}
+              </span>
+              <span className="text-xs text-muted">
+                JPEG, PNG, GIF или WebP, до 5 MB
+              </span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp"
+                className="sr-only"
+                disabled={uploadPhoto.isPending}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const res = await uploadPhoto.mutateAsync(file);
+                    set("photo_url", res.url);
+                  } catch (err) {
+                    // eslint-disable-next-line no-alert
+                    alert(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </label>
+          )}
+          {uploadPhoto.isError && (
+            <p className="text-xs text-danger" role="alert">
+              {uploadPhoto.error instanceof Error
+                ? uploadPhoto.error.message
+                : "Ошибка загрузки"}
+            </p>
+          )}
+        </div>
       </FieldRow>
 
-      <FieldRow label="Telegram-инвайт клуба" error={touched.telegram_invite_link ? errors.telegram_invite_link : undefined}>
-        <TextInput
-          type="url"
-          value={form.telegram_invite_link}
-          onChange={(e) => set("telegram_invite_link", e.target.value)}
-          onBlur={() => touchedFields("telegram_invite_link")}
-        />
+      <FieldRow label="Chat ID (Telegram)">
+        <div className="flex items-center gap-2">
+          <div
+            className={`flex-1 min-h-[52px] flex flex-col justify-center rounded-card border px-3 py-2 ${
+              currentChatId !== 0
+                ? "border-emerald-500/40 bg-emerald-500/5"
+                : "border-white/10 bg-surface"
+            }`}
+          >
+            {currentChatId !== 0 ? (
+              <>
+                <span className="text-sm font-semibold text-text leading-tight">
+                  {currentChatTitle || "Без названия"}
+                </span>
+                <span className="text-xs font-mono text-muted leading-tight mt-0.5">
+                  chat_id: {currentChatId}
+                </span>
+              </>
+            ) : (
+              <span className="text-sm text-muted">
+                не привязан — выбери группу ниже
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              await availableChatsQuery.refetch();
+              if (currentChatId !== 0) {
+                const fromList = availableChatsQuery.data?.items.find(
+                  (c) => c.chat_id === currentChatId,
+                );
+                if (fromList?.chat_title) {
+                  setCurrentChatTitle(fromList.chat_title);
+                }
+              }
+            }}
+            disabled={availableChatsQuery.isFetching}
+            className="min-h-[44px] shrink-0 rounded-card border border-white/10 bg-surface px-4 py-2 text-sm font-medium text-text transition hover:border-white/20 disabled:opacity-50"
+          >
+            {availableChatsQuery.isFetching ? "Обновляю..." : "Обновить"}
+          </button>
+        </div>
+
+        <p className="mt-2 text-xs text-muted">
+          Можешь выбрать другую группу Telegram, куда добавлен бот.
+        </p>
+
+        {availableChatsQuery.isLoading && (
+          <p className="mt-2 text-xs text-muted">Загружаю список…</p>
+        )}
+
+        {availableChatsQuery.data && availableChatsQuery.data.items.length === 0 && (
+          <div className="mt-2 rounded-card border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+            Бот пока не добавлен ни в одну группу. Добавь
+            @join_prideclub_bot в группу и нажми «Обновить».
+          </div>
+        )}
+
+        {availableChatsQuery.data && availableChatsQuery.data.items.length > 0 && (
+          <ul className="mt-2 flex flex-col gap-1" role="listbox">
+            {availableChatsQuery.data.items.map((chat) => {
+              const selected = currentChatId === chat.chat_id;
+              const disabled =
+                chat.bound_to_habit_id !== null &&
+                chat.bound_to_habit_id !== habit.id;
+              return (
+                <li key={chat.chat_id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (disabled) return;
+                      setCurrentChatId(chat.chat_id);
+                      setCurrentChatTitle(chat.chat_title ?? "");
+                            }}
+                    disabled={disabled}
+                    aria-pressed={selected}
+                    className={`w-full min-h-[52px] flex items-center gap-3 rounded-card border px-3 py-2 text-left transition ${
+                      selected
+                        ? "border-emerald-500/60 bg-emerald-500/10"
+                        : disabled
+                          ? "border-white/5 bg-surface/40 cursor-not-allowed"
+                          : "border-white/10 bg-surface hover:border-white/30"
+                    }`}
+                  >
+                    <span className="flex-1 flex flex-col">
+                      <span className="text-sm font-semibold text-text leading-tight">
+                        {chat.chat_title ?? "Без названия"}
+                      </span>
+                      <span className="text-xs font-mono text-muted leading-tight mt-0.5">
+                        {chat.chat_type ?? "?"} · {chat.chat_id}
+                      </span>
+                    </span>
+                    <span className="text-xs shrink-0">
+                      {disabled
+                        ? `уже у «${chat.bound_to_habit_title ?? "?"}»`
+                        : selected
+                          ? "✓ выбран"
+                          : "выбрать"}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </FieldRow>
 
       <FieldRow label="Характеристика">

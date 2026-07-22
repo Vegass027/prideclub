@@ -238,6 +238,47 @@ class HabitService:
         )
         return habit
 
+    async def permanent_delete(self, *, admin_id: int, habit_id: str) -> dict:
+        """Полное удаление клуба из БД (hard delete).
+
+        Разрешено только если у клуба нет активных memberships
+        (status != 'left'), иначе участники потеряют финансовые
+        данные. Каскадные FK на memberships/checkins/penalties
+        удалят связанные строки автоматически.
+        """
+        habit = await self._habit_repo.get(habit_id)
+        if habit is None:
+            raise HabitNotFoundError()
+
+        active_members = await self._habit_repo.count_active_members(habit_id)
+        if active_members > 0:
+            raise HabitValidationError(
+                "Невозможно удалить клуб навсегда: у него есть активные "
+                "участники. Сначала выгоните их или дождитесь выхода.",
+                code="habit_has_active_members",
+            )
+
+        chat_id = habit.chat_id
+        title = habit.title
+        await self._habit_repo.permanent_delete(habit)
+
+        self._logger.info(
+            "habit_permanently_deleted",
+            extra={
+                "admin_id": admin_id,
+                "habit_id": habit_id,
+                "title": title,
+                "chat_id": chat_id,
+            },
+        )
+
+        return {
+            "ok": True,
+            "habit_id": habit_id,
+            "chat_id": chat_id,
+            "code": "habit_permanently_deleted",
+        }
+
     async def set_active(
         self,
         *,
@@ -297,7 +338,10 @@ def _validate_stat_name(name: str | None) -> None:
         )
 
 
-def _validate_stat_icon(icon: str) -> None:
+def _validate_stat_icon(icon: str | None) -> None:
+    # None допустим — означает «нет иконки»
+    if icon is None:
+        return
     if not isinstance(icon, str):
         raise HabitValidationError(
             "stat_icon должен быть строкой", code="habit_stat_icon_type"

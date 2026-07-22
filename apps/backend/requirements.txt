@@ -1,4 +1,5 @@
 fastapi==0.115.5
+python-multipart==0.0.20  # для file uploads (admin uploads)
 uvicorn[standard]==0.32.1
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0

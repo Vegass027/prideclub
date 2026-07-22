@@ -10,7 +10,7 @@ import {
   TextArea,
   TextInput,
 } from "../components/Form";
-import { useCreateHabit } from "../hooks";
+import { useAvailableChats, useCreateHabit, useRefreshChat, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
 
@@ -44,13 +44,13 @@ const TIMEZONE_OPTIONS = [
   "UTC",
 ];
 
-const TR_TELEGRAM_RE = /^https:\/\/t\.me\/(\+|[A-Za-z0-9_]+)/;
-
 interface FormState {
   title: string;
   description: string;
   photo_url: string;
   telegram_invite_link: string;
+  chat_id: number;
+  chat_title: string;
   stat_name: string;
   stat_icon: string;
   checkin_window_start: string;
@@ -69,6 +69,8 @@ const INITIAL_STATE: FormState = {
   description: "",
   photo_url: "",
   telegram_invite_link: "",
+  chat_id: 0,
+  chat_title: "",
   stat_name: "Дисциплина",
   stat_icon: "🔥",
   checkin_window_start: "09:00",
@@ -101,6 +103,8 @@ interface RawForm {
   description: string;
   photo_url: string;
   telegram_invite_link: string;
+  chat_id: number;
+  chat_title: string;
   stat_name: string;
   stat_icon: string;
   checkin_window_start: string;
@@ -123,13 +127,8 @@ const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
   if (!state.description.trim()) {
     errors.description = "Обязательно";
   }
-  if (!state.photo_url.trim()) {
-    errors.photo_url = "Обязательно";
-  }
-  if (!state.telegram_invite_link.trim()) {
-    errors.telegram_invite_link = "Обязательно";
-  } else if (!TR_TELEGRAM_RE.test(state.telegram_invite_link.trim())) {
-    errors.telegram_invite_link = "Ссылка должна быть https://t.me/...";
+  if (state.chat_id === 0) {
+    errors.chat_id = "Выбери группу Telegram, куда добавлен бот";
   }
   if (!state.stat_name.trim()) {
     errors.stat_name = "Обязательно";
@@ -169,6 +168,9 @@ export function HabitCreatePage() {
   const [state, setState] = useState<FormState>(INITIAL_STATE);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const create = useCreateHabit();
+  const availableChatsQuery = useAvailableChats();
+  const refreshChat = useRefreshChat();
+  const uploadPhoto = useUploadPhoto();
 
   const errors = useMemo(() => errorsOf(state), [state]);
   const errorList = Object.values(errors).filter(Boolean) as string[];
@@ -179,6 +181,31 @@ export function HabitCreatePage() {
 
   const markTouched = (field: string) => {
     setTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
+  };
+
+  const handlePickChat = (chatId: number, title: string | null) => {
+    setState((prev) => ({
+      ...prev,
+      chat_id: chatId,
+      chat_title: title ?? "",
+    }));
+  };
+
+  const handleRefreshAll = async () => {
+    await availableChatsQuery.refetch();
+    if (state.chat_id !== 0) {
+      try {
+        const res = await refreshChat.mutateAsync(state.chat_id);
+        if (res.ok) {
+          setState((prev) => ({
+            ...prev,
+            chat_title: res.chat_title ?? prev.chat_title,
+          }));
+        }
+      } catch {
+        // ignore — главное обновили список
+      }
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -202,7 +229,7 @@ export function HabitCreatePage() {
         telegram_invite_link: state.telegram_invite_link.trim() || null,
         stat_name: state.stat_name.trim(),
         stat_icon: state.stat_icon.trim() || null,
-        chat_id: 0,
+        chat_id: state.chat_id,
         checkin_window_start: state.checkin_window_start,
         checkin_window_end: state.checkin_window_end,
         timezone: state.timezone,
@@ -249,32 +276,173 @@ export function HabitCreatePage() {
           />
         </FieldRow>
 
-        <FieldRow
-          label="Фото клуба"
-          error={touched.photo_url ? errors.photo_url : undefined}
-        >
-          <TextInput
-            type="url"
-            value={state.photo_url}
-            onChange={(e) => set("photo_url", e.target.value)}
-            onBlur={() => markTouched("photo_url")}
-            inputMode="url"
-          />
+        <FieldRow label="Фото клуба">
+          <div className="flex flex-col gap-3">
+            {state.photo_url ? (
+              <div className="relative w-full overflow-hidden rounded-card border border-white/10 bg-surface">
+                {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+                <img
+                  src={state.photo_url}
+                  alt="Превью фото клуба"
+                  className="block w-full max-h-64 object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => set("photo_url", "")}
+                  className="absolute right-2 top-2 min-h-[32px] rounded-card bg-black/60 px-3 py-1 text-xs font-medium text-white transition hover:bg-black/80"
+                  aria-label="Удалить фото"
+                >
+                  Удалить
+                </button>
+              </div>
+            ) : (
+              <label
+                className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed transition ${
+                  uploadPhoto.isPending
+                    ? "border-primary/40 bg-primary/5"
+                    : "border-white/20 bg-surface hover:border-white/40"
+                }`}
+              >
+                <span className="text-2xl" aria-hidden="true">
+                  🖼️
+                </span>
+                <span className="text-sm font-medium text-text">
+                  {uploadPhoto.isPending ? "Загружаю..." : "Загрузить фото"}
+                </span>
+                <span className="text-xs text-muted">
+                  JPEG, PNG, GIF или WebP, до 5 MB
+                </span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif,image/webp"
+                  className="sr-only"
+                  disabled={uploadPhoto.isPending}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    try {
+                      const res = await uploadPhoto.mutateAsync(file);
+                      set("photo_url", res.url);
+                    } catch (err) {
+                      // eslint-disable-next-line no-alert
+                      alert(err instanceof Error ? err.message : String(err));
+                    } finally {
+                      e.target.value = "";
+                    }
+                  }}
+                />
+              </label>
+            )}
+            {uploadPhoto.isError && (
+              <p className="text-xs text-danger" role="alert">
+                {uploadPhoto.error instanceof Error
+                  ? uploadPhoto.error.message
+                  : "Ошибка загрузки"}
+              </p>
+            )}
+          </div>
         </FieldRow>
 
-        <FieldRow
-          label="Telegram-инвайт клуба"
-          error={
-            touched.telegram_invite_link ? errors.telegram_invite_link : undefined
-          }
-        >
-          <TextInput
-            type="url"
-            value={state.telegram_invite_link}
-            onChange={(e) => set("telegram_invite_link", e.target.value)}
-            onBlur={() => markTouched("telegram_invite_link")}
-            inputMode="url"
-          />
+        <FieldRow label="Chat ID (Telegram)">
+          <div className="flex items-center gap-2">
+            <div
+              className={`flex-1 min-h-[52px] flex flex-col justify-center rounded-card border px-3 py-2 ${
+                state.chat_id !== 0
+                  ? "border-emerald-500/40 bg-emerald-500/5"
+                  : "border-white/10 bg-surface"
+              }`}
+            >
+              {state.chat_id !== 0 ? (
+                <>
+                  <span className="text-sm font-semibold text-text leading-tight">
+                    {state.chat_title || "Без названия"}
+                  </span>
+                  <span className="text-xs font-mono text-muted leading-tight mt-0.5">
+                    chat_id: {state.chat_id}
+                  </span>
+                </>
+              ) : (
+                <span className="text-sm text-muted">
+                  не выбран — выбери группу ниже
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleRefreshAll}
+              disabled={
+                availableChatsQuery.isFetching || refreshChat.isPending
+              }
+              aria-busy={availableChatsQuery.isFetching || refreshChat.isPending}
+              className="min-h-[44px] shrink-0 rounded-card border border-white/10 bg-surface px-4 py-2 text-sm font-medium text-text transition hover:border-white/20 disabled:opacity-50"
+            >
+              {availableChatsQuery.isFetching || refreshChat.isPending
+                ? "Обновляю..."
+                : "Обновить"}
+            </button>
+          </div>
+
+          <p className="mt-2 text-xs text-muted">
+            Добавь бота{" "}
+            <span className="text-text">@join_prideclub_bot</span> в
+            Telegram-группу клуба и выбери её ниже. Если переименовал группу —
+            нажми «Обновить».
+          </p>
+
+          {availableChatsQuery.isLoading && (
+            <p className="mt-2 text-xs text-muted">Загружаю список…</p>
+          )}
+
+          {availableChatsQuery.data && availableChatsQuery.data.items.length === 0 && (
+            <div className="mt-2 rounded-card border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+              Бот пока не добавлен ни в одну группу. Открой Telegram, добавь
+              @join_prideclub_bot в группу клуба и нажми «Обновить».
+            </div>
+          )}
+
+          {availableChatsQuery.data && availableChatsQuery.data.items.length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1" role="listbox" aria-label="Группы Telegram">
+              {availableChatsQuery.data.items.map((chat) => {
+                const selected = state.chat_id === chat.chat_id;
+                const disabled = chat.bound_to_habit_id !== null;
+                return (
+                  <li key={chat.chat_id}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        !disabled && handlePickChat(chat.chat_id, chat.chat_title)
+                      }
+                      disabled={disabled}
+                      aria-pressed={selected}
+                      className={`w-full min-h-[52px] flex items-center gap-3 rounded-card border px-3 py-2 text-left transition ${
+                        selected
+                          ? "border-emerald-500/60 bg-emerald-500/10"
+                          : disabled
+                            ? "border-white/5 bg-surface/40 cursor-not-allowed"
+                            : "border-white/10 bg-surface hover:border-white/30"
+                      }`}
+                    >
+                      <span className="flex-1 flex flex-col">
+                        <span className="text-sm font-semibold text-text leading-tight">
+                          {chat.chat_title ?? "Без названия"}
+                        </span>
+                        <span className="text-xs font-mono text-muted leading-tight mt-0.5">
+                          {chat.chat_type ?? "?"} · {chat.chat_id}
+                        </span>
+                      </span>
+                      <span className="text-xs shrink-0">
+                        {disabled
+                          ? `уже привязан к «${chat.bound_to_habit_title ?? "?"}»`
+                          : selected
+                            ? "✓ выбран"
+                            : "выбрать"}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </FieldRow>
 
         <FieldRow label="Характеристика">

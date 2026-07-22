@@ -21,6 +21,8 @@ declare global {
         ready: () => void;
         expand: () => void;
         close: () => void;
+        openLink?: (url: string, tryInstantView?: boolean) => void;
+        openTelegramLink?: (url: string) => void;
         BackButton?: { show: () => void; hide: () => void; onClick: (cb: () => void) => void; offClick: (cb: () => void) => void };
         MainButton?: { text: string; show: () => void; hide: () => void; onClick: (cb: () => void) => void; offClick: (cb: () => void) => void };
         HapticFeedback?: {
@@ -71,4 +73,17 @@ export function hapticImpact(style: "light" | "medium" | "heavy" = "light"): voi
 
 export function hapticNotify(type: "error" | "success" | "warning"): void {
   window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred(type);
+}
+
+export function openTelegramLink(url: string): void {
+  const tg = window.Telegram?.WebApp;
+  if (tg?.openTelegramLink) {
+    tg.openTelegramLink(url);
+    return;
+  }
+  if (tg?.openLink) {
+    tg.openLink(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }

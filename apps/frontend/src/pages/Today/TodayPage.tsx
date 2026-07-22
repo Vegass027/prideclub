@@ -9,7 +9,7 @@ import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
-import { hapticImpact } from "@/shared/telegram/tma";
+import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
 
 const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
   video_note: {
@@ -40,7 +40,11 @@ export function TodayPage() {
   const handleOpenChat = () => {
     if (!data) return;
     hapticImpact("medium");
-    window.open(`https://t.me/c/${String(data.habit.chat_id).replace(/^-100/, "")}`, "_blank");
+    const { habit } = data;
+    const url =
+      habit.telegram_invite_link ||
+      `https://t.me/c/${String(habit.chat_id).replace(/^-100/, "")}`;
+    openTelegramLink(url);
   };
 
   if (isLoading) {
@@ -112,6 +116,15 @@ export function TodayPage() {
           {habit.description}
         </section>
       )}
+
+      {habit.photo_url ? (
+        <img
+          src={habit.photo_url}
+          alt={habit.title}
+          className="mb-3 block w-full max-h-56 rounded-card border border-white/5 object-cover"
+          loading="lazy"
+        />
+      ) : null}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
         <div className="mb-3 flex items-baseline justify-between">

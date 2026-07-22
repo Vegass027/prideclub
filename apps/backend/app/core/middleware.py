@@ -33,6 +33,7 @@ INTERNAL_PREFIX = "/internal/"
 PUBLIC_PREFIX = "/api/v1/"
 ADMIN_PREFIX = "/admin/v1/"
 HEALTH_PATHS = {"/health", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc"}
+STATIC_PREFIX = "/static/"  # загруженные медиа (фото клубов) — публичный read-only
 
 
 def _client_ip(request: Request) -> str:
@@ -59,7 +60,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         settings = get_settings()
 
         # Публичные служебные endpoints (k8s probes, OpenAPI) — без аутентификации
-        if path in HEALTH_PATHS:
+        if path in HEALTH_PATHS or path.startswith(STATIC_PREFIX):
             return await call_next(request)
 
         try:
@@ -216,7 +217,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         path = request.url.path
 
-        if path in HEALTH_PATHS:
+        if path in HEALTH_PATHS or path.startswith(STATIC_PREFIX):
             return await call_next(request)
 
         try:

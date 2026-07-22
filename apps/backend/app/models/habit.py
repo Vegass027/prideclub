@@ -63,7 +63,10 @@ class Habit(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    memberships: Mapped[list["Membership"]] = relationship(back_populates="habit")
+    memberships: Mapped[list["Membership"]] = relationship(
+        back_populates="habit",
+        passive_deletes=True,
+    )
 
     def club_date(self, moment_utc: datetime) -> date:
         local = moment_utc.astimezone(ZoneInfo(self.timezone))

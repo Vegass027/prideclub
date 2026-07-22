@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from bot.config import get_settings
-from bot.handlers import checkin, payments, start
+from bot.handlers import chat_member, checkin, payments, start
 from bot.logging_setup import configure_logging
 from bot.middlewares.rate_limit import RateLimitMiddleware
 
@@ -36,7 +36,11 @@ async def on_startup(bot: Bot, settings) -> None:
         url=url,
         secret_token=settings.webhook_secret or None,
         max_connections=40,
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=[
+        "message",
+        "callback_query",
+        "my_chat_member",
+    ],
     )
     log.info("webhook_set url=%s", url)
 
@@ -83,6 +87,7 @@ def main() -> None:
     dp.include_router(start.router)
     dp.include_router(payments.router)
     dp.include_router(checkin.router)
+    dp.include_router(chat_member.router)
     _trace("routers_included")
 
     # Long-poll fallback when no webhook URL is configured.
