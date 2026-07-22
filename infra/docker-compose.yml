@@ -111,9 +111,9 @@ services:
       dockerfile: infra/docker/bot.Dockerfile
     container_name: habit-bot
     restart: unless-stopped
-    mem_limit: 320m
-    memswap_limit: 384m
-    cpus: 0.5
+    mem_limit: 768m
+    memswap_limit: 1024m
+    cpus: 1.0
     environment:
       <<: *bot-env
     ports:
