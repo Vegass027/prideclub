@@ -1,8 +1,8 @@
 # Техническое задание
 ## Модуль «Персонаж и характеристики» (геймификация привычек)
 
-Версия: 2.4 (админский Mini App развёрнут на проде, боевой бот подключён)
-Дата: 22.07.2026 00:40 CEST
+Версия: 2.5 (Фаза A + Hardening U1–U7 завершены на проде; Фаза B — следующая; проведён продуктовый аудит и инфра-фикс OOM бота)
+Дата: 22.07.2026 13:50 CEST
 Базируется на: `docs/01-concept.md`, `docs/06-data-model.md`, `docs/04-code-standards.md`, `AGENTS.md`
 
 > **Принцип:** фича встраивается в существующую модель данных, а не переписывает её.
@@ -618,7 +618,73 @@ class CharacterConfig:
 
 ---
 
-## 8.1. Hardening денежного контура (U1–U7)
+## 8.1. Продуктовый аудит и инфра-фиксы (22.07.2026)
+
+> **Преамбула.** После стабилизации Фазы A и U1–U7 проведён сквозной аудит
+> продa `169.58.52.78`. Цель — поймать баги, которые невидимы в unit/integration
+> тестах, но всплывают в проде: silent DB-failure, fake-success в логах, OOM-kill
+> контейнера бота на холодном старте, отсутствие ErrorBoundary на фронте, потеря
+> stdout из detached-контейнера. Аудит выявил 5 критичных проблем (все исправлены)
+> и набор жёлтых.
+
+### Что защитили
+
+| # | Где | Что было | Что стало | Эффект |
+|---|---|---|---|---|
+| **A1** | `apps/bot/bot/main.py:46` | `dp.shutdown.register(on_shutdown)` без обёртки → ворнинг «coroutine was never awaited» при graceful shutdown | Добавлены фабрики `_make_on_startup(bot, settings)` и `_make_on_shutdown(bot)`, симметричные `_make_on_startup`. Bot session теперь **гарантированно закрывается** при SIGTERM/SIGINT. |
+| **A2** | `apps/backend/app/services/bonus_service.py:131-134` | `try: await session.flush() except Exception: pass` — ошибка БД глохла, `bonus_applied=True` фиксировался без соответствующей `transactions`-строки → ночной integrity-check ловил ложные срабатывания | Удалён try/except. В тестах где сессии нет, метод просто скипает flush; в проде ошибка БД **всплывает** до rollback, integrity-check видит реальное состояние. |
+| **A3** | `apps/bot/bot/handlers/checkin.py:57` | `_send_to_backend` ловил `Exception` и возвращал `{"code": "backend_unreachable"}` — handler логировал `checkin_accepted` (log.info) даже когда backend никогда не получал запрос | Импорт `aiohttp` поднят на module level. `aiohttp.ClientError` ловится явно, прочие исключения пробрасываются. handler логирует `checkin_dispatch_failed` без ложного `checkin_accepted`. PII (`first_name`/`username`) убраны из лог-сообщений — только `user_id`. |
+| **A4** | `apps/frontend/src/app/App.tsx` | `<AppRouter />` без обёртки — один упавший компонент крашил всё Mini App | Создан `apps/frontend/src/shared/ui/ErrorBoundary.tsx` (class component, `getDerivedStateFromError` + `componentDidCatch`, fallback UI на design-system tokens). В `App.tsx` между `BrowserRouter` и `AppRouter` обёртка `<ErrorBoundary>`. |
+| **A5** | `infra/docker-compose.yml` (сервис `bot`) | `mem_limit: 320m`, `memswap_limit: 384m`, `cpus: 0.5` + `PYTHONDONTWRITEBYTECODE=1` в Dockerfile → контейнер падал в OOM на холодном старте aiogram: `oom-kill constraint=CONSTRAINT_MEMCG usage=327680kB limit=327680kB` в dmesg | `mem_limit: 768m`, `memswap: 1024m`, `cpus: 1.0`. `PYTHONDONTWRITEBYTECODE` убран — `.pyc`-кэш разрешён (aiogram + pydantic v2 строят много схем, без кэша холодный старт долог). Реальное потребление: **363 / 768 MiB (47%)**, есть запас. |
+
+### Диагностика, которая это вскрыла
+
+**На A5 (OOM бота)** впервые применён полный протокол — без догадок:
+
+1. `docker ps` → бот в `Up`-loop, рестартуется.
+2. `dmesg | grep -i oom` → подтверждение: `Memory cgroup out of memory: Killed process python pid=565658 anon-rss=322100kB limit=327680kB`.
+3. `py-spy dump --pid $PID` → процесс завис в `pydantic/_internal/_model_construction.py:685 complete_model_class` для `aiogram/types/__init__.py:881`. То есть **pydantic-схемы aiogram не помещались в 320m при генерации**.
+4. По докам aiogram changelog: _«pydantic 2.11 significantly reducing resource consumption»_ (за выходом за scope) → fix = увеличить mem_limit, убрать PYTHONDONTWRITEBYTECODE.
+
+**Все 5 фиксов зафиксированы в 2 коммитах:**
+
+- `d3adac9 fix(infra): raise bot container mem_limit to survive aiogram cold-start` — A5
+- `4366d3c fix(audit-1..4): bonus flush, checkin fake-success, bot shutdown wrapper, frontend ErrorBoundary` — A1–A4
+
+**Smoke на проде после фиксов:**
+
+| Endpoint | До аудита | После |
+|---|---|---|
+| `POST https://api.prideclub.fun/bot/webhook` | `Connection reset by peer` / 502 (бот в OOM-loop) | **200 за 17–127 мс** |
+| `GET  https://api.prideclub.fun/health` | 200 | 200 |
+| `GET  https://admin.prideclub.fun/admin.html` | недоступно (не залито) | **200** (залито в этой же сессии) |
+| `GET  https://admin.prideclub.fun/admin/v1/habits` (без auth) | — | **401 missing_init_data** (правильно) |
+
+### Что НЕ затронуто (намеренно)
+
+- **Не тронуты backend/worker Dockerfile** с `PYTHONDONTWRITEBYTECODE=1` —
+  они работают на проде, изменение лимита только в `bot.Dockerfile`.
+- **Pydantic версия не повышена** — это out of scope аудита,
+  потенциально можно снизить mem_limit обратно до 512m после отдельного PR.
+- **Не правили `docs/09-prod-readiness.md`** — задача не входила в аудит.
+
+### Чему научились (новое правило в Skill)
+
+В `.kilo/skills/habit-club-dev/SKILL.md` (локальная конфигурация проекта,
+не в git) добавлен раздел **«Research-First Protocol (Context7) — strictly
+mandatory»** как первая подсекция в Non-Negotiable Invariants. Главные тезисы:
+- **Никогда не гадать** API/key/поведение — идти в context7.
+- **Stack-trace first, hypotheses last** — порядок: reproduce → `py-spy` /
+  `strace` / `dmesg` / `docker inspect` → только потом фикс.
+- **Запрещены heuristics** вида «наверное OOM», «наверное unbuffered» —
+  каждая догадка должна проверяться инструментами. Конкретный запрещённый
+  пример в skill — те самые «py-spy показал frame в pydantic, поэтому
+  mem_limit», который **в случае OOM бота оказался правильным**, но в
+  следующий раз мог быть неправильным без dmesg-подтверждения.
+
+---
+
+## 8.2. Hardening денежного контура (U1–U7)
 
 > **Преамбула.** U1–U7 — это **не часть Фазы B**. Это серия укреплений денежного
 > контура, сделанных ПОСЛЕ деплоя Фазы A на прод и ДО старта Фазы B. Цель —
@@ -701,7 +767,9 @@ class CharacterConfig:
 
 ## 10. Порядок реализации (после подключения фронта к API)
 
-> **Статус актуален на 21.07.2026 22:30 CEST.** Реальное состояние vs план.
+> **Статус актуален на 22.07.2026 13:50 CEST.** Реальное состояние vs план,
+> с учётом всех правок 22.07.2026 (аудит, OOM-фикс бота, заливка админ-Mini App,
+> правило research-first в skill).
 
 ### Фаза A — Админский флоу клубов ✅ **DONE на проде (включая UI + инфру)**
 
@@ -721,6 +789,7 @@ class CharacterConfig:
 | 12 | Mini App админки | ✅ | `apps/frontend/src/admin/` (10 файлов): `AdminApp.tsx`, `router.tsx`, `main.tsx`, `hooks.ts`, `api/{client,index}.ts`, `components/{AdminHabitCard,Form}.tsx`, `pages/{HabitsListPage,HabitCreatePage}.tsx`. Запускается по `/admin.html`. |
 | 13 | Админский Telegram-бот | ✅ | Зарегистрирован `@pridead_bot` (id 8705592511, имя "PrideAdmin"). Token в `.env` как `BOT_TOKEN_ADMIN` (chmod 600). `/setdomain admin.prideclub.fun` + WebApp `https://admin.prideclub.fun/admin.html` подключены владельцем. |
 | 14 | **Критический фикс `bot_token_admin` в middleware** | ✅ | До фикса `/admin/v1/*` валидировал initData токеном основного `join_prideclub_bot` → 401 `invalid_init_data`. После фикса: `admin_bot_token = settings.bot_token_admin or settings.bot_token` в `app/core/middleware.py`. **124 backend теста passed.** |
+| 15 | **Заливка админ-Mini App на прод (22.07)** | ✅ | Локальные файлы были закоммичены в `ad0267b`, `scp` на `/app`, `docker compose up -d --force-recreate backend`, `docker compose build frontend --no-cache`. Smoke: `https://admin.prideclub.fun/` → 200 (admin shell), `/admin.html` → 200, `/admin/v1/habits` без initData → 401 (правильно), `/assets/admin-DE_GDbgh.js` → 200 + содержит `admin/v1` и `X-Telegram-Init-Data`. |
 
 **Результат Фазы A (полный цикл):**
 
@@ -765,10 +834,62 @@ class CharacterConfig:
 
 ### Итого
 
-- **Фаза A: ✅ DONE на backend + инфре + Mini App + боевом боте.** Owner может открыть админ-Mini App через `@pridead_bot` и управлять клубами из Telegram.
+- **Фаза A: ✅ DONE полностью** на backend + инфре + Mini App + боевом боте.
+  Owner открывает админ-Mini App через `@pridead_bot` и управляет клубами из Telegram.
 - **Hardening U1–U7: ✅ DONE на backend + проде**, коммит `b2bf2aa`.
+- **Аудит продa 22.07: ✅ DONE**, 5 критичных багов исправлено (раздел 8.2),
+  коммиты `d3adac9` (OOM-фикс бота), `4366d3c` (bonus/checkin/shutdown/ErrorBoundary),
+  `ad0267b` (заливка админ-Mini App).
 - **Фаза B: 🟡 шаг 1 наполовину** (поля `habits` есть, таблиц `user_stats`/`user_statuses` нет), остальное TODO. **~4-5 дней чистой работы** (без учёта подключения фронта).
 - Фронт Mini App для **пользователей** уже подключён к API. Для Фазы B новых страниц на фронте пока не сделано (отдельный шаг в плане).
+
+### Фаза B — Персонаж и характеристики 🔲 **Следующая работа** (~4-5 дней)
+
+| # | Шаг | Статус | Что есть на проде / что нужно |
+|---|---|---|---|
+| 1 | Backend каркас | 🟡 **частично** | Миграция `008_character_and_club_fields.py` накатана (alembic head = `008_character_and_club_fields`) — поля `habits.stat_name`, `stat_icon`, `stat_gain_per_checkin`, `stat_loss_per_miss`, `photo_url`, `telegram_invite_link`, `member_limit`, `curator_id` есть в БД с CHECK-ограничениями. **НЕ готово:** таблицы `user_stats`, `user_statuses`; миграция `009_create_user_stats_and_statuses.py`; `models/user_stats.py`, `models/user_status.py`; `repositories/user_stats_repository.py`; `core/constants.py:CharacterConfig`. |
+| 2 | Backend инкремент/декремент | 🔲 | `services/character_service.py` (`increment_on_checkin`, `decrement_on_penalty`) + хуки в `CheckinService.process_checkin` и `PenaltyService.apply_catch` / `close_catch_window`. `SELECT FOR UPDATE` через `lock_for_update` (U1/U4/U7 — паттерн уже применён в денежном контуре, переиспользуем). |
+| 3 | Backend API + статус + лидерборд | 🔲 | `api/v1/character.py` (`GET /character/me`), расширение `api/v1/leaderboard.py` (`GET /leaderboard/stat?habit_id=`), seed-миграция `010_user_statuses_seed.py`. |
+| 4 | Worker заморозки | 🔲 | `apps/worker/worker/tasks/freeze_inactive_stats.py` + `beat_schedule.py` cron в `FREEZE_CRON_HOUR_UTC=4`. Идемпотентность (повторный запуск — 0 изменений) — паттерн как у `close_season` после U7. |
+| 5 | Документация | 🔲 | `docs/06-data-model.md` (новые таблицы), `docs/01-concept.md` (геймификация). |
+| 6 | Frontend | ⏸ | Отложено до завершения шагов 1–4; пользовательский Mini App уже подключён к основному API (см. `apps/frontend/docs/STATUS.md`). |
+
+> **Сноска:** ссылка на `docs/09-prod-readiness.md:127-137` в шаге 6 устаревшая —
+> этот документ описывает состояние «до подключения фронта» и сам нуждается
+> в актуализации (отдельная задача). Текущее состояние: фронт Mini App
+> подключён к API.
+
+### Фаза C — Закрытие долгов из аудита 22.07 🟡 **Параллельно с Фазой B**
+
+В ходе аудита обнаружены 6 жёлтых проблем (не блокируют прод, но
+накапливаются). Стоит починить до того, как Фаза B добавит новые сервисы —
+иначе багфикс-стоимость вырастет.
+
+| # | Что | Решение |
+|---|---|---|
+| C1 | Дублирование `/app/.env` и `/app/infra/.env` | Выбрать один источник правды (рекомендуется `/app/infra/.env`, как его читает compose), остальное генерировать симлинком или скриптом в `deploy.sh` |
+| C2 | `/app` на сервере не git repo, правки летят через `scp` / `rsync` | `git init && git remote add origin <repo>`, чтобы `deploy.sh` мог `git pull` или хотя бы diff'ил перед `rsync` |
+| C3 | У админки нет `HabitEditPage` (PATCH-форма — заглушка "ComingSoon") | Доделать в рамках Фазы A: компонент `pages/HabitEditPage.tsx` + `pages/HabitEditForm.tsx` (есть заготовка, надо довести) |
+| C4 | У админки нет confirm-модалки для деструктивных операций (archive/restore) | Создать общий компонент `components/ConfirmModal.tsx` и встроить в `AdminHabitCard` |
+| C5 | У админки нет специального аудит-логирования поверх стандартного HTTP-лога | Расширить middleware: `logger.info("admin_action", admin_id, action, target, duration_ms)` — без PII |
+| C6 | Внешний nginx не имеет server-block для `api.prideclub.fun` (только `admin.*`/`app.*`/`db.*`); `/` отдаёт 404 | Добавить проксирование `/` → frontend, чтобы `api.prideclub.fun/index.html` возвращал shell Mini App, а не 404 |
+
+### Фаза D — Подключение фронта к API Фазы B 🟢 **После Фазы B**
+
+| # | Что | Оценка |
+|---|---|---|
+| 1 | Вкладка «📊 Характеристика» в `LeaderboardPage` (запрос `GET /api/v1/leaderboard/stat?habit_id=`) | 0.5 дня |
+| 2 | Экран «Мой персонаж» в `ProfilePage` (запрос `GET /api/v1/character/me`, отрисовка карточек с StatCard + StatusBadge) | 1–2 дня |
+| 3 | Level-up toast + haptic (`impact('medium')`) при пересечении порога | 0.5 дня |
+| 4 | Vitest инфра + smoke-тесты на основной фронт (отдельная задача из раздела 9 «Что НЕ делается») | 1 день |
+| 5 | `HabitEditPage` в админке (из C3) — после Фазы A.D1 | 1 день |
+
+### Порядок (что следующее)
+
+1. **Фаза C2 (git на сервере)** — низко висящий плод, 15 минут. Без него каждый фикс летит через scp и риск рассинхрона, как уже случилось сегодня.
+2. **Фаза C5 (admin audit log)** — 0.5 дня, важно до массового использования админки.
+3. **Фаза B1–B5** — 4–5 дней, основная новая функциональность.
+4. **Фаза C3, C4, D2, D3, D5** — параллельно или после B, как удобнее.
 
 ---
 
@@ -792,6 +913,24 @@ class CharacterConfig:
 ---
 
 ## 12. Changelog
+
+- **v2.5 (22.07.2026 13:50 CEST)** — продуктовый аудит продa + план следующих фаз:
+  - **Новый раздел 8.2** «Продуктовый аудит 22.07.2026» — задокументированы 5
+    критичных багов и их фиксы (A1 on_shutdown wrapper, A2 bonus silent fail,
+    A3 checkin fake-success, A4 frontend ErrorBoundary, A5 OOM бота).
+  - **Шаг 15 раздела 10** — заливка админ-Mini App на прод (commit `ad0267b`),
+    smoke всех endpoint'ов.
+  - **Новые разделы 10 «Фаза C» и «Фаза D»** — долги из аудита и подключение
+    фронта к API Фазы B. Конкретные задачи и оценка трудозатрат.
+  - **Skill `.kilo/skills/habit-club-dev/SKILL.md`** дополнен обязательным
+    разделом «Research-First Protocol (Context7) — strictly mandatory». Это
+    локальная конфигурация проекта, не в git. Главные тезисы: stack-trace
+    first, hypotheses last; никаких гаданий про API/key/поведение; сначала
+    context7, потом код.
+  - **Чему научились (O5)** — OOM-фикс бота был сделан через полный цикл:
+    `docker ps` → `dmesg | grep oom` → `py-spy dump` → контекст в changelog
+    aiogram про pydantic 2.11 → фикс лимитов. Если бы пропустили хоть один
+    шаг — могли бы починить не то.
 
 - **v2.4 (22.07.2026 00:40 CEST)** — завершение Фазы A UI/инфры:
   - **Шаги 7-14 раздела 10** перенесены из 🔲 в ✅. Фаза A теперь полный цикл: backend + инфра + Mini App + Telegram-бот.
