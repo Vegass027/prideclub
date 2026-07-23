@@ -345,22 +345,39 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
       <FieldRow label="Фото клуба">
         <div className="flex flex-col gap-3">
           {form.photo_url ? (
-            <div className="mt-3 flex items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2">
+            <label
+              className="group relative flex cursor-pointer items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2 transition hover:border-white/30"
+              aria-label="Нажмите, чтобы заменить фото"
+            >
               <img
                 src={form.photo_url}
                 alt="Превью"
                 className="block max-h-80 w-full object-contain"
                 loading="lazy"
               />
-              <button
-                type="button"
-                onClick={() => set("photo_url", "")}
-                className="absolute right-2 top-2 min-h-[32px] rounded-card bg-black/60 px-3 py-1 text-xs font-medium text-white transition hover:bg-black/80"
-                aria-label="Удалить фото"
-              >
-                Удалить
-              </button>
-            </div>
+              <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-card bg-black/0 text-sm font-medium text-white opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100">
+                {uploadPhoto.isPending ? "Загружаю..." : "Заменить фото"}
+              </span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp"
+                className="sr-only"
+                disabled={uploadPhoto.isPending}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const res = await uploadPhoto.mutateAsync(file);
+                    set("photo_url", res.url);
+                  } catch (err) {
+                    // eslint-disable-next-line no-alert
+                    alert(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </label>
           ) : (
             <label
               className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed transition ${
@@ -403,6 +420,15 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
                 ? uploadPhoto.error.message
                 : "Ошибка загрузки"}
             </p>
+          )}
+          {form.photo_url && (
+            <button
+              type="button"
+              onClick={() => set("photo_url", "")}
+              className="self-start min-h-[36px] rounded-card border border-white/10 bg-surface px-3 py-1.5 text-xs font-medium text-muted transition hover:border-danger/40 hover:text-danger"
+            >
+              Удалить фото
+            </button>
           )}
         </div>
       </FieldRow>
