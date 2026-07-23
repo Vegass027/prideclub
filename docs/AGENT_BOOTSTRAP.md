@@ -5,7 +5,7 @@
 > **как коммитить и деплоить**, и — самое важное — **как поддерживать доки в
 > актуальном состоянии после каждой задачи**.
 >
-> Snapshot от 2026-07-22.
+> Snapshot от 2026-07-23.
 
 ## 0. Если нужны серверные операции (SSH)
 
@@ -144,9 +144,36 @@ Host nginx:
   ```
   Без этих флагов коммит уйдёт от `Dim41g / ivanov1331d@gmail.com` (твой
   локальный `~/.gitconfig`) — ломается история авторства.
-- **HEAD коммиты:** `c7f8d87 feat(admin): archive→permanent-delete + admin Mini App hardening` (2026-07-22).
+- **HEAD коммиты (snapshot 2026-07-23):**
+  - `main` — `bd9fd76 docs(tz): v3.1 — синхронизация с HEAD bdfd9c9`
+  - `feature/topic-scoped-checkin` — `0d0893a docs: lint-zero iteration — Annotated DI pattern + prod snapshot` (**23 коммита впереди main**, содержит весь прогресс с 2026-07-22: topic-scoped чек-ины + multi-proof_types + bot pre-filter + lint-zero итерация)
 - **`git push origin main`** — после явного "ок" пользователя. Не пушить самовольно.
 - **SSH-пароль НИКОГДА не коммитить**, даже в `docs/`. Только в `~/.config/kilo/privichki-bootstrap.md` (вне репо).
+
+> ⚠️ **Про «расхождение веток» — нормальный git-flow, не баг.**
+>
+> `feature/topic-scoped-checkin` живёт как рабочая ветка и **уходит вперёд main**
+> на ~десятки коммитов по мере итераций (topic-scoped чек-ины, multi-proof_types,
+> bot pre-filter, lint-zero, и т.д.). Это **намеренно**: каждая итерация —
+> отдельная фича, отдельная ветка, отдельный push в `origin/feature/*`. В `main`
+> ничего не попадает, пока юзер явно не скажет «мерджи в main».
+>
+> Если ты (новый агент) видишь «X коммитов впереди main» — это не ошибка,
+> не «потерянный код», не «незапушенное состояние». Это **нормальное состояние
+> рабочей feature-ветки**. Не пытайся «починить» — не мерджи и не пуши в main
+> без явного ок юзера. Просто продолжай работу в feature-ветке.
+>
+> **Как проверить синхронность** трёх точек (локально / origin / сервер) перед
+> любой серьёзной задачей:
+> ```bash
+> # Все три должны давать один хэш:
+> git rev-parse HEAD
+> git rev-parse origin/feature/topic-scoped-checkin
+> ssh root@169.58.52.78 "cd /app/apps/backend && find . -name '*.py' -exec sha256sum {} \;" | sort > /tmp/server.txt
+> find apps/backend -name '*.py' -exec sha256sum {} \; | sort > /tmp/local.txt
+> diff /tmp/local.txt /tmp/server.txt
+> ```
+> Если `diff` пустой — всё идентично, можно работать.
 
 ## 7. Локальная разработка (команды)
 
@@ -207,7 +234,7 @@ sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{
 - ❌ `rm -rf /app/**`, `docker system prune`, изменения `.env` без ок
 - ❌ `docker cp` для правки кода (пропадёт при recreate)
 
-## 9. Что не работает на проде (snapshot 2026-07-22)
+## 9. Что не работает на проде (snapshot 2026-07-23)
 
 - ❌ **Платежи = мок.** `PaymentModal.setTimeout(1200)`, `TopUpModal.alert()`.
   Бот не вызывает `bot.send_invoice`, в `.env` нет `PROVIDER_TOKEN`,
