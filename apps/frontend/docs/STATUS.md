@@ -1,7 +1,9 @@
 # Frontend Status — что сделано и что работает
 
-> Snapshot от 2026-07-22. Включает **Admin Mini App** (введено в коммите `ad0267b`).
-> Vite обновлён с 5 до 6. **Платежи = мок на фронте** (`PaymentModal.setTimeout`,
+> Snapshot от 2026-07-23. Включает **topic-scoped чек-ины** (миграции 010/011,
+> ветка `feature/topic-scoped-checkin`), **третий топик** для чата клуба,
+> кнопки «🎬 Сделать чек-ин» / «💬 Перейти в чат» / «👋 Присоединиться к клубу»
+> и тёмный фон Mini App. Платежи = мок на фронте (`PaymentModal.setTimeout`,
 > `TopUpModal.alert`), бот не вызывает `bot.send_invoice`. См.
 > [09-prod-readiness.md](../../../docs/09-prod-readiness.md).
 
@@ -67,10 +69,10 @@ apps/frontend/src/
 
 | Path | Страница | Назначение |
 |------|----------|------------|
-| `/onboarding` | OnboardingPage | Редирект: 1 клуб → `/habits/:id/today`, иначе → `/my-habits` |
+| `/onboarding` | OnboardingPage | Редирект: 1 клуб → `/habits/:id/today`, иначе → `/profile` |
 | `/marketplace` | MarketplacePage | Каталог клубов, вступление через **мок-PaymentModal** |
-| `/my-habits` | MyHabitsPage | Список клубов, в которых состоит юзер |
-| `/habits/:id/today` | TodayPage | Статус чек-ина на сегодня |
+| `/my-habits` | (редирект) | Старый URL → `/profile`. Удалено как дубликат «Моих клубов» в `/profile` |
+| `/habits/:id/today` | TodayPage | Статус чек-ина на сегодня + секция «Клуб в Telegram» |
 | `/habits/:id/members` | MembersPage | Участники + кнопка «спалить» |
 | `/habits/:id/leaderboard/:tab` | LeaderboardPage | Лидерборд клуба (streak/catches/shame) |
 | `/leaderboards` | GlobalLeaderboardPage | Группированный по клубам рейтинг, топ-3 в каждом |
@@ -98,27 +100,36 @@ apps/frontend/src/
 - Кнопка «Подробнее» раскрывает описание.
 
 ### ✅ MyHabits
-- Список клубов юзера из `GET /me/habits`.
-- Карточка: title + description + статус активности.
-- «Открыть клуб →» → Today.
-- Пусто: CTA «Выбрать клуб» → Marketplace.
+- Удалена как отдельная страница 2026-07-23 (дублировала «Мои клубы» в `/profile`).
+- Старый URL `/my-habits` редиректит на `/profile`.
+- «Мои клубы» теперь живут только на странице профиля.
 
 ### ✅ Today (внутри клуба)
 - Hero-карточка с описанием привычки + окно чек-ина.
 - `StatusBadge`: ожидает / принят / пропущен / не в окне.
-- Кнопки: «Сменить клуб» (если клубов >1), «Открыть лидерборд».
-- Back-кнопка `PageHeader.backTo` → `/profile` (если клубов ≤1) или `/my-habits`.
+- **Топик-фильтр чек-инов (миграция 010)**: кнопка «🎬 Сделать чек-ин» появляется
+  если у клуба задан `checkin_topic_thread_id`. Открывает топик чек-инов через
+  `openCheckinTopic(chat_id, thread_id)`. URL формируется как
+  `https://t.me/c/<short_chat_id>/<thread_id>` (без префикса `-100`).
+- **Третий топик (миграция 011)**: кнопка «💬 Перейти в чат» появляется если
+  задан `chat_topic_thread_id`. Открывает топик общего чата участников.
+- **Секция «Клуб в Telegram»**:
+  - Если `membership.status === "active"` → disabled-кнопка «❤️ Вы состоите в клубе»
+    + «💬 Открыть группу» (если есть `telegram_invite_link`).
+  - Иначе → «👋 Присоединиться к клубу» (открывает `telegram_invite_link` или
+    корневую ссылку на группу).
+- Back-кнопка `PageHeader.backTo` → `/profile`.
 
 ### ✅ Members (внутри клуба)
 - Список участников с Avatar (md).
 - Streak-счётчик и поимки у каждого.
 - Кнопка «Спалить» → `POST /catch`.
-- Back → `/profile` или `/my-habits`.
+- Back → `/profile`.
 
 ### ✅ Leaderboard (внутри клуба)
 - 3 вкладки: 🔥 Серии / 🎯 Ловцы / 💀 Позор.
 - Полный список участников с медалями (🥇🥈🥉).
-- Back → `/profile` или `/my-habits`.
+- Back → `/profile`.
 
 ### ✅ Global Leaderboard (рейтинг)
 - 3 вкладки: 🔥 Серии / 🎯 Ловцы / 💀 Позор.
@@ -145,8 +156,12 @@ apps/frontend/src/
 - **Owner-gate:** через `OWNER_TELEGRAM_ID` в `core/middleware.py`.
 - **Функционал:**
   - `HabitsListPage` — список клубов с фильтрами **Активные / Скрытые / Архив** (фильтр "Все" удалён).
-  - `HabitCreatePage` — форма создания клуба (title, description, photo upload, окно чек-ина, цена, штраф, timezone, proof_type).
-  - `HabitEditForm` — редактирование существующего клуба.
+  - `HabitCreatePage` — форма создания клуба. Поля **обязательны**:
+    ссылки на топики чек-инов, уведомлений и чата клуба
+    (`https://t.me/c/<chat_id>/<thread_id>`). Также: `telegram_invite_link`,
+    `chat_id`, `photo upload`, окно чек-ина, цена, штраф, timezone, proof_type.
+  - `HabitEditForm` — редактирование существующего клуба, ссылки на топики
+    опциональны (но все три должны различаться и быть в одной группе).
   - `AdminHabitCard` — карточка с toggle is_active, кнопками **delete / restore / permanent delete**.
   - `uploads.ts` API — загрузка фото (`POST /admin/v1/uploads`), файл попадает в volume `club_uploads` и отдаётся nginx'ом.
 
@@ -270,13 +285,28 @@ CI:
 
 ---
 
-## Метрики (последний локальный билд, 2026-07-22)
+## Метрики (последний локальный билд, 2026-07-23)
 
-- **Bundle**: `index-*.js` ~309 KB (gzip ~102 KB), `admin-*.js` ~27 KB (gzip ~7 KB),
-  `main-*.js` ~39 KB (gzip ~10 KB), `index-*.css` ~14 KB (gzip ~4 KB).
-- **Страниц user Mini App**: 8 (Onboarding, Marketplace, MyHabits, Today, Members, Leaderboard, GlobalLeaderboard, Profile).
+- **Bundle**: `index-*.js` ~310 KB (gzip ~102 KB), `admin-*.js` ~47 KB (gzip ~12 KB),
+  `main-*.js` ~40 KB (gzip ~11 KB), `index-*.css` ~18 KB (gzip ~5 KB).
+- **Страниц user Mini App**: 7 (Onboarding, Marketplace, Today, Members, Leaderboard, GlobalLeaderboard, Profile). `MyHabitsPage` удалена 2026-07-23.
 - **Страниц Admin Mini App**: 3 (HabitsListPage, HabitCreatePage, HabitEditForm).
 - **Компонентов UI**: ~13 (`shared/ui/`).
 - **Хуков**: ~11 (user) + 5 admin-хуков.
 - **TS strict**: ✅.
 - **Lint (eslint)**: ✅.
+
+### Изменения этой итерации (2026-07-23)
+
+- **Topic-scoped чек-ины**: миграции 010, 011 → топики чек-инов, уведомлений, чата клуба.
+  Бот фильтрует по `message_thread_id`. Кнопки «🎬 Сделать чек-ин» / «💬 Перейти в чат»
+  на `TodayPage` и в карточках клубов.
+- **Секция «Клуб в Telegram»**: показывает состояние членства («❤️ Вы состоите в клубе»)
+  или CTA «👋 Присоединиться к клубу».
+- **Удалена страница `/my-habits`** — дублировала «Мои клубы» в `/profile`.
+- **Тёмный фон Mini App**: новый файл `telegram-bg.ts` с side-effect импортом,
+  фиксирует `setHeaderColor/setBackgroundColor/setBottomBarColor("#0F1115")`
+  на загрузке, чтобы фон не моргал белым.
+- **Поле `telegram_invite_link` в Admin Mini App** — обязательное для Invite-кнопки.
+- **Парсер ссылок Telegram** (`core/telegram_links.py`): нормализует короткий `chat_id`
+  в Bot API-форму (`-100<short_id>`).

@@ -178,16 +178,21 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 
 ## 4. Поток обработки чек-ина
 
-1. Пользователь отправляет кружок в чат клуба.
+1. Пользователь отправляет кружок в чат клуба (или в топик форума, если
+   `checkin_topic_thread_id` задан — см. §10).
 2. Telegram отправляет webhook-событие на Bot Gateway
    (`https://api.prideclub.fun/bot/webhook`).
-3. Bot Gateway валидирует базовые параметры (chat_id, тип сообщения, membership
-   пользователя, попадание в `checkin_window`, медиа — `proof_validator.py`)
-   и **сам НЕ кладёт в Redis** — шлёт `POST /internal/checkins/process` на backend.
+3. Bot Gateway валидирует базовые параметры (chat_id, `message_thread_id`, тип
+   сообщения, membership пользователя, попадание в `checkin_window`, медиа —
+   `proof_validator.py`) и шлёт `POST /internal/checkins/process` на backend с
+   `message_thread_id` в payload.
 4. Backend (handler `internal_checkins.py`) кладёт задачу в Celery через
    `send_task("checkin", payload={...})` (`services/celery_producer.py`).
 5. Worker (`worker.tasks.process_checkin.run`) забирает задачу:
    - берёт `membership` под `SELECT ... FOR UPDATE`;
+   - **топик-фильтр**: если `habit.checkin_topic_thread_id` задан и
+     `message_thread_id != checkin_topic_thread_id`, бросает
+     `CheckinWrongTopicError` → HTTP 422, без побочных эффектов;
    - валидирует медиа (тип, длительность, **отклоняет forwarded**);
    - пишет строку в `checkins` со статусом `done` (уникальный индекс
      `(membership_id, date)` — один чек-ин в сутки);
@@ -281,6 +286,8 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 
 ## 9. Известные проблемы и долги (snapshot 2026-07-22)
 
+- (см. ниже — обновлено 2026-07-23)
+
 | Что | Где | Статус |
 |---|---|---|
 | Платежи мок | `PaymentModal.tsx`, `TopUpModal.tsx` | Мок, Telegram Payments не подключён |
@@ -293,3 +300,72 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов, сегодня) vs `SELECT count(*) FROM habits` | Clubs не созданы, POST /admin/v1/habits не отрабатывал — расследовать |
 | `SERVICE_TOKEN_TTL_SECONDS=60`, `INIT_DATA_MAX_AGE_SECONDS=86400` | `.env` | Стандартно, см. `core/constants.py` |
 | Admin Mini App `OWNER_TELEGRAM_ID=0` по умолчанию | `docker-compose.yml` | Без явного ID в env owner-gate пускает никого — правильно. |
+
+---
+
+## 10. Topic-scoped чек-ины и уведомления (миграции 010, 011)
+
+> Реализовано 2026-07-23. Детальная схема — `docs/06-data-model.md` §6.
+
+### 10.1. Проблема
+
+Клубы живут в **супергруппах с включённым режимом форумов (топиков)**. Без
+фильтра участники могли отправлять кружки в любой топик, а бот принимал их все —
+это нарушает контракт «чек-ин только в одном месте». Также не было удобного
+места для публикации уведомлений о ловле — они шли в общий чат и смешивались
+с обсуждением.
+
+### 10.2. Решение
+
+Каждый клуб привязывается к **трём топикам** в одной супергруппе:
+
+1. **Топик чек-инов** (`habits.checkin_topic_thread_id`). Бот принимает только
+   сообщения из этого топика. Сообщения из General или других топиков → код
+   `not_checkin_topic` (HTTP 422), без записи в `checkins`.
+2. **Топик уведомлений** (`habits.notifications_topic_thread_id`). Сюда бот
+   публикует события ловли (`👨🏽‍🦰 X словил(а) 👨🏽‍🦰 Y, 💸 N ₽`) и штрафов за
+   пропуск (`⏰ Окно закрыто`). Топик обязателен для админа, но
+   технически может быть NULL (тогда уведомления идут в General).
+3. **Топик чата клуба** (`habits.chat_topic_thread_id`). Кнопка «💬 Перейти в чат»
+   в User Mini App открывает именно этот топик — отдельное место для переписки
+   участников, не пересекающееся с чек-инами и уведомлениями.
+
+### 10.3. Связь с антифродом
+
+Topic-scoped фильтр дополняет существующие антифрод-механизмы (`docs/06-data-model.md` §4):
+
+- Уникальный индекс `(membership_id, date)` по-прежнему гарантирует один чек-ин в день.
+- Forwarded-сообщения по-прежнему отклоняются (`proof_validator.py`).
+- Топик-фильтр не зависит от типа медиа — он работает по `message_thread_id`.
+
+### 10.4. Где меняется код
+
+| Слой | Файл | Что |
+|---|---|---|
+| Миграции | `apps/backend/alembic/versions/010_habit_topics.py`, `011_habit_chat_topic.py` | Колонки + partial btree |
+| Модель | `apps/backend/app/models/habit.py` | Поля `checkin_topic_thread_id`, `notifications_topic_thread_id`, `chat_topic_thread_id` |
+| Парсер | `apps/backend/app/core/telegram_links.py` | Нормализация `chat_id` из короткой формы ссылки в Bot API-форму |
+| Репозиторий | `apps/backend/app/repositories/habit_repository.py` | `get_by_chat_and_thread()` — для дедупликации топиков |
+| Сервис | `apps/backend/app/services/habit_service.py` | Валидация трёх топиков на create/update, `code=habit_topics_must_differ`, `code=habit_topic_duplicate` |
+| Сервис | `apps/backend/app/services/checkin_service.py` | Фильтр `message_thread_id`, `code=not_checkin_topic` |
+| Сервис | `apps/backend/app/services/notification_service.py` | Публикация в топик уведомлений через прямой Bot API |
+| Worker | `apps/worker/worker/tasks/process_checkin.py` | Прокидывает `message_thread_id` в сервис |
+| Worker | `apps/worker/worker/tasks/process_penalty.py` | После `commit()` шлёт `notification_service.notify_catch(...)` |
+| Worker | `apps/worker/worker/tasks/close_catch_window.py` | После `commit()` шлёт `notification_service.notify_window_closed(...)` |
+| Bot | `apps/bot/bot/handlers/checkin.py` | Прокидывает `message.message_thread_id` в payload |
+| Admin Mini App | `apps/frontend/src/admin/pages/HabitCreatePage.tsx`, `HabitEditForm.tsx` | Три поля для топик-ссылок + валидация |
+| User Mini App | `apps/frontend/src/shared/telegram/topicLink.ts` | `buildTopicLink(chat_id, thread_id)` отбрасывает `-100` префикс |
+| User Mini App | `apps/frontend/src/pages/MyHabits/MyHabitsPage.tsx` | Кнопки «Сделать чек-ин» / «Перейти в чат» на карточках |
+| User Mini App | `apps/frontend/src/pages/Today/TodayPage.tsx` | Кнопки + секция «Клуб в Telegram» |
+
+### 10.5. UX-инварианты
+
+- Доменная ссылка формируется как `https://t.me/c/<short_id>/<thread_id>`, не
+  `https://t.me/c/-100<short_id>/<thread_id>`. Telegram не принимает Bot API-форму
+  в URL, только короткую.
+- Кнопка «🎬 Сделать чек-ин» появляется только если `checkin_topic_thread_id` задан
+  и `chat_id != 0`. Иначе — fallback на «Открыть чат клуба».
+- Кнопка «💬 Перейти в чат» появляется только если `chat_topic_thread_id` задан.
+- Секция «Клуб в Telegram»: если `membership.status === "active"` — disabled-кнопка
+  «❤️ Вы состоите в клубе»; иначе — CTA «👋 Присоединиться к клубу».
+

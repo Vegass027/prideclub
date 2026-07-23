@@ -1,8 +1,9 @@
 # 06 — Модель данных
 
-> Snapshot от 2026-07-22. Схема таблиц и антифрод актуальны. **Список миграций
-> расширен до 9** (000 → 009), см. §3. Финансовая идемпотентность — через
-> уникальные индексы, см. §5.
+> Snapshot от 2026-07-23. Схема таблиц и антифрод актуальны. **Список миграций
+> расширен до 11** (000 → 011), см. §3. Финансовая идемпотентность — через
+> уникальные индексы, см. §5. Topic-scoped чек-ины и третий топик для чата
+> клуба — см. §6 (новый раздел).
 
 Финальная схема БД, миграции, антифрод и идемпотентность. Все решения здесь — результат
 6 итераций ревью, готовы к применению.
@@ -31,7 +32,7 @@
 |---|---|---|
 | id | UUID | |
 | title | VARCHAR | Название |
-| chat_id | BIGINT | ID чата клуба в Telegram |
+| chat_id | BIGINT | ID чата клуба в Telegram (Bot API-форма, для супергруппы = `-100<short_id>`) |
 | checkin_window_start | TIME | Начало окна чек-ина |
 | checkin_window_end | TIME | Конец окна чек-ина |
 | timezone | VARCHAR | **TZ клуба** (не пользователя) — для расчёта "сегодня" |
@@ -39,9 +40,17 @@
 | price_month | INT | Стоимость подписки |
 | proof_type | ENUM | `video_note` / `photo` / `text` |
 | prize_pool | INT | Текущий призовой фонд клуба |
+| checkin_topic_thread_id | BIGINT NULL | `message_thread_id` топика форума для чек-инов (миграция 010) |
+| notifications_topic_thread_id | BIGINT NULL | `message_thread_id` топика форума для уведомлений о ловле и штрафах (миграция 010) |
+| chat_topic_thread_id | BIGINT NULL | `message_thread_id` топика форума для общего чата участников (миграция 011) |
 
 **Правило:** "сегодня" и дедлайн считаются в TZ клуба, а не пользователя. Это устраняет
 путаницу при переезде и делает дедлайн одинаковым для всех участников клуба.
+
+**Topic-scoped (миграции 010, 011).** Для супергруппы с включённым режимом форумов бот
+принимает чек-ины только из топика `checkin_topic_thread_id`. Сообщения из General или
+других топиков получают код `not_checkin_topic` (HTTP 422) и не влияют на бизнес-логику.
+См. §6.
 
 ### memberships
 | Поле | Тип | Описание |
@@ -192,7 +201,7 @@ PRIMARY KEY (user_id, offer_version_id)
 
 ## 3. Полный набор миграций
 
-> На проде применена голова `009_chat_id_partial_unique` (см.
+> На проде применена голова `011_habit_chat_topic` (см.
 > [09-prod-readiness.md](09-prod-readiness.md) §1.1). Файлы миграций лежат в
 > `apps/backend/alembic/versions/`. Для upgrade/downgrade используется
 > `make migrate` / `make migrate-test`.
@@ -209,6 +218,8 @@ PRIMARY KEY (user_id, offer_version_id)
 | `007_habit_admin_fields` | `007_habit_admin_fields.py` | Поля для Admin Mini App: `habits.photo_url`, `habits.telegram_invite_link`, `habits.member_limit`, `habits.curator_id`, `habits.stat_*` |
 | `008_character_and_club_fields` | `008_character_and_club_fields.py` | `habits.stat_name`, `habits.stat_icon`, `habits.stat_gain_per_checkin`, `habits.stat_loss_per_miss` — характеристики и персонаж (TZ) |
 | `009_chat_id_partial_unique` | `009_chat_id_partial_unique.py` | Частичный UNIQUE-индекс на `habits.chat_id` (только `WHERE chat_id IS NOT NULL`) — гарантирует, что у двух активных клубов не может быть одного Telegram-чата |
+| `010_habit_topics` | `010_habit_topics.py` | `habits.checkin_topic_thread_id` и `habits.notifications_topic_thread_id` (BIGINT NULL) + partial btree-индексы. Включает топик-фильтр чек-инов. |
+| `011_habit_chat_topic` | `011_habit_chat_topic.py` | `habits.chat_topic_thread_id` (BIGINT NULL) + partial btree-индекс. Третий топик для общего чата участников клуба. |
 
 > SQL-блоки 000–004 в старой версии этого документа устарели (не отражают 005–009).
 > Реальный код — в `apps/backend/alembic/versions/`.
@@ -365,7 +376,86 @@ async def apply_catch_bonus(self, catcher_membership_id: UUID, penalty_id: UUID)
 
 ---
 
-## 6. BonusService
+## 6. Topic-scoped чек-ины (forum supergroups)
+
+> Реализовано в миграциях 010 (`checkin_topic_thread_id`,
+> `notifications_topic_thread_id`) и 011 (`chat_topic_thread_id`).
+
+### 6.1. Три топика клуба в одной супергруппе
+
+Каждый клуб, живущий в супергруппе с включённым режимом форума (топиков),
+использует **три топика**:
+
+| Топик | Поле | Назначение |
+|---|---|---|
+| Чек-ины | `checkin_topic_thread_id` | Сюда участники отправляют видео-кружки / фото / текст. Бот принимает только сообщения из этого топика. |
+| Уведомления | `notifications_topic_thread_id` | Сюда бот публикует события ловли (`👨🏽‍🦰 X словил(а) 👨🏽‍🦰 Y, 💸 N ₽`) и штрафов за пропуск (`⏰ Окно закрыто`). |
+| Чат клуба | `chat_topic_thread_id` | Общая переписка участников. Кнопка «💬 Перейти в чат» в User Mini App открывает именно этот топик. |
+
+Все три `thread_id` хранятся в **Bot API-форме** `int` (не строкой), для супергруппы
+`chat_id` в БД равен `-100<short_id>`. Парсер в `app/core/telegram_links.py` принимает
+обе формы ссылок (`https://t.me/c/<short_id>/<thread>` и `https://t.me/c/-100.../<thread>`)
+и нормализует в Bot API-форму.
+
+### 6.2. Правила валидации (HabitService)
+
+При создании/редактировании клуба:
+
+1. **Все три ссылки обязательны** в `create()`; в `update()` — опциональные.
+2. `chat_id` в каждой топик-ссылке должен совпадать с `habits.chat_id`.
+3. `thread_id` всех трёх топиков должны различаться (код `habit_topics_must_differ`).
+4. Никакая пара `(chat_id, thread_id)` не должна быть привязана к другому клубу (код `habit_topic_duplicate`).
+5. В `update()` если `habit.chat_id == 0`, первая валидная топик-ссылка автоматически привязывает чат.
+
+### 6.3. Антифрод: фильтр по топику
+
+В `CheckinService.process_checkin` (после миграции 010):
+
+```
+if (habit.checkin_topic_thread_id is not None
+    and message_thread_id != habit.checkin_topic_thread_id):
+    raise CheckinWrongTopicError()
+```
+
+`message_thread_id` приходит из payload бота (`aiogram` `Message.message_thread_id`,
+None для General). Бот прокидывает поле в `/internal/checkins/process` → Celery → backend.
+
+Результат: сообщения из чужих топиков (или из General при заданном топике чек-инов)
+отбрасываются с кодом `not_checkin_topic` (HTTP 422), без побочных эффектов.
+
+### 6.4. Публикация уведомлений о ловле
+
+`apps/backend/app/services/notification_service.py` отправляет сообщения в топик
+`notifications_topic_thread_id` через прямой HTTP-запрос к Telegram Bot API
+(`aiohttp.ClientSession`, без импорта `aiogram`). Best-effort: ошибки сети логируются,
+бизнес-флоу не падает.
+
+Вызывается:
+- в `worker/tasks/process_penalty.py` после успешного `apply_catch` и `commit()`;
+- в `worker/tasks/close_catch_window.py` после `apply_window_expired`.
+
+### 6.5. UX в Mini App
+
+- **Admin Mini App** (`HabitCreatePage`, `HabitEditForm`): три поля для ссылок на топики.
+  Валидация формата + дедупликация. Плейсхолдеры «Вставь ссылку на топик» (без шаблона).
+- **User Mini App**: три кнопки на странице клуба (`TodayPage`) и в карточках клубов.
+  «🎬 Сделать чек-ин» → `openCheckinTopic(chat_id, checkin_topic_thread_id)`;
+  «💬 Перейти в чат» → `openCheckinTopic(chat_id, chat_topic_thread_id)`;
+  «❤️ Вы состоите в клубе» (disabled) или «👋 Присоединиться к клубу» в секции
+  «Клуб в Telegram» в зависимости от `membership.status`.
+- **Доменный URL** формируется как `https://t.me/c/<short_chat_id>/<thread_id>` —
+  Telegram не принимает `-100<short_id>` в ссылках, только короткий id.
+  `buildTopicLink` в `apps/frontend/src/shared/telegram/topicLink.ts` отбрасывает `-100`.
+
+### 6.6. Откат
+
+Миграции 010 и 011 additive-only: `downgrade()` просто дропает колонки и индексы.
+Перед rollback стоит убедиться, что в колонках нет ценных данных (для существующих
+клубов до миграции все три `thread_id` остаются NULL — режим «без топиков»).
+
+---
+
+## 7. BonusService
 
 ```python
 class BonusService:
@@ -403,7 +493,7 @@ class BonusService:
 
 ---
 
-## 7. Сезоны и призы
+## 8. Сезоны и призы
 
 ### Распределение призов
 Полностью автоматическое через cron `close_season` по `prize_rules_snapshot`:
@@ -455,7 +545,7 @@ def validate_prize_rules(rules: list[PrizeRule]):
 
 ---
 
-## 8. Cron-задачи
+## 9. Cron-задачи
 
 | Задача | Расписание | Действие |
 |---|---|---|
@@ -468,7 +558,7 @@ def validate_prize_rules(rules: list[PrizeRule]):
 
 ---
 
-## 9. ФЗ-152
+## 10. ФЗ-152
 
 - **Перечень ПДн:** Telegram `user_id`, `username`, `first_name` — фиксируется в политике.
 - **Согласие:** при первом платеже через `showConfirm`, версия оферты логируется в

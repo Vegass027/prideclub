@@ -1,6 +1,6 @@
 # Habit Club — Статус бэкенда и план до прода
 
-> Дата среза: 2026-07-22 (обновлено после T1–T7 hardening, до начала Фазы B)
+> Дата среза: 2026-07-23 (обновлено после фичи topic-scoped чек-ины и третий топик)
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
 > Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
 > `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
@@ -31,7 +31,7 @@
 | 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
-| 9 | **PostgreSQL** (9 миграций, расширения) | ✅ Работает | `000_extensions` → `009_chat_id_partial_unique` |
+| 9 | **PostgreSQL** (11 миграций, расширения) | ✅ Работает | `000_extensions` → `011_habit_chat_topic` (миграции 010/011 — topic-scoped чек-ины и третий топик) |
 | 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py`. T1: `parse_rate_limit_spec` в `core/utils.py`. |
 | 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` + T2 `SuspiciousPairsRepository.lookup_flagged` |
 | 12 | **Season prize distribution** | ✅ Работает | `close_season` через worker |
@@ -157,6 +157,7 @@ _Обновлено после T1–T7 (22.07.2026). Полная таблица
 | `_remap_postgres_types_for_sqlite` мутирует типы колонок | `apps/worker/tests/conftest.py:98-145` + `apps/backend/tests/conftest.py` | Перенесено в Фазу B (T6/T8): добавлять новые модели (`UserStats`, `UserStatus`) в whitelist при коммите миграции 009. |
 | Legacy `Any` без импорта в `PenaltyService.__init__` | `penalty_service.py:48` | Перенесено в T11 (deferred до после Фазы B). Частично закрыто через T2 — `_suspicious_service: Any` ушёл, остался в одном сигнатуре. |
 | Admin Mini App интеграция — пустые/default-value на UI | `apps/frontend/src/admin/pages/*` | Сделано (commit `ad0267b`), но UI минимум — после Фазы B будет polish. |
+| ~~Topic-scoped чек-ины~~ | — | ✅ Закрыто 2026-07-23: миграции 010 (`checkin_topic_thread_id`, `notifications_topic_thread_id`) и 011 (`chat_topic_thread_id`) применены на проде. Бот фильтрует по `message_thread_id`, штрафы публикуются в топик уведомлений, кнопки «🎬 Сделать чек-ин» и «💬 Перейти в чат» открывают нужные топики. |
 
 ---
 
