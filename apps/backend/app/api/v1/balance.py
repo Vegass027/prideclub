@@ -3,7 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from sqlalchemy import select
 
-from app.core.deps import SessionDep, TelegramUserDbDep
+from app.api.v1.users import TelegramUserDbDep
+from app.core.deps import SessionDep
 from app.models.membership import Membership
 from app.models.transaction import Transaction
 

@@ -4,7 +4,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.core.deps import SessionDep, TelegramUserDbDep
+from app.api.v1.users import TelegramUserDbDep
+from app.core.deps import SessionDep
 from app.core.exceptions import HabitArchivedError, HabitInactiveError
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository

@@ -6,8 +6,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from app.api.v1.users import TelegramUserDbDep
 from app.core.config import get_settings
-from app.core.deps import SessionDep, TelegramUserDbDep
+from app.core.deps import SessionDep
 from app.db.redis import get_redis
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
