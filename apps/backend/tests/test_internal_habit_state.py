@@ -12,10 +12,13 @@ Auth: X-Service-Token (как у всех /internal/*).
 from __future__ import annotations
 
 import os
+
+# --- Postgres → SQLite compatibility (тот же паттерн, что в test_admin_habits_api.py) ---
+import re  # noqa: E402
 import tempfile
-import time
 import uuid
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import UTC, datetime
+from datetime import time as dt_time
 from typing import Any
 
 import pytest
@@ -27,6 +30,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+from sqlalchemy.sql.compiler import SQLCompiler  # noqa: E402
 
 from app.core.config import get_settings
 from app.core.security import generate_service_token
@@ -36,13 +40,6 @@ from app.models.checkin import Checkin
 from app.models.habit import Habit
 from app.models.membership import Membership
 from app.models.user import User
-
-
-# --- Postgres → SQLite compatibility (тот же паттерн, что в test_admin_habits_api.py) ---
-
-import re  # noqa: E402
-
-from sqlalchemy.sql.compiler import SQLCompiler  # noqa: E402
 
 
 def _compile_gen_random_uuid(_cls, _elem, **_kw):
@@ -272,7 +269,7 @@ class TestHabitStateEndpoint:
                 )
                 m = await _make_membership(s, user_id=user.id, habit_id=habit.id)
                 # Чек-ин на "сегодня" в TZ клуба.
-                now_utc = datetime.now(tz=timezone.utc)
+                now_utc = datetime.now(tz=UTC)
                 club_today = habit.club_date(now_utc)
                 ci = Checkin(
                     membership_id=m.id,

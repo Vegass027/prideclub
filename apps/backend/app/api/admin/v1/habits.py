@@ -17,17 +17,20 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from typing import Annotated
 
 import aiohttp
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.internal_bot import AVAILABLE_CHATS_KEY, _record_available_chat
-from app.api.v1.users import current_user
+from app.api.v1.internal_bot import (
+    AVAILABLE_CHATS_KEY,
+    _drop_stale_records,
+    _record_available_chat,
+)
+from app.api.v1.users import TelegramUserDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
-from app.core.security import TelegramUser
 from app.db.redis import get_redis
-from app.db.session import get_session
 from app.models.habit import Habit
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -59,13 +62,16 @@ router = APIRouter()
 
 
 def _get_habit_service(
-    session: AsyncSession = Depends(get_session),
+    session: SessionDep,
 ) -> HabitService:
     return HabitService(
         session=session,
         habit_repo=HabitRepository(session),
         membership_repo=MembershipRepository(session),
     )
+
+
+HabitServiceDep = Annotated[HabitService, Depends(_get_habit_service)]
 
 
 def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
@@ -130,8 +136,8 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
 )
 async def create_habit(
     payload: AdminHabitCreateRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Создать клуб. Всегда is_active=false (TZ §3.6.4)."""
     habit = await service.create(
@@ -163,8 +169,8 @@ async def create_habit(
 
 @router.get("/habits", response_model=AdminHabitsListResponse)
 async def list_habits(
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitsListResponse:
     """Все клубы (включая архивированные)."""
     repo = service._habit_repo  # noqa: SLF001
@@ -278,8 +284,8 @@ async def _verify_chats_via_telegram(
     response_model=AdminHabitAvailableChatsResponse,
 )
 async def list_available_chats(
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitAvailableChatsResponse:
     """Список Telegram-чатов, куда @join_prideclub_bot добавлен.
 
@@ -460,7 +466,7 @@ async def list_available_chats(
 )
 async def refresh_chat(
     chat_id: int,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUserDep,
 ) -> AdminHabitRefreshChatResponse:
     """Принудительно обновить название/тип чата из Telegram.
 
@@ -558,7 +564,7 @@ def _drop_chat_from_redis(chat_id: int) -> int:
 @router.post("/habits/dismiss_chat/{chat_id}")
 async def dismiss_chat(
     chat_id: int,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUserDep,
 ) -> dict:
     """Вручную убрать чат из списка доступных групп.
 
@@ -580,8 +586,8 @@ async def dismiss_chat(
 @router.get("/habits/{habit_id}", response_model=AdminHabitOut)
 async def get_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Детали клуба (включая архив)."""
     habit = await service._habit_repo.get(habit_id)  # noqa: SLF001
@@ -597,8 +603,8 @@ async def get_habit(
 async def update_habit(
     habit_id: str,
     payload: AdminHabitUpdateRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Частичное обновление полей клуба (TZ §3.6.7 — финансовые заморожены)."""
     fields = payload.model_dump(exclude_unset=True)
@@ -623,8 +629,8 @@ async def update_habit(
 async def force_financials(
     habit_id: str,
     payload: AdminHabitForceFinancialsRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitForceFinancialsResponse:
     """Force-update price_month / penalty_amount после первого участника.
 
@@ -665,8 +671,8 @@ async def force_financials(
 async def activate_habit(
     habit_id: str,
     payload: AdminHabitToggleRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.set_active(
         admin_id=user.id,
@@ -685,8 +691,8 @@ async def activate_habit(
 @router.post("/habits/{habit_id}/archive", response_model=AdminHabitActionResponse)
 async def archive_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.archive(admin_id=user.id, habit_id=habit_id)
     await service._session.commit()  # noqa: SLF001
@@ -701,8 +707,8 @@ async def archive_habit(
 @router.delete("/habits/{habit_id}", response_model=AdminHabitActionResponse)
 async def delete_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     """Алиас на archive: семантически «удалить в корзину».
 
@@ -727,8 +733,8 @@ async def delete_habit(
 @router.delete("/habits/{habit_id}/permanent")
 async def permanent_delete_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> dict:
     """Hard delete клуба из БД.
 
@@ -743,8 +749,6 @@ async def permanent_delete_habit(
 
     # Чистим Redis: любая запись с этим chat_id пропадает из выдачи.
     try:
-        from app.api.v1.internal_bot import _drop_stale_records
-
         redis = get_redis()
         chat_id = int(result.get("chat_id") or 0)
         if chat_id:
@@ -759,8 +763,8 @@ async def permanent_delete_habit(
 @router.post("/habits/{habit_id}/restore", response_model=AdminHabitActionResponse)
 async def restore_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.restore(admin_id=user.id, habit_id=habit_id)
     await service._session.commit()  # noqa: SLF001
@@ -778,8 +782,8 @@ async def restore_habit(
 )
 async def get_habit_chat_status(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitChatStatusResponse:
     """Текущее состояние chat_id клуба.
 
@@ -824,8 +828,8 @@ def _extract_invite_target(invite_link: str) -> str | None:
 )
 async def preview_chat_by_invite(
     payload: AdminHabitPreviewChatRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitPreviewChatResponse:
     """Резолв Telegram-чата по инвайт-ссылке через Bot API.
 

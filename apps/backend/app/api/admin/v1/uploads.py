@@ -9,17 +9,16 @@ POST /admin/v1/habits/upload_photo — принимает multipart/form-data с
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
-from app.api.v1.users import current_user
+from app.api.v1.users import TelegramUserDep
 from app.core.logging import get_logger
-from app.core.security import TelegramUser
-
 
 router = APIRouter()
 logger = get_logger("admin.uploads")
@@ -43,8 +42,8 @@ STORAGE_DIR = Path("/app/static/uploads/club_photos")
 
 @router.post("/habits/upload_photo")
 async def upload_club_photo(
-    file: UploadFile = File(...),
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUserDep,
+    file: UploadFile = File(...),  # noqa: B008 — File is FastAPI multipart param
 ) -> dict:
     """Загрузка фото/GIF для обложки клуба."""
     content_type = (file.content_type or "").lower()
@@ -69,7 +68,7 @@ async def upload_club_photo(
         )
 
     ext = ALLOWED_EXTENSIONS[content_type]
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(STORAGE_DIR.mkdir, parents=True, exist_ok=True)
 
     random_part = secrets.token_hex(8)
     storage_filename = f"{int(time.time())}_{random_part}.{ext}"
@@ -92,8 +91,8 @@ async def upload_club_photo(
             )
         chunks.append(chunk)
 
-    storage_path.write_bytes(b"".join(chunks))
-    os.chmod(storage_path, 0o644)
+    await asyncio.to_thread(storage_path.write_bytes, b"".join(chunks))
+    await asyncio.to_thread(os.chmod, storage_path, 0o644)
 
     public_url = f"/static/uploads/club_photos/{storage_filename}"
 

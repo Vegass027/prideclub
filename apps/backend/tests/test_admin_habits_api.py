@@ -22,7 +22,6 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import event as _sa_event
 from sqlalchemy.ext.asyncio import (
-    AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
@@ -34,7 +33,6 @@ from app.main import create_app
 from app.models.habit import Habit
 from app.models.membership import Membership
 from app.models.user import User
-
 
 # --- Postgres → SQLite compatibility (паттерн из apps/worker/tests/conftest.py) ----
 

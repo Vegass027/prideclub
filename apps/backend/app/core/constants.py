@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class MembershipStatus(str, Enum):
+class MembershipStatus(StrEnum):
     ACTIVE = "active"
     PAUSED = "paused"
     LEFT = "left"
 
 
-class CheckinStatus(str, Enum):
+class CheckinStatus(StrEnum):
     DONE = "done"
     MISSED = "missed"
 
 
-class PenaltyReason(str, Enum):
+class PenaltyReason(StrEnum):
     CAUGHT = "caught"
     WINDOW_CLOSED_NO_CATCH = "window_closed_no_catch"
 
 
-class ProofType(str, Enum):
+class ProofType(StrEnum):
     VIDEO_NOTE = "video_note"
     PHOTO = "photo"
     TEXT = "text"
@@ -30,7 +30,7 @@ class ProofType(str, Enum):
 PROOF_TYPE_VALUES: tuple[str, ...] = tuple(pt.value for pt in ProofType)
 
 
-class TransactionType(str, Enum):
+class TransactionType(StrEnum):
     SUBSCRIPTION = "subscription"
     DEPOSIT_TOPUP = "deposit_topup"
     DEPOSIT_WITHDRAW = "deposit_withdraw"
@@ -41,19 +41,19 @@ class TransactionType(str, Enum):
     BONUS_POINTS = "bonus_points"
 
 
-class SeasonStatus(str, Enum):
+class SeasonStatus(StrEnum):
     ACTIVE = "active"
     CLOSED = "closed"
     PAID_OUT = "paid_out"
 
 
-class SuspiciousPairStatus(str, Enum):
+class SuspiciousPairStatus(StrEnum):
     FLAGGED = "flagged"
     CLEARED = "cleared"
     BANNED = "banned"
 
 
-class ServiceCaller(str, Enum):
+class ServiceCaller(StrEnum):
     BOT = "bot"
     WORKER = "worker"
 

@@ -3,18 +3,17 @@ from __future__ import annotations
 from datetime import date as _date
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_internal
+from app.api.v1.users import ServiceCallerDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
-from app.db.session import get_session
 from app.models.membership import Membership
 from app.repositories.membership_repository import MembershipRepository
 from app.services.celery_producer import send_task
-from sqlalchemy import select
-
 
 router = APIRouter()
 
@@ -35,7 +34,9 @@ class PenaltyEnqueueResponse(BaseModel):
 async def _resolve_catcher_membership_id(
     session: AsyncSession, catcher_user_id: int
 ) -> str | None:
-    """Если catcher_membership_id не передан, берём membership из того же habit, что у нарушителя."""
+    """Если catcher_membership_id не передан, берём membership из того же habit,
+    что у нарушителя.
+    """
     stmt = select(Membership).where(Membership.user_id == catcher_user_id)
     rows = (await session.execute(stmt)).scalars().all()
     if not rows:
@@ -47,8 +48,8 @@ async def _resolve_catcher_membership_id(
 @router.post("/penalties/catch", response_model=PenaltyEnqueueResponse)
 async def enqueue_catch_penalty(
     payload: PenaltyProcessRequest,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
+    session: SessionDep,
+    _: ServiceCallerDep,
 ) -> PenaltyEnqueueResponse:
     """Internal endpoint: бот/MiniApp → backend → Celery worker.
 

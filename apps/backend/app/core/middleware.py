@@ -1,4 +1,3 @@
-import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -28,7 +27,6 @@ from app.core.logging import get_logger
 from app.core.security import validate_init_data, validate_service_token
 from app.db.redis import get_redis
 from app.services.http_rate_limiter import make_api_v1_limiter, make_internal_limiter
-
 
 logger = get_logger("auth_middleware")
 
@@ -245,7 +243,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if not allowed:
                 return JSONResponse(
                     status_code=429,
-                    content={"code": "rate_limited", "limit": max_n, "window_seconds": limiter._window},
+                    content={
+                        "code": "rate_limited",
+                        "limit": max_n,
+                        "window_seconds": limiter._window,
+                    },
                     headers={
                         "X-RateLimit-Limit": str(max_n),
                         "X-RateLimit-Remaining": "0",

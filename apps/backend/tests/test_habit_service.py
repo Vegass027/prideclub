@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import time
 from uuid import uuid4
 
 import pytest
@@ -429,7 +429,6 @@ class TestUpdateTopics:
         """Если habit.chat_id был 0 (клубы до миграции), первая валидная
         ссылка на топик привязывает чат клуба к часу из ссылки."""
         from uuid import uuid4
-        from tests.fakes import make_habit
 
         svc, repo, _ = _make_service()
         orphan = make_habit(id=str(uuid4()), chat_id=0)
@@ -505,7 +504,6 @@ async def test_update_proof_types_syncs_proof_type_alias() -> None:
     """update с proof_types синхронизирует proof_type (alias первого)."""
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()), proof=ProofType.VIDEO_NOTE)
@@ -523,7 +521,6 @@ async def test_update_proof_types_syncs_proof_type_alias() -> None:
 async def test_update_proof_types_validates() -> None:
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -544,7 +541,6 @@ async def test_force_update_financials_requires_confirm() -> None:
     """Без confirm=true — HabitValidationError, никаких изменений."""
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -568,7 +564,6 @@ async def test_force_update_financials_requires_at_least_one_field() -> None:
     """Пустые поля → HabitValidationError."""
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -588,7 +583,6 @@ async def test_force_update_financials_requires_at_least_one_field() -> None:
 async def test_force_update_financials_validates_positive_amounts() -> None:
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -608,7 +602,6 @@ async def test_force_update_financials_validates_positive_amounts() -> None:
 async def test_force_update_financials_updates_values() -> None:
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(
@@ -638,7 +631,6 @@ async def test_force_update_financials_no_op_when_unchanged() -> None:
     """Если значения совпадают — no-op (без UPDATE), без audit log."""
     from uuid import uuid4
 
-    from tests.fakes import make_habit
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -669,10 +661,6 @@ async def test_force_update_financials_only_changes_target_fields() -> None:
     """
     from uuid import uuid4
 
-    from tests.fakes import (
-        FakeMembershipRepo,
-        make_habit,
-    )
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))

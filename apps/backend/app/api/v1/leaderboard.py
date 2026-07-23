@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.api.v1.users import current_user_db
-from app.core.security import TelegramUser
-from app.db.session import get_session
+from app.api.v1.users import TelegramUserDbDep
+from app.core.deps import SessionDep
 from app.models.checkin import Checkin
 from app.models.membership import Membership
 from app.models.penalty import Penalty
 from app.models.user import User
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
-
 
 router = APIRouter()
 
@@ -92,7 +90,7 @@ async def _streak_leaderboard(
     habit = await habit_repo.get(habit_id)
     if habit is None:
         raise HTTPException(404, "habit_not_found")
-    today = habit.club_date(datetime.now(tz=timezone.utc))
+    today = habit.club_date(datetime.now(tz=UTC))
 
     rows = (
         await session.execute(
@@ -169,8 +167,8 @@ async def _shame_leaderboard(
 @router.get("/habits/{habit_id}/leaderboard/streak", response_model=LeaderboardResponse)
 async def streak(
     habit_id: str,
-    _: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    _: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _streak_leaderboard(
         session, MembershipRepository(session), habit_id
@@ -181,8 +179,8 @@ async def streak(
 @router.get("/habits/{habit_id}/leaderboard/catches", response_model=LeaderboardResponse)
 async def catches(
     habit_id: str,
-    _: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    _: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _catch_leaderboard(
         session, MembershipRepository(session), habit_id
@@ -193,8 +191,8 @@ async def catches(
 @router.get("/habits/{habit_id}/leaderboard/shame", response_model=LeaderboardResponse)
 async def shame(
     habit_id: str,
-    _: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    _: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _shame_leaderboard(
         session, MembershipRepository(session), habit_id
@@ -298,8 +296,8 @@ async def _global_counts(
 
 @router.get("/leaderboard/streak", response_model=LeaderboardResponse)
 async def global_streak(
-    user: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    user: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _global_streak(session, user.id)
     return LeaderboardResponse(items=rows)
@@ -307,8 +305,8 @@ async def global_streak(
 
 @router.get("/leaderboard/catches", response_model=LeaderboardResponse)
 async def global_catches(
-    _: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    _: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _global_counts(session, column=Penalty.catcher_membership_id)
     return LeaderboardResponse(items=rows)
@@ -316,8 +314,8 @@ async def global_catches(
 
 @router.get("/leaderboard/shame", response_model=LeaderboardResponse)
 async def global_shame(
-    _: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    _: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardResponse:
     rows = await _global_counts(session, column=Penalty.membership_id)
     return LeaderboardResponse(items=rows)
@@ -349,8 +347,8 @@ async def _overview_metric(
 @router.get("/leaderboard/{tab}/overview", response_model=LeaderboardOverviewResponse)
 async def leaderboard_overview(
     tab: str,
-    user: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    user: TelegramUserDbDep,
+    session: SessionDep,
 ) -> LeaderboardOverviewResponse:
     """Сводка лидерборда по всем клубам юзера.
 

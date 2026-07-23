@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, Date, Enum, ForeignKey, Integer, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import SeasonStatus
 from app.db.session import Base
-
 
 if TYPE_CHECKING:
     from app.models.habit import Habit
@@ -38,8 +37,8 @@ class Season(Base):
         server_default=SeasonStatus.ACTIVE.value,
     )
 
-    habit: Mapped["Habit"] = relationship()
-    stats: Mapped[list["SeasonStats"]] = relationship(back_populates="season")
+    habit: Mapped[Habit] = relationship()
+    stats: Mapped[list[SeasonStats]] = relationship(back_populates="season")
 
 
 class SeasonStats(Base):
@@ -57,6 +56,8 @@ class SeasonStats(Base):
     )
     streak_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_penalties_caught: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    total_penalties_received: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_penalties_received: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
 
-    season: Mapped["Season"] = relationship(back_populates="stats")
+    season: Mapped[Season] = relationship(back_populates="stats")

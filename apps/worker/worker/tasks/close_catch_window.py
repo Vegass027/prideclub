@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
+from datetime import datetime, timezone
 
 from app.core.constants import MembershipStatus
 from app.core.logging import get_logger

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.admin import api_router as admin_api_router
@@ -79,8 +79,7 @@ def create_app() -> FastAPI:
     install_middlewares(app)
 
     @app.get("/metrics")
-    async def metrics() -> "Response":  # type: ignore[name-defined]
-        from fastapi.responses import Response
+    async def metrics() -> Response:
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

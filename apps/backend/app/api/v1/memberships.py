@@ -1,29 +1,30 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Annotated
 
-from app.api.v1.users import current_user_db
+from fastapi import APIRouter, Depends
+
+from app.core.deps import SessionDep, TelegramUserDbDep
 from app.core.exceptions import HabitArchivedError, HabitInactiveError
-from app.core.security import TelegramUser
-from app.db.session import get_session
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.schemas import MembershipOut
 from app.services.membership_service import MembershipService
 
-
 router = APIRouter()
 
 
 async def get_membership_service(
-    session: AsyncSession = Depends(get_session),
+    session: SessionDep,
 ) -> MembershipService:
     return MembershipService(
         session=session,
         habit_repo=HabitRepository(session),
         membership_repo=MembershipRepository(session),
     )
+
+
+MembershipServiceDep = Annotated[MembershipService, Depends(get_membership_service)]
 
 
 async def _ensure_joinable(habit_repo: HabitRepository, habit_id: str) -> None:
@@ -38,9 +39,9 @@ async def _ensure_joinable(habit_repo: HabitRepository, habit_id: str) -> None:
 @router.post("/habits/{habit_id}/join")
 async def join(
     habit_id: str,
-    user: TelegramUser = Depends(current_user_db),
-    service: MembershipService = Depends(get_membership_service),
-    session: AsyncSession = Depends(get_session),
+    user: TelegramUserDbDep,
+    service: MembershipServiceDep,
+    session: SessionDep,
 ) -> MembershipOut:
     habit_repo = HabitRepository(session)
     await _ensure_joinable(habit_repo, habit_id)
@@ -52,9 +53,9 @@ async def join(
 @router.post("/habits/{habit_id}/leave")
 async def leave(
     habit_id: str,
-    user: TelegramUser = Depends(current_user_db),
-    service: MembershipService = Depends(get_membership_service),
-    session: AsyncSession = Depends(get_session),
+    user: TelegramUserDbDep,
+    service: MembershipServiceDep,
+    session: SessionDep,
 ) -> MembershipOut:
     m = await service.leave(user_id=user.id, habit_id=habit_id)
     await session.commit()

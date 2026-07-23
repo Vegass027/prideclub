@@ -10,12 +10,11 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import CheckinStatus, MembershipStatus, ProofType
+from app.core.constants import CheckinStatus, MembershipStatus
 
 
 # cache=None — по умолчанию в _process(). Тесты не поднимают Redis, что
@@ -285,7 +284,7 @@ async def test_process_checkin_membership_not_found(worker_db) -> None:
     from worker.tasks.process_checkin import _process
 
     async with worker_db.session_factory() as session:
-        user = await worker_db.add_user(session, id=1006)
+        await worker_db.add_user(session, id=1006)
         habit = await worker_db.add_habit(
             session,
             checkin_window_start_hour=0,

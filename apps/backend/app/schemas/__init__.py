@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.constants import ProofType, PROOF_TYPE_VALUES
+from app.core.constants import PROOF_TYPE_VALUES
 
 
 class MarketplaceResponse(BaseModel):
@@ -80,7 +80,9 @@ class CheckinIngestPayload(BaseModel):
 class InternalCheckinResult(BaseModel):
     checkin_id: str | None
     accepted: bool
-    code: str  # ok | checkin_already_exists | checkin_window_closed | membership_not_active | invalid_proof | habit_not_found
+    # ok | checkin_already_exists | checkin_window_closed |
+    # membership_not_active | invalid_proof | habit_not_found
+    code: str
 
 
 class AdminHabitCreateRequest(BaseModel):

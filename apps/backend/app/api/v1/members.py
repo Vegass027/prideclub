@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
-from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_db
+from app.api.v1.users import TelegramUserDbDep
+from app.core.deps import RedisDep, SessionDep
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
-from app.core.security import TelegramUser
-from app.db.redis import get_redis
-from app.db.session import get_session
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -49,8 +46,8 @@ class CatchResponse(BaseModel):
 @router.get("/habits/{habit_id}/members", response_model=MembersResponse)
 async def list_members(
     habit_id: str,
-    user: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
+    user: TelegramUserDbDep,
+    session: SessionDep,
 ) -> MembersResponse:
     habit_repo = HabitRepository(session)
     membership_repo = MembershipRepository(session)
@@ -104,9 +101,9 @@ async def _user_names(session: AsyncSession, user_ids: list[int]) -> dict[int, s
 async def catch_violator(
     habit_id: str,
     payload: CatchRequest,
-    user: TelegramUser = Depends(current_user_db),
-    session: AsyncSession = Depends(get_session),
-    redis: Redis = Depends(get_redis),
+    user: TelegramUserDbDep,
+    session: SessionDep,
+    redis: RedisDep,
 ) -> CatchResponse:
     habit_repo = HabitRepository(session)
     membership_repo = MembershipRepository(session)

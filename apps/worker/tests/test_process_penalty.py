@@ -5,7 +5,6 @@ import os
 from datetime import date
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import MembershipStatus, PenaltyReason, TransactionType
 

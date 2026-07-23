@@ -10,7 +10,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.constants import PenaltyReason
 from app.db.session import Base
 
-
 if TYPE_CHECKING:
     from app.models.membership import Membership
 
@@ -47,7 +46,7 @@ class Penalty(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    membership: Mapped["Membership"] = relationship(
+    membership: Mapped[Membership] = relationship(
         back_populates="penalties_received",
         foreign_keys="Penalty.membership_id",
     )

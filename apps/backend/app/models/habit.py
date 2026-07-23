@@ -11,7 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.constants import ProofType
 from app.db.session import Base
 
-
 if TYPE_CHECKING:
     from app.models.membership import Membership
 
@@ -19,14 +18,20 @@ if TYPE_CHECKING:
 class Habit(Base):
     __tablename__ = "habits"
 
-    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid())
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
     title: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
 
     checkin_window_start: Mapped[time] = mapped_column(Time, nullable=False)
     checkin_window_end: Mapped[time] = mapped_column(Time, nullable=False)
-    timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="Europe/Moscow")
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="Europe/Moscow"
+    )
 
     penalty_amount: Mapped[int] = mapped_column(Integer, nullable=False)
     price_month: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -84,7 +89,7 @@ class Habit(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    memberships: Mapped[list["Membership"]] = relationship(
+    memberships: Mapped[list[Membership]] = relationship(
         back_populates="habit",
         passive_deletes=True,
     )

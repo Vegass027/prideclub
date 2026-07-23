@@ -22,18 +22,16 @@ import json
 import time
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_internal
+from app.api.v1.users import ServiceCallerDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
 from app.db.redis import get_redis
-from app.db.session import get_session
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
-
 
 router = APIRouter()
 logger = get_logger("internal_bot")
@@ -136,8 +134,8 @@ async def _drop_stale_records(redis: object, chat_id: int) -> int:
 @router.post("/bot/chat_added", response_model=BotChatAddedResponse)
 async def bot_chat_added(
     payload: BotChatAddedRequest,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
+    session: SessionDep,
+    _: ServiceCallerDep,
 ) -> BotChatAddedResponse:
     """Обработка my_chat_member от бота."""
     log = get_logger("bot_chat_added")
@@ -228,8 +226,8 @@ class BotChatRemovedResponse(BaseModel):
 @router.post("/bot/chat_removed", response_model=BotChatRemovedResponse)
 async def bot_chat_removed(
     payload: BotChatRemovedRequest,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
+    session: SessionDep,
+    _: ServiceCallerDep,
 ) -> BotChatRemovedResponse:
     """Обработка my_chat_member при удалении бота из чата.
 
@@ -299,10 +297,10 @@ class HabitStateResponse(BaseModel):
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
 async def get_habit_state(
+    session: SessionDep,
+    _: ServiceCallerDep,
     chat_id: int = Query(..., description="Telegram chat_id супергруппы клуба"),
     user_id: int = Query(..., description="telegram_id пользователя"),
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
 ) -> HabitStateResponse:
     """Состояние клуба и членства для бота.
 

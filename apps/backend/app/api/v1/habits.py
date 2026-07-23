@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends
 
-from app.api.v1.users import current_user, current_user_db
 from app.core.config import get_settings
-from app.core.exceptions import HabitArchivedError
-from app.core.security import TelegramUser
+from app.core.deps import SessionDep, TelegramUserDbDep
 from app.db.redis import get_redis
-from app.db.session import get_session
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -23,9 +20,7 @@ from app.schemas import (
     TodayResponse,
 )
 from app.services.checkin_service import CheckinService
-from app.services.membership_service import MembershipService
 from app.services.today_cache import RedisTodayCache
-
 
 router = APIRouter()
 
@@ -39,7 +34,7 @@ def _redis_enabled() -> bool:
 
 
 async def get_checkin_service(
-    session: AsyncSession = Depends(get_session),
+    session: SessionDep,
 ) -> CheckinService:
     cache = RedisTodayCache(get_redis()) if _redis_enabled() else None
     return CheckinService(
@@ -51,20 +46,13 @@ async def get_checkin_service(
     )
 
 
-async def get_membership_service(
-    session: AsyncSession = Depends(get_session),
-) -> MembershipService:
-    return MembershipService(
-        session=session,
-        habit_repo=HabitRepository(session),
-        membership_repo=MembershipRepository(session),
-    )
+CheckinServiceDep = Annotated[CheckinService, Depends(get_checkin_service)]
 
 
 @router.get("/marketplace", response_model=MarketplaceResponse)
 async def marketplace(
-    session: AsyncSession = Depends(get_session),
-    _: TelegramUser = Depends(current_user_db),
+    session: SessionDep,
+    _: TelegramUserDbDep,
 ) -> MarketplaceResponse:
     repo = HabitRepository(session)
     rows = await repo.list_with_member_counts()
@@ -97,11 +85,11 @@ async def marketplace(
 @router.get("/habits/{habit_id}/today", response_model=TodayResponse)
 async def today(
     habit_id: str,
-    service: CheckinService = Depends(get_checkin_service),
-    user: TelegramUser = Depends(current_user_db),
+    service: CheckinServiceDep,
+    user: TelegramUserDbDep,
 ) -> TodayResponse:
     habit, m, status, streak = await service.get_today_status(
-        user_id=user.id, habit_id=habit_id, now_utc=datetime.now(tz=timezone.utc)
+        user_id=user.id, habit_id=habit_id, now_utc=datetime.now(tz=UTC)
     )
     return TodayResponse(
         habit=HabitOut(
@@ -135,8 +123,8 @@ async def today(
 
 @router.get("/me/habits", response_model=MarketplaceResponse)
 async def my_habits(
-    session: AsyncSession = Depends(get_session),
-    user: TelegramUser = Depends(current_user_db),
+    session: SessionDep,
+    user: TelegramUserDbDep,
 ) -> MarketplaceResponse:
     """Список клубов, в которых состоит пользователь.
 

@@ -27,8 +27,8 @@ def test_init_data_valid() -> None:
 
 
 def test_init_data_invalid_hash() -> None:
-    from app.core.security import validate_init_data
     from app.core.exceptions import InvalidInitDataError
+    from app.core.security import validate_init_data
 
     with pytest.raises(InvalidInitDataError):
         validate_init_data("hash=invalid&auth_date=1&user={}", "bot-token")
@@ -46,8 +46,8 @@ def test_service_token_roundtrip() -> None:
 
 
 def test_service_token_wrong_aud() -> None:
-    from app.core.security import generate_service_token, validate_service_token
     from app.core.exceptions import InvalidServiceTokenError
+    from app.core.security import generate_service_token, validate_service_token
 
     secret = "service-secret"
     token = generate_service_token(service_name="bot", target_audience="backend-api", secret=secret)

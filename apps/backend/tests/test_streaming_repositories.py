@@ -13,7 +13,6 @@ OOM при 100+ клубах с 10k+ members.
 from __future__ import annotations
 
 import inspect
-from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest

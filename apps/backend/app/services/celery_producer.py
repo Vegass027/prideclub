@@ -18,7 +18,6 @@ from celery import Celery
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
-
 _TASK_NAMES: dict[str, str] = {
     "checkin": "worker.tasks.process_checkin.run",
     "penalty": "worker.tasks.process_penalty.run",

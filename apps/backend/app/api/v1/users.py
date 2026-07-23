@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import Depends, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Annotated
 
+from fastapi import Depends, Request
+
+from app.core.deps import SessionDep
 from app.core.security import TelegramUser
-from app.db.session import get_session
 from app.repositories.user_repository import UserRepository
 
 
@@ -23,8 +24,8 @@ def current_user(request: Request) -> TelegramUser:
 
 
 async def current_user_db(
-    user: TelegramUser = Depends(current_user),
-    session: AsyncSession = Depends(get_session),
+    user: Annotated[TelegramUser, Depends(current_user)],
+    session: SessionDep,
 ) -> TelegramUser:
     """Возвращает TelegramUser + upsert'ит запись в `users`.
 
@@ -66,8 +67,13 @@ from fastapi import APIRouter  # noqa: E402
 router = APIRouter()
 
 
+TelegramUserDep = Annotated[TelegramUser, Depends(current_user)]
+TelegramUserDbDep = Annotated[TelegramUser, Depends(current_user_db)]
+ServiceCallerDep = Annotated[str, Depends(current_user_internal)]
+
+
 @router.get("/me")
-async def me(user: TelegramUser = Depends(current_user)) -> dict:
+async def me(user: TelegramUserDep) -> dict:
     return {
         "id": user.id,
         "first_name": user.first_name,

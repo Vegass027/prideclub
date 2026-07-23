@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from app.core.constants import PenaltyConfig
 from redis.asyncio import Redis
+
+from app.core.constants import PenaltyConfig
 
 
 class RedisCatchRateLimiter:

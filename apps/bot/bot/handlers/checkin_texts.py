@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-
 # Код, который вернул /internal/checkins/process (success path).
 # {name} — first_name пользователя (или пустая строка, если скрыт).
 ACCEPTED_OK: str = "↩ ✅ Принято, {name}! Молодец😉"
@@ -54,11 +53,20 @@ REJECT_ALREADY_CHECKED_IN: str = (
 
 
 # Коды отказа от worker / backend → человеческий текст.
-REJECT_FORWARDED: str = "↩ ⛔ {name}, пересланные сообщения не принимаются. Отправь оригинал из этого чата."
+REJECT_FORWARDED: str = (
+    "↩ \u26d4 {name}, пересланные сообщения не принимаются. "
+    "Отправь оригинал из этого чата."
+)
 
-REJECT_TOO_SHORT: str = "↩ 🎥 {name}, кружок слишком короткий (минимум 3 секунды). Перезапиши подлиннее."
+REJECT_TOO_SHORT: str = (
+    "↩ \U0001f3a5 {name}, кружок слишком короткий (минимум 3 секунды). "
+    "Перезапиши подлиннее."
+)
 
-REJECT_WRONG_TOPIC: str = "↩ 📍 {name}, это не топик чек-инов. Отправь кружок в топик «Чек-ины» клуба."
+REJECT_WRONG_TOPIC: str = (
+    "↩ \U0001f4cd {name}, это не топик чек-инов. "
+    "Отправь кружок в топик «Чек-ины» клуба."
+)
 
 REJECT_OUT_OF_WINDOW: str = "↩ ⏰ {name}, окно чек-ина закрыто. Успей в следующий раз в окно клуба."
 

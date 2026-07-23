@@ -9,7 +9,6 @@ from aiogram.types import Message
 from bot.config import get_settings
 from bot.logging_setup import get_logger
 
-
 router = Router(name="payments")
 log = get_logger("bot.payments")
 
@@ -44,7 +43,6 @@ async def process_successful_payment(message: Message) -> None:
     amount = int(sp.total_amount)  # уже в копейках
 
     import aiohttp
-
     from security import generate_service_token
 
     token = generate_service_token(

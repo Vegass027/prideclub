@@ -6,7 +6,6 @@ from redis.asyncio import Redis, from_url
 
 from app.core.config import get_settings
 
-
 _settings = get_settings()
 
 _redis: Redis | None = None

@@ -10,7 +10,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.constants import CheckinStatus
 from app.db.session import Base
 
-
 if TYPE_CHECKING:
     from app.models.membership import Membership
 
@@ -37,4 +36,4 @@ class Checkin(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    membership: Mapped["Membership"] = relationship(back_populates="checkins")
+    membership: Mapped[Membership] = relationship(back_populates="checkins")

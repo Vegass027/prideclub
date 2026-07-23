@@ -17,7 +17,6 @@ from app.db.redis import get_redis
 from app.db.session import async_session_factory
 from app.models.habit import Habit
 from app.models.user import User
-from app.repositories.habit_repository import HabitRepository
 from app.repositories.user_repository import UserRepository
 
 

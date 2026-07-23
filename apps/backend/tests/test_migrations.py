@@ -176,7 +176,12 @@ def _assert_critical_invariants(sync_url):
         """,
     )
     check_names = {r[0] for r in rows}
-    assert {"habits_stat_loss_positive", "habits_stat_gain_positive", "habits_member_limit_positive"} <= check_names, (
+    expected = {
+        "habits_stat_loss_positive",
+        "habits_stat_gain_positive",
+        "habits_member_limit_positive",
+    }
+    assert expected <= check_names, (
         f"Missing CHECK constraints on habits. Got: {check_names}"
     )
 

@@ -75,12 +75,3 @@ class MembershipService:
             raise MembershipNotActiveError()
         m.status = MembershipStatus.LEFT
         return m
-
-    async def leave(self, *, user_id: int, habit_id: str) -> Membership:
-        m = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
-        if m is None:
-            raise MembershipNotFoundError()
-        if m.status != MembershipStatus.ACTIVE:
-            raise MembershipNotActiveError()
-        m.status = MembershipStatus.LEFT
-        return m

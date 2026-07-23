@@ -7,13 +7,12 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_internal
+from app.api.v1.users import ServiceCallerDep
 from app.core.constants import SuspiciousPairStatus
-from app.db.session import get_session
+from app.core.deps import SessionDep
 from app.models.auxiliary import SuspiciousPair
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.suspicious_pairs_service import SuspiciousPairsService
@@ -67,11 +66,11 @@ class ActionResponse(BaseModel):
     response_model=SuspiciousPairsListResponse,
 )
 async def list_suspicious_pairs(
+    session: SessionDep,
+    _caller: ServiceCallerDep,
     status: str = Query(default=SuspiciousPairStatus.FLAGGED.value),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_session),
-    _caller=Depends(current_user_internal),
 ) -> SuspiciousPairsListResponse:
     if status not in {
         SuspiciousPairStatus.FLAGGED.value,
@@ -90,8 +89,8 @@ async def list_suspicious_pairs(
 @router.post("/admin/suspicious_pairs/flag", response_model=ActionResponse)
 async def flag_pair(
     payload: FlagRequest,
-    session: AsyncSession = Depends(get_session),
-    _caller=Depends(current_user_internal),
+    session: SessionDep,
+    _caller: ServiceCallerDep,
 ) -> ActionResponse:
     if payload.status not in {
         SuspiciousPairStatus.FLAGGED.value,
@@ -111,8 +110,8 @@ async def flag_pair(
 @router.post("/admin/suspicious_pairs/clear", response_model=ActionResponse)
 async def clear_pair(
     payload: ClearRequest,
-    session: AsyncSession = Depends(get_session),
-    _caller=Depends(current_user_internal),
+    session: SessionDep,
+    _caller: ServiceCallerDep,
 ) -> ActionResponse:
     repo = SuspiciousPairsRepository(session)
     deleted = await repo.clear(payload.membership_id_a, payload.membership_id_b)
@@ -124,8 +123,8 @@ async def clear_pair(
 @router.post("/admin/suspicious_pairs/ban", response_model=ActionResponse)
 async def ban_pair(
     payload: FlagRequest,
-    session: AsyncSession = Depends(get_session),
-    _caller=Depends(current_user_internal),
+    session: SessionDep,
+    _caller: ServiceCallerDep,
 ) -> ActionResponse:
     """Жёсткое действие: пара помечается как banned. Бонусы больше не начисляются."""
     service = SuspiciousPairsService(session)

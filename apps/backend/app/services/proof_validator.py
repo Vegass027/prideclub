@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.core.constants import ProofType
 
@@ -56,8 +56,7 @@ def validate_proof_media(message: ProofMessage, *, max_age_seconds: int = 60) ->
         raise ProofValidationError("forwarded")
 
     if message.message_date is not None:
-        from datetime import timezone
 
-        delta = (datetime.now(tz=timezone.utc) - message.message_date).total_seconds()
+        delta = (datetime.now(tz=UTC) - message.message_date).total_seconds()
         if delta < -5 or delta > max_age_seconds:
             raise ProofValidationError("stale_message")

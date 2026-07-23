@@ -19,7 +19,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -41,7 +41,6 @@ from app.models.checkin import Checkin
 from app.models.habit import Habit
 from app.models.membership import Membership
 from app.models.user import User
-
 
 # --- Postgres → SQLite shims (из apps/worker/tests/conftest.py) ---------
 
@@ -195,7 +194,7 @@ async def _seed_habit(
             proof_type=ProofType.VIDEO_NOTE,
             is_active=is_active,
             archived_at=(
-                datetime.now(timezone.utc) if archived else None
+                datetime.now(UTC) if archived else None
             ),
         )
         s.add(habit)
@@ -216,7 +215,7 @@ async def _seed_membership(
                 user_id=user_id,
                 habit_id=habit_id,
                 status=MembershipStatus.ACTIVE,
-                joined_at=datetime.now(timezone.utc),
+                joined_at=datetime.now(UTC),
             )
         )
         await s.commit()
