@@ -484,3 +484,70 @@ UPDATE habits SET proof_types = jsonb_build_array(proof_type::text);
 > потому что nginx-образ сам по себе содержит HTML. Build в образе работает
 > только при изменении `Dockerfile`, не исходников.
 
+---
+
+## 14. Bot pre-filter по allowed_proof_types и дубликату (PR №9)
+
+### 14.1. Проблема
+
+Backend `POST /internal/checkins/process` сразу возвращает
+`{ok: True, task_id: ...}` после `send_task()` в Celery — не дожидаясь
+результата worker'а. Worker отвергает задачу асинхронно (например,
+`code: wrong_type` или `checkin_already_exists`), но **бот уже ответил
+юзеру «Принято, молодец»**. Юзер видит «✅ Принято» в топике, а в БД чек-ин
+не создан → UX-баг.
+
+### 14.2. Решение
+
+Бот **ПЕРЕД** отправкой в backend запрашивает
+`GET /internal/bot/habit_state?chat_id=...&user_id=...` (новый internal
+endpoint) и:
+- если `proof_types` не содержит тип сообщения → отвечает понятным
+  сообщением «в этом клубе принимается только X» и НЕ шлёт в backend;
+- если `already_checked_in=true` → отвечает «ты уже отметился сегодня» и
+  НЕ шлёт в backend;
+- если `state` недоступен (сеть/Redis) → fallback на старый путь;
+- если `habit` не найден → молча (как `habit_not_found`).
+
+### 14.3. Endpoint
+
+`GET /internal/bot/habit_state?chat_id=...&user_id=...`
+(`apps/backend/app/api/v1/internal_bot.py`):
+
+```python
+class HabitStateResponse(BaseModel):
+    found: bool
+    habit_id: str | None = None
+    proof_types: list[str] = []
+    checkin_topic_thread_id: int | None = None
+    already_checked_in: bool = False
+    checked_in_at: datetime | None = None
+```
+
+Auth: `X-Service-Token` (тот же JWT, что у остальных `/internal/*`).
+
+`already_checked_in` вычисляется по `habit.club_date(now_utc)` — клуб-local
+today, не UTC. Используется `CheckinRepository.get_for_date(membership_id,
+club_date)`.
+
+### 14.4. Где меняется код
+
+- `apps/backend/app/api/v1/internal_bot.py` — новый endpoint + Pydantic
+  модель.
+- `apps/backend/tests/test_internal_habit_state.py` — 7 unit-тестов.
+- `apps/bot/bot/services/api_client.py` — `get_habit_state(chat_id, user_id)`
+  + поддержка `params` в `get()`.
+- `apps/bot/bot/handlers/checkin.py` — новый `_prefilter()` +
+  `_detect_proof_type()`. Вызывается ДО `backend.post()`.
+- `apps/bot/bot/handlers/checkin_texts.py` — `reject_wrong_type_single()`,
+  `reject_wrong_type_multi()`, `REJECT_UNSUPPORTED_TYPE`,
+  `REJECT_ALREADY_CHECKED_IN`.
+- `apps/bot/tests/test_checkin_handler.py` — 6 новых pre-filter тестов.
+
+### 14.5. UX-инварианты
+
+- Если у юзера уже есть чек-ин за сегодня → **любое** следующее сообщение
+  в топик чек-инов получает «уже отметился» (не пытаемся отвечать про тип).
+- Если тип не поддерживается → сообщение с эмодзи и списком разрешённых.
+- Если сообщение пришло в чат, к которому бот не привязан → молчим.
+

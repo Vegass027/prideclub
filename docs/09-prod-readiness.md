@@ -39,6 +39,7 @@
 | 14 | **HTTP rate-limit** (60/min api, 120/min internal) | ✅ Live проверен | 130 req → 120 пропущено + 10×429 |
 | 15 | **HTTPS + Nginx + Let's Encrypt** | ✅ Live работает | `app.prideclub.fun/health` → 200 |
 | 16 | **Telegram bot webhook** | ✅ Live работает | POST `/bot/webhook` → 200 |
+| 16a | **Bot pre-filter** по `proof_types` и дубликату | ✅ Работает с 2026-07-23 | PR №9: `GET /internal/bot/habit_state` → бот проверяет тип и дубликат ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» / «уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. |
 | 17 | **CI в GitHub Actions** | ✅ Конфиг исправлен | `backend-ci.yml`, `frontend-ci.yml` |
 | 18 | **Admin Mini App** (управление клубами: CRUD + activate/archive/restore) | ✅ На проде с `2026-07-21` (commit `ad0267b`) | `apps/frontend/src/admin/`, `admin.prideclub.fun`. Owner-gate в `core/middleware.py`. |
 
@@ -78,6 +79,7 @@
 | 9 | PATCH `/admin/v1/habits/{id}` не сохранял price_month | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks` в `HabitEditForm.tsx`; `AdminHabitUpdatePayload` расширен |
 | 10 | Backend `ForwardRef('Response') not fully defined` | Убран `from __future__ import annotations` в `core/middleware.py` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
 | 11 | Финансы (`price_month`, `penalty_amount`) были заморожены после первого участника | Заморозка снята в `HabitService.update`; middleware `/admin/v1/*` уже гейтит доступ только owner'у. Endpoint `PATCH /admin/v1/habits/{id}/force-financials` оставлен для targeted-обновления. См. `02-architecture.md` §12. |
+| 12 | Бот отвечал «Принято, молодец» даже когда worker асинхронно отвергал чек-ин (`code: wrong_type`) | Backend возвращает `{ok: True, task_id: ...}` сразу после `send_task()`. Worker отвергает задачу позже — бот не узнаёт. Решено pre-filter'ом в боте: новый `GET /internal/bot/habit_state?chat_id=...&user_id=...` проверяет `allowed_proof_types` и `already_checked_in` ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» или «ты уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. Проверено юзером в Telegram: после деплоя бот корректно отвечает. |
 
 ---
 

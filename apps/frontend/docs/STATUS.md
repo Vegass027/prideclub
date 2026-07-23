@@ -332,3 +332,27 @@ CI:
     и fallback'ил на один тип — фича не работала визуально.
   - **Тип `Habit.proof_types: ProofType[]`** добавлен в
     `apps/frontend/src/shared/types/index.ts`.
+- **Bot pre-filter (PR №9)**: бот проверяет `allowed_proof_types` и
+  `already_checked_in` ДО отправки в backend через новый
+  `GET /internal/bot/habit_state?chat_id=...&user_id=...`. Юзер сразу
+  получает понятное сообщение вместо ложного «Принято, молодец» (когда
+  worker асинхронно отвергает задачу с `code: wrong_type` или
+  `checkin_already_exists`). Сообщения:
+  - Неподдерживаемый тип в клубе с одним типом: «В этом клубе принимается
+    только 🎥 Видео-кружочек. Отправь 🎥 видео-кружочек».
+  - Неподдерживаемый тип в клубе с 2-3 типами: «🎯 Этот клуб принимает
+    только: 🎥 Видео-кружочек, 📸 Фото. Отправь любой из этих типов».
+  - Уже отмечен сегодня: «Ты уже отметился сегодня. Повторно не нужно —
+    молодец 😉».
+  - **Backend**: `apps/backend/app/api/v1/internal_bot.py` — новый endpoint
+    `HabitStateResponse(found, habit_id, proof_types, checkin_topic_thread_id,
+    already_checked_in, checked_in_at)`. 7 unit-тестов в
+    `tests/test_internal_habit_state.py`.
+  - **Bot**: `apps/bot/bot/handlers/checkin.py` — новый `_prefilter()`
+    вызывается до `backend.post()`. `BackendClient.get_habit_state(chat_id,
+    user_id)` для запроса. 6 новых тестов в `tests/test_checkin_handler.py`
+    (wrong_type_single, wrong_type_multi, already_checked_in,
+    habit_not_found_silent, state_error_fallback, correct_type_proceeds).
+  - **Поведение на проде проверено**: после деплоя юзер отправил фото в
+    клуб с `proof_types=["video_note"]` → бот ответил «в этом клубе
+    принимается только 🎥 Видео-кружочек» вместо ложного «Принято».
