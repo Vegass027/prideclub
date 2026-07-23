@@ -154,7 +154,7 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
       <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
         <Stat label="Штраф" value={formatKopecks(habit.penalty_amount)} danger />
         <Stat label="Подписка" value={`${formatKopecks(habit.price_month)}/мес`} />
-        <Stat label="Окно" value={`${habit.checkin_window_start}–${habit.checkin_window_end}`} />
+        <Stat label="Окно" value={`${habit.checkin_window_start.slice(0, 5)}–${habit.checkin_window_end.slice(0, 5)}`} />
         <Stat label="Призовой фонд" value={formatKopecks(habit.prize_pool)} success />
       </dl>
       {isJoined ? (

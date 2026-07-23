@@ -148,7 +148,7 @@ export function TodayPage() {
           </span>
         </div>
         <p className="text-sm text-muted">
-          Окно чек-ина: <strong className="text-text">{habit.checkin_window_start}–{habit.checkin_window_end}</strong>
+          Окно чек-ина: <strong className="text-text">{habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}</strong>
         </p>
       </section>
 

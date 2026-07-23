@@ -503,11 +503,7 @@ export function HabitCreatePage() {
                         </span>
                       </span>
                       <span className="text-xs shrink-0">
-                        {disabled
-                          ? `уже привязан к «${chat.bound_to_habit_title ?? "?"}»`
-                          : selected
-                            ? "✓ выбран"
-                            : "выбрать"}
+                        {selected ? "✓ выбран" : disabled ? "—" : "выбрать"}
                       </span>
                     </button>
                   </li>

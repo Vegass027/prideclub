@@ -39,7 +39,6 @@ export function ProfilePage() {
               {tgUser.username && (
                 <p className="truncate text-sm text-muted">@{tgUser.username}</p>
               )}
-              <p className="text-xs text-muted">ID: {tgUser.id}</p>
             </div>
           </div>
         </section>

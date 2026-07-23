@@ -19,7 +19,7 @@ export function HabitCard({ habit, onJoin, onOpen, joined, busy }: HabitCardProp
         <div className="min-w-0">
           <h3 className="truncate text-base font-semibold">{habit.title}</h3>
           <div className="mt-1 text-xs text-muted">
-            окно {habit.checkin_window_start}–{habit.checkin_window_end} • {habit.members_count} участников
+            окно {habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)} • {habit.members_count} участников
           </div>
         </div>
         <div className="shrink-0 text-right">

@@ -87,7 +87,7 @@ export function PaymentModal({ habit, onClose, onSuccess }: PaymentModalProps) {
                 <div>
                   <dt className="text-[10px] uppercase tracking-wide text-muted">Окно</dt>
                   <dd className="text-sm font-semibold text-text">
-                    {habit.checkin_window_start}–{habit.checkin_window_end}
+                    {habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}
                   </dd>
                 </div>
                 <div>
