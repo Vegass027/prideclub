@@ -273,6 +273,7 @@ async def worker_db(monkeypatch):
             checkin_window_end_hour: int = 10,
             is_active: bool = True,
             proof_type=None,
+            checkin_topic_thread_id: int | None = None,
         ) -> Habit:
             from datetime import time
 
@@ -290,6 +291,7 @@ async def worker_db(monkeypatch):
                 proof_type=proof_type or ProofType.VIDEO_NOTE,
                 prize_pool=prize_pool,
                 is_active=is_active,
+                checkin_topic_thread_id=checkin_topic_thread_id,
             )
             session.add(h)
             await session.flush()

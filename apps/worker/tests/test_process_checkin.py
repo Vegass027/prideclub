@@ -149,6 +149,76 @@ async def test_process_checkin_window_closed(worker_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_checkin_wrong_topic(worker_db) -> None:
+    """Сообщение пришло не из топика чек-инов → CheckinWrongTopicError → code='not_checkin_topic'.
+
+    Регрессия: до фикса тут падал NameError на CheckinWrongTopicError,
+    таска уходила в retry-цикл и чек-ин не записывался.
+    """
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=1003)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_topic_thread_id=42,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": 1003,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 100503,
+        "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": 99,  # не 42
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+    assert result["ok"] is False
+    assert result.get("code") == "not_checkin_topic"
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_correct_topic_accepted(worker_db) -> None:
+    """Положительный случай топик-фильтра: message_thread_id совпадает → запись."""
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=1004)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_topic_thread_id=42,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": 1004,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 100504,
+        "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": 42,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+    assert result["ok"] is True
+    assert result["created"] is True
+
+
+@pytest.mark.asyncio
 async def test_process_checkin_wrong_proof_type(worker_db) -> None:
     from worker.tasks.process_checkin import _process
 

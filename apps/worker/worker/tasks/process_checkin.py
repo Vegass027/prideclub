@@ -7,6 +7,7 @@ from app.core.constants import ProofType
 from app.core.exceptions import (
     CheckinAlreadyExistsError,
     CheckinWindowClosedError,
+    CheckinWrongTopicError,
     MembershipNotActiveError,
     MembershipNotFoundError,
 )
@@ -148,6 +149,7 @@ if celery_app is not None:
             CheckinAlreadyExistsError,
             ProofValidationError,
             CheckinWindowClosedError,
+            CheckinWrongTopicError,
             MembershipNotActiveError,
             MembershipNotFoundError,
         ),
