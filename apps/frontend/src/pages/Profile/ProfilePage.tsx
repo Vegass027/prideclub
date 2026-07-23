@@ -92,17 +92,17 @@ export function ProfilePage() {
               <li key={h.id}>
                 <div className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
                   {h.photo_url ? (
-                    <div className="flex h-24 w-full items-center justify-center bg-canvas/60">
+                    <div className="flex w-full items-center justify-center bg-canvas/60">
                       <img
                         src={h.photo_url}
                         alt={h.title}
-                        className="block max-h-24 w-full object-contain"
+                        className="block max-h-48 w-full object-contain"
                         loading="lazy"
                       />
                     </div>
                   ) : (
                     <div
-                      className="flex h-24 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-2xl"
+                      className="flex h-20 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-2xl"
                       aria-hidden="true"
                     >
                       🎯
@@ -111,7 +111,7 @@ export function ProfilePage() {
                   <div className="p-3">
                     <div className="mb-2 flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <h3 className="truncate text-sm font-semibold text-text">{h.title}</h3>
+                        <h3 className="truncate text-sm font-semibold text-text">〖{h.title}〗</h3>
                         {h.description && (
                           <p className="mt-0.5 line-clamp-1 text-xs text-muted">{h.description}</p>
                         )}

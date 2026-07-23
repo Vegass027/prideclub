@@ -345,11 +345,11 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
       <FieldRow label="Фото клуба">
         <div className="flex flex-col gap-3">
           {form.photo_url ? (
-            <div className="mt-3 flex max-h-64 items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2">
+            <div className="mt-3 flex items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2">
               <img
                 src={form.photo_url}
                 alt="Превью"
-                className="block max-h-60 w-full object-contain"
+                className="block max-h-80 w-full object-contain"
                 loading="lazy"
               />
               <button

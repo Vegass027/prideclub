@@ -89,8 +89,7 @@ export function TodayPage() {
   return (
     <ScreenLayout>
       <PageHeader
-        title={habit.title}
-        subtitle={habit.timezone}
+        title={`〖${habit.title}〗`}
         back
         backTo="/profile"
       />
@@ -102,24 +101,21 @@ export function TodayPage() {
       )}
 
       {habit.photo_url ? (
-        <div className="mb-3 flex max-h-56 items-center justify-center rounded-card border border-white/5 bg-canvas/60 p-2">
+        <div className="mb-3 flex items-center justify-center rounded-card border border-white/5 bg-canvas/60 p-2">
           <img
             src={habit.photo_url}
             alt={habit.title}
-            className="block max-h-52 w-full object-contain"
+            className="block max-h-72 w-full object-contain"
             loading="lazy"
           />
         </div>
       ) : null}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
-        <div className="mb-3 flex items-baseline justify-between">
+        <div className="mb-3 flex items-baseline">
           <h2 className="text-2xl font-bold text-text">
             {checkin.streak_days} <span className="text-base font-normal text-muted">дн. подряд</span>
           </h2>
-          <span className="text-xs text-muted">
-            Депозит: <strong className="text-text">{formatKopecks(membership.deposit_balance)}</strong>
-          </span>
         </div>
         <p className="text-sm text-muted">
           Окно чек-ина: <strong className="text-text">{habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}</strong>

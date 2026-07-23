@@ -87,7 +87,7 @@ function ClubTopBlock({ habitId, title, membersCount, top, metricLabel }: ClubTo
     <article className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
       <header className="mb-3 flex items-center justify-between">
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-text">{title}</h3>
+          <h3 className="truncate text-sm font-semibold text-text">〖{title}〗</h3>
           <p className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">
             {membersCount} участников
           </p>
