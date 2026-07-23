@@ -182,22 +182,62 @@ export function TodayPage() {
 
       {(habit.telegram_invite_link || habit.chat_id !== 0) && (
         <section className="mt-4 rounded-card border border-white/10 bg-surface p-4">
-          <h3 className="mb-2 text-sm font-semibold text-text">
-            Ты ещё не в клубе
-          </h3>
-          <p className="mb-3 text-xs text-muted">
-            Чтобы бот принимал твои чек-ины и участники могли тебя «поймать»,
-            нужно вступить в группу клуба в Telegram.
-          </p>
-          <Button
-            onClick={() => {
-              hapticImpact("medium");
-              openChatRoot(habit.chat_id, habit.telegram_invite_link ?? null);
-            }}
-            className="w-full"
-          >
-            👋 Присоединиться к клубу
-          </Button>
+          {membership.status === "active" ? (
+            <>
+              <h3 className="mb-2 text-sm font-semibold text-text">
+                Клуб в Telegram
+              </h3>
+              <Button
+                disabled
+                aria-disabled="true"
+                className="w-full"
+              >
+                ❤️ Вы состоите в клубе
+              </Button>
+              <p className="mt-2 text-xs text-muted">
+                {habit.telegram_invite_link
+                  ? "Нажмите на ссылку ниже, чтобы перейти в группу."
+                  : "Группа клуба привязана к вашему чату."}
+              </p>
+              {habit.telegram_invite_link && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    hapticImpact("light");
+                    openChatRoot(
+                      habit.chat_id,
+                      habit.telegram_invite_link ?? null,
+                    );
+                  }}
+                  className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2 text-sm font-medium text-text transition hover:border-white/20"
+                >
+                  💬 Открыть группу
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <h3 className="mb-2 text-sm font-semibold text-text">
+                Клуб в Telegram
+              </h3>
+              <p className="mb-3 text-xs text-muted">
+                Чтобы бот принимал твои чек-ины и участники могли тебя
+                «поймать», нужно вступить в группу клуба в Telegram.
+              </p>
+              <Button
+                onClick={() => {
+                  hapticImpact("medium");
+                  openChatRoot(
+                    habit.chat_id,
+                    habit.telegram_invite_link ?? null,
+                  );
+                }}
+                className="w-full"
+              >
+                👋 Присоединиться к клубу
+              </Button>
+            </>
+          )}
         </section>
       )}
 
