@@ -45,6 +45,25 @@ def _detect_proof_type(message: Message) -> str | None:
     return None
 
 
+# Минимальная длительность кружка для чек-ина. Должна совпадать с
+# apps/backend/app/services/proof_validator.py:validate_proof_media
+# (захардкожено как `video_note_duration < 3`). Если изменишь здесь —
+# поменяй и там, иначе бот будет принимать то, что worker отвергает.
+_MIN_VIDEO_NOTE_SECONDS: int = 3
+
+
+def _video_note_duration(message: Message) -> int | None:
+    """Длительность кружка из aiogram Message или None, если нет.
+
+    Невалидное видео (duration=None/0) → None. Если < 3 — отвергнем
+    в pre-filter. Если >= 3 — пропустим дальше.
+    """
+    if not message.video_note:
+        return None
+    duration = message.video_note.duration
+    return int(duration) if duration is not None else None
+
+
 def _parse_proof(message: Message) -> dict[str, Any] | None:
     """aiogram Message → Backend payload."""
     sent_at = (message.date or datetime.now(tz=UTC)).astimezone(UTC)
@@ -117,6 +136,7 @@ async def _prefilter(
     user_id: int,
     detected_type: str | None,
     name: str,
+    video_note_duration: int | None = None,
 ) -> str | None:
     """Pre-filter ДО отправки в backend.
 
@@ -125,8 +145,13 @@ async def _prefilter(
     - "" — молча отказать (клуб не привязан к чату, как habit_not_found).
     - "text with {name}" — ответить пользователю и НЕ слать в backend.
 
-    Имя подставляется в шаблон; если detected_type не None и тип не в
-    allowed_proof_types — отвечаем понятным сообщением.
+    Порядок проверок (от более критичных к менее):
+    1) тип в allowed_proof_types — если нет, отвечаем про тип
+    2) специфичные ограничения типа: длительность кружка >= 3 сек
+       (PR №7.5) — иначе worker отвергнет асинхронно с code=too_short,
+       а юзер уже увидит ложное «Принято».
+
+    Имя подставляется в шаблон.
     """
     try:
         state = await backend.get_habit_state(chat_id, user_id)
@@ -164,6 +189,22 @@ async def _prefilter(
             name, _allowed_list_text(allowed)
         )
 
+    # Тип разрешён — теперь можно проверить специфичные для типа
+    # ограничения. Для video_note: минимальная длительность кружка
+    # (>= _MIN_VIDEO_NOTE_SECONDS) — иначе worker отвергнет асинхронно
+    # с code=too_short, а юзер уже увидит ложное «Принято».
+    if detected_type == "video_note":
+        if video_note_duration is None or video_note_duration < _MIN_VIDEO_NOTE_SECONDS:
+            log.info(
+                "prefilter_video_note_too_short",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "duration": video_note_duration,
+                },
+            )
+            return checkin_texts.REJECT_TOO_SHORT.format(name=name)
+
     # Всё ок — пропускаем.
     return None
 
@@ -179,14 +220,17 @@ async def handle_proof(
 
     detected_type = _detect_proof_type(message)
     name = message.from_user.first_name or ""
+    video_note_duration = _video_note_duration(message)
 
     # Pre-filter (PR №9): проверяем тип и дубликат ДО отправки в backend.
+    # Pre-filter (PR №7.5): для video_note проверяем длительность.
     prefilter_reply = await _prefilter(
         backend=backend,
         chat_id=message.chat.id,
         user_id=message.from_user.id,
         detected_type=detected_type,
         name=name,
+        video_note_duration=video_note_duration,
     )
 
     if prefilter_reply is not None:

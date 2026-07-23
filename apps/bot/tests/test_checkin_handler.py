@@ -125,6 +125,11 @@ def _make_video_note_message() -> FakeMessage:
     return FakeMessage(video_note=FakeVideoNote(duration=5))
 
 
+def _make_video_note_message_with_duration(duration: int | None) -> FakeMessage:
+    """Helper: кружок с произвольной длительностью (или None для битого видео)."""
+    return FakeMessage(video_note=FakeVideoNote(duration=duration))
+
+
 def _make_text_message() -> FakeMessage:
     return FakeMessage(text="чек")
 
@@ -499,3 +504,92 @@ async def test_prefilter_correct_type_proceeds_to_backend() -> None:
     assert backend.calls[0]["path"] == "/internal/checkins/process"
     assert len(bot.sent) == 1
     assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
+
+
+# ---------- pre-filter: video_note duration (PR №7.5) ---------------------
+# Бот проверяет длительность кружка ДО отправки в backend. Worker отвергнет
+# асинхронно с code=too_short, но юзер уже увидит ложное «Принято». Поэтому
+# бот должен сразу сказать «кружок слишком короткий, перезапиши подлиннее».
+
+
+@pytest.mark.asyncio
+async def test_prefilter_video_note_too_short_skips_backend() -> None:
+    """Кружок 2 сек → отвергнут ДО backend с правильным текстом."""
+    msg = _make_video_note_message_with_duration(duration=2)
+    bot = FakeBot()
+    backend = FakeBackendClient(habit_state=_DEFAULT_OK_STATE)
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Backend НЕ вызван для /internal/checkins/process
+    assert backend.calls == []
+    # Юзер получил отказ с правильным сообщением
+    assert len(bot.sent) == 1
+    expected = checkin_texts.REJECT_TOO_SHORT.format(name="Test")
+    assert bot.sent[0]["text"] == expected
+
+
+@pytest.mark.asyncio
+async def test_prefilter_video_note_boundary_3_sec_proceeds() -> None:
+    """Кружок ровно 3 сек (= минимум) → проходит pre-filter, шлётся в backend."""
+    msg = _make_video_note_message_with_duration(duration=3)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state=_DEFAULT_OK_STATE,
+        response={"ok": True, "task_id": "abc"},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(backend.calls) == 1
+    assert backend.calls[0]["path"] == "/internal/checkins/process"
+    # payload содержит duration_seconds=3
+    assert backend.calls[0]["json"]["duration_seconds"] == 3
+    assert len(bot.sent) == 1
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
+
+
+@pytest.mark.asyncio
+async def test_prefilter_video_note_none_duration_rejected() -> None:
+    """Битый кружок (duration=None) → отвергнут ДО backend."""
+    msg = _make_video_note_message_with_duration(duration=None)
+    bot = FakeBot()
+    backend = FakeBackendClient(habit_state=_DEFAULT_OK_STATE)
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert backend.calls == []
+    assert len(bot.sent) == 1
+    expected = checkin_texts.REJECT_TOO_SHORT.format(name="Test")
+    assert bot.sent[0]["text"] == expected
+
+
+@pytest.mark.asyncio
+async def test_prefilter_video_note_too_short_takes_priority_over_wrong_type() -> None:
+    """Если кружок слишком короткий И тип не в allowed — сначала про тип.
+
+    Нет, наоборот: длительность проверяется ПОСЛЕ allowed_proof_types
+    (в текущей реализации). Если тип не разрешён — отвечаем про тип,
+    а не про длину. Это намеренно: чтобы юзер сразу знал, что менять.
+    """
+    msg = _make_video_note_message_with_duration(duration=1)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["photo"],  # video_note не разрешён
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert backend.calls == []
+    assert len(bot.sent) == 1
+    # Тип не разрешён → отвечаем про тип, а не про длину
+    text = bot.sent[0]["text"]
+    assert "Видео-кружочек" not in text
+    assert "только" in text or "Фото" in text
