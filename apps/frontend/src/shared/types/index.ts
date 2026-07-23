@@ -22,6 +22,7 @@ export interface Habit {
   penalty_amount: number;
   price_month: number;
   proof_type: ProofType;
+  proof_types: ProofType[];
   prize_pool: number;
   members_count: number;
   is_active: boolean;

@@ -11,8 +11,11 @@ import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
 import { openCheckinTopic, openChatRoot } from "@/shared/telegram/topicLink";
+import type { ProofType } from "@/shared/types";
 
-const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
+type ProofCfg = { emoji: string; title: string; hint: string };
+
+const PROOF_LABELS: Record<ProofType, ProofCfg> = {
   video_note: {
     emoji: "🎥",
     title: "Видео-кружочек",
@@ -29,6 +32,11 @@ const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string 
     hint: "Отправь текстовое подтверждение в чат клуба.",
   },
 };
+
+function resolveProofTypes(habit: { proof_types: ProofType[]; proof_type: ProofType }): ProofType[] {
+  if (habit.proof_types.length > 0) return habit.proof_types;
+  return [habit.proof_type];
+}
 
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
@@ -87,7 +95,10 @@ export function TodayPage() {
   }
 
   const { habit, membership, checkin } = data;
-  const proofCfg = PROOF_LABELS[habit.proof_type] ?? PROOF_LABELS.text;
+  const allowedProofTypes = resolveProofTypes(habit);
+  const singleProof = allowedProofTypes.length === 1;
+  const primaryCfg: ProofCfg =
+    PROOF_LABELS[allowedProofTypes[0]] ?? PROOF_LABELS.text;
 
   return (
     <ScreenLayout>
@@ -144,11 +155,37 @@ export function TodayPage() {
       <section className="mt-4 rounded-card border-2 border-primary/30 bg-primary/5 p-4">
         <div className="mb-2 flex items-center gap-3">
           <span className="text-3xl" aria-hidden="true">
-            {proofCfg.emoji}
+            {singleProof ? primaryCfg.emoji : "🎯"}
           </span>
-          <h3 className="text-base font-semibold text-text">{proofCfg.title}</h3>
+          <h3 className="text-base font-semibold text-text">
+            {singleProof ? primaryCfg.title : "Чек-ин — любой из типов"}
+          </h3>
         </div>
-        <p className="mb-3 text-sm text-muted">{proofCfg.hint}</p>
+        {singleProof ? (
+          <p className="mb-3 text-sm text-muted">{primaryCfg.hint}</p>
+        ) : (
+          <>
+            <p className="mb-3 text-sm text-muted">
+              Клуб принимает несколько типов подтверждений. Подходит любой:
+            </p>
+            <ul className="mb-3 space-y-2">
+              {allowedProofTypes.map((t) => {
+                const cfg = PROOF_LABELS[t] ?? PROOF_LABELS.text;
+                return (
+                  <li key={t} className="flex items-start gap-2 text-sm">
+                    <span className="text-base" aria-hidden="true">
+                      {cfg.emoji}
+                    </span>
+                    <span>
+                      <strong className="text-text">{cfg.title}</strong>
+                      <span className="block text-xs text-muted">{cfg.hint}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
         <div className="flex flex-col gap-2">
           {habit.checkin_topic_thread_id !== null ? (
             <Button
