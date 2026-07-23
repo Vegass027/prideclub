@@ -1,9 +1,9 @@
 import type { CheckinStatus } from "@/shared/types";
 
 const statusConfig: Record<CheckinStatus, { label: string; classes: string; emoji: string }> = {
-  done: { label: "Сделано", classes: "bg-success/15 text-success border-success/30", emoji: "✅" },
-  missed: { label: "Пропуск", classes: "bg-danger/15 text-danger border-danger/30", emoji: "❌" },
-  pending: { label: "Ждёт", classes: "bg-warning/15 text-warning border-warning/30", emoji: "⏳" },
+  done: { label: "Выполнено", classes: "bg-success/15 text-success border-success/30", emoji: "✅" },
+  missed: { label: "Просрочено", classes: "bg-danger/15 text-danger border-danger/30", emoji: "❌" },
+  pending: { label: "Ожидает выполнения", classes: "bg-warning/15 text-warning border-warning/30", emoji: "⏳" },
   not_started: { label: "Не начато", classes: "bg-muted/15 text-muted border-muted/30", emoji: "💤" },
 };
 

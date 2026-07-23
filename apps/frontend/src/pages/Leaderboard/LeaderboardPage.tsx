@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useLeaderboard, useMyHabits, type LeaderboardTab } from "@/shared/hooks";
+import { useParams } from "react-router-dom";
+import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -16,23 +16,15 @@ const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
 
 export function LeaderboardPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
   const [tab, setTab] = useState<LeaderboardTab>("streak");
   const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/profile" : "/profile";
 
   const metricLabel = (t: LeaderboardTab): string =>
     t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
 
-  const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button>
-  ) : undefined;
-
   return (
     <ScreenLayout>
-      <PageHeader title="Лидеры клуба" back backTo={backTo} right={headerRight} />
+      <PageHeader title="Лидеры клуба" back backTo="/leaderboards" />
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 

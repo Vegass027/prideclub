@@ -1,5 +1,5 @@
-import { useNavigate, useParams } from "react-router-dom";
-import { useMyHabits, useToday } from "@/shared/hooks";
+import { useParams } from "react-router-dom";
+import { useToday } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
@@ -40,11 +40,7 @@ function resolveProofTypes(habit: { proof_types: ProofType[]; proof_type: ProofT
 
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/profile" : "/profile";
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -59,12 +55,7 @@ export function TodayPage() {
   if (isLoading) {
     return (
       <ScreenLayout>
-        <PageHeader
-          title="Сегодня"
-          back
-          backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button> : undefined}
-        />
+        <PageHeader title="Сегодня" back backTo="/profile" />
         <Skeleton className="h-24 w-full" />
         <div className="mt-4">
           <Skeleton className="h-40 w-full" />
@@ -77,12 +68,7 @@ export function TodayPage() {
   if (isError || !data) {
     return (
       <ScreenLayout>
-        <PageHeader
-          title="Сегодня"
-          back
-          backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button> : undefined}
-        />
+        <PageHeader title="Сегодня" back backTo="/profile" />
         <EmptyState
           icon="⚠️"
           title="Не удалось загрузить статус"
@@ -106,21 +92,7 @@ export function TodayPage() {
         title={habit.title}
         subtitle={habit.timezone}
         back
-        backTo={backTo}
-        right={
-          <div className="flex items-center gap-2">
-            <StatusBadge status={checkin.status} />
-            {showSwitcher && (
-              <button
-                onClick={() => navigate("/profile")}
-                className="text-xs text-primary"
-                aria-label="Сменить клуб"
-              >
-                Сменить
-              </button>
-            )}
-          </div>
-        }
+        backTo="/profile"
       />
 
       {habit.description && (
@@ -150,6 +122,10 @@ export function TodayPage() {
         <p className="text-sm text-muted">
           Окно чек-ина: <strong className="text-text">{habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}</strong>
         </p>
+        <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3">
+          <span className="text-sm text-muted">Ежедневное задание:</span>
+          <StatusBadge status={checkin.status} />
+        </div>
       </section>
 
       <section className="mt-4 rounded-card border-2 border-primary/30 bg-primary/5 p-4">
