@@ -1,3 +1,4 @@
+import "@/telegram-bg";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { BrowserRouter } from "react-router-dom";
@@ -17,7 +18,7 @@ const queryClient = new QueryClient({
 
 export function App() {
   useEffect(() => {
-    initTelegram();
+    void initTelegram();
   }, []);
 
   return (

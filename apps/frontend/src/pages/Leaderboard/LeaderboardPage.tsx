@@ -21,13 +21,13 @@ export function LeaderboardPage() {
   const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
+  const backTo = showSwitcher ? "/profile" : "/profile";
 
   const metricLabel = (t: LeaderboardTab): string =>
     t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
 
   const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
+    <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button>
   ) : undefined;
 
   return (

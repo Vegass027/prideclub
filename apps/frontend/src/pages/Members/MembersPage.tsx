@@ -29,11 +29,11 @@ export function MembersPage() {
   const catchMutation = useCatch(habitId);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
+  const backTo = showSwitcher ? "/profile" : "/profile";
   const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
+    <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button>
   ) : undefined;
 
   const handleCatch = (m: MemberRow) => {

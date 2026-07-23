@@ -1,6 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { MarketplacePage } from "@/pages/Marketplace/MarketplacePage";
-import { MyHabitsPage } from "@/pages/MyHabits/MyHabitsPage";
 import { TodayPage } from "@/pages/Today/TodayPage";
 import { MembersPage } from "@/pages/Members/MembersPage";
 import { LeaderboardPage } from "@/pages/Leaderboard/LeaderboardPage";
@@ -14,7 +13,7 @@ export function AppRouter() {
       <Route path="/" element={<Navigate to="/marketplace" replace />} />
       <Route path="/onboarding" element={<OnboardingPage />} />
       <Route path="/marketplace" element={<MarketplacePage />} />
-      <Route path="/my-habits" element={<MyHabitsPage />} />
+      <Route path="/my-habits" element={<Navigate to="/profile" replace />} />
       <Route path="/habits/:habitId/today" element={<TodayPage />} />
       <Route path="/habits/:habitId/members" element={<MembersPage />} />
       <Route path="/habits/:habitId/leaderboard" element={<LeaderboardPage />} />

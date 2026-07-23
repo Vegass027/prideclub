@@ -326,6 +326,28 @@ export function HabitCreatePage() {
           />
         </FieldRow>
 
+        <FieldRow
+          label="Telegram invite-ссылка"
+          error={
+            touched.telegram_invite_link
+              ? errors.telegram_invite_link
+              : undefined
+          }
+        >
+          <TextInput
+            value={state.telegram_invite_link}
+            onChange={(e) => set("telegram_invite_link", e.target.value)}
+            onBlur={() => markTouched("telegram_invite_link")}
+            placeholder="https://t.me/+abc123"
+            inputMode="url"
+          />
+          <p className="mt-1 text-xs text-muted">
+            Ссылка-приглашение в группу клуба. Используется в кнопке
+            «Присоединиться к клубу» у пользователей. Получить: открой
+            группу в Telegram → «Пригласить участников» → скопируй ссылку.
+          </p>
+        </FieldRow>
+
         <FieldRow label="Фото клуба">
           <div className="flex flex-col gap-3">
             {state.photo_url ? (

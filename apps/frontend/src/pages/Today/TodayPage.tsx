@@ -10,7 +10,7 @@ import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
-import { openCheckinTopic } from "@/shared/telegram/topicLink";
+import { openCheckinTopic, openChatRoot } from "@/shared/telegram/topicLink";
 
 const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
   video_note: {
@@ -36,7 +36,7 @@ export function TodayPage() {
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
+  const backTo = showSwitcher ? "/profile" : "/profile";
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -55,7 +55,7 @@ export function TodayPage() {
           title="Сегодня"
           back
           backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
+          right={showSwitcher ? <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button> : undefined}
         />
         <Skeleton className="h-24 w-full" />
         <div className="mt-4">
@@ -73,7 +73,7 @@ export function TodayPage() {
           title="Сегодня"
           back
           backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
+          right={showSwitcher ? <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button> : undefined}
         />
         <EmptyState
           icon="⚠️"
@@ -101,7 +101,7 @@ export function TodayPage() {
             <StatusBadge status={checkin.status} />
             {showSwitcher && (
               <button
-                onClick={() => navigate("/my-habits")}
+                onClick={() => navigate("/profile")}
                 className="text-xs text-primary"
                 aria-label="Сменить клуб"
               >
@@ -180,7 +180,7 @@ export function TodayPage() {
         </div>
       </section>
 
-      {habit.telegram_invite_link && (
+      {(habit.telegram_invite_link || habit.chat_id !== 0) && (
         <section className="mt-4 rounded-card border border-white/10 bg-surface p-4">
           <h3 className="mb-2 text-sm font-semibold text-text">
             Ты ещё не в клубе
@@ -192,18 +192,7 @@ export function TodayPage() {
           <Button
             onClick={() => {
               hapticImpact("medium");
-              const tg = window.Telegram?.WebApp;
-              if (tg?.openTelegramLink && habit.telegram_invite_link) {
-                tg.openTelegramLink(habit.telegram_invite_link);
-              } else if (tg?.openLink && habit.telegram_invite_link) {
-                tg.openLink(habit.telegram_invite_link);
-              } else if (habit.telegram_invite_link) {
-                window.open(
-                  habit.telegram_invite_link,
-                  "_blank",
-                  "noopener,noreferrer",
-                );
-              }
+              openChatRoot(habit.chat_id, habit.telegram_invite_link ?? null);
             }}
             className="w-full"
           >

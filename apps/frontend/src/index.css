@@ -10,9 +10,11 @@
 
 html, body, #root {
   height: 100%;
+  background-color: var(--tg-theme-bg-color, #0F1115);
 }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
   -webkit-tap-highlight-color: transparent;
+  color-scheme: dark;
 }

@@ -29,10 +29,39 @@ declare global {
           impactOccurred: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
           notificationOccurred: (type: "error" | "success" | "warning") => void;
         };
+        setHeaderColor?: (color: string) => void;
+        setBackgroundColor?: (color: string) => void;
+        setBottomBarColor?: (color: string) => void;
         colorScheme?: "light" | "dark";
         themeParams?: Record<string, string>;
       };
     };
+  }
+}
+
+// Прямой side-effect: фиксируем тёмный фон Mini App сразу при
+// загрузке модуля. Tree-shaking не уберёт это, потому что мы
+// пишем в window (site-effect очевиден для bundler'а).
+if (typeof window !== "undefined") {
+  const tg = (
+    window as unknown as {
+      Telegram?: { WebApp?: Record<string, unknown> };
+    }
+  ).Telegram?.WebApp;
+  if (tg) {
+    const tryCall = (key: string) => {
+      const fn = tg[key];
+      if (typeof fn === "function") {
+        try {
+          (fn as (c: string) => void)("#0F1115");
+        } catch {
+          // ignore — старые версии SDK
+        }
+      }
+    };
+    tryCall("setHeaderColor");
+    tryCall("setBackgroundColor");
+    tryCall("setBottomBarColor");
   }
 }
 
@@ -41,8 +70,19 @@ export async function initTelegram(): Promise<boolean> {
   if (typeof window === "undefined") return false;
   try {
     await init();
-    window.Telegram?.WebApp?.ready?.();
-    window.Telegram?.WebApp?.expand?.();
+    const webapp = window.Telegram?.WebApp;
+    webapp?.ready?.();
+    webapp?.expand?.();
+    // Фиксируем тёмный фон Mini App, чтобы до отрисовки React и
+    // на устройствах с белой темой Telegram фон не моргал белым.
+    // Telegram WebApp SDK >=6.0 поддерживает setBackgroundColor.
+    try {
+      webapp?.setHeaderColor?.("#0F1115");
+      webapp?.setBackgroundColor?.("#0F1115");
+      webapp?.setBottomBarColor?.("#0F1115");
+    } catch {
+      // ignore — старые версии SDK
+    }
     initialized = true;
     return true;
   } catch {
