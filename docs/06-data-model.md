@@ -38,7 +38,8 @@
 | timezone | VARCHAR | **TZ клуба** (не пользователя) — для расчёта "сегодня" |
 | penalty_amount | INT | Размер штрафа |
 | price_month | INT | Стоимость подписки |
-| proof_type | ENUM | `video_note` / `photo` / `text` |
+| proof_type | ENUM | `video_note` / `photo` / `text` — **алиас** `proof_types[0]`, обновляется синхронно в `HabitService.update` |
+| proof_types | JSONB NOT NULL | **Массив 1..3 значений** ∈ {video_note, photo, text} (миграция 012). CHECK constraint в БД — структурный; значения валидируются в `HabitService._validate_proof_types` |
 | prize_pool | INT | Текущий призовой фонд клуба |
 | checkin_topic_thread_id | BIGINT NULL | `message_thread_id` топика форума для чек-инов (миграция 010) |
 | notifications_topic_thread_id | BIGINT NULL | `message_thread_id` топика форума для уведомлений о ловле и штрафах (миграция 010) |
@@ -201,7 +202,7 @@ PRIMARY KEY (user_id, offer_version_id)
 
 ## 3. Полный набор миграций
 
-> На проде применена голова `011_habit_chat_topic` (см.
+> На проде применена голова `012_proof_types` (см.
 > [09-prod-readiness.md](09-prod-readiness.md) §1.1). Файлы миграций лежат в
 > `apps/backend/alembic/versions/`. Для upgrade/downgrade используется
 > `make migrate` / `make migrate-test`.
@@ -210,7 +211,7 @@ PRIMARY KEY (user_id, offer_version_id)
 |---|---|---|
 | `000_extensions` | `000_extensions.py` | `pgcrypto`, `pg_stat_statements` |
 | `001_initial_schema` | `001_initial_schema.py` | Все таблицы раздела 1 + правильные типы и индексы |
-| `002_bonus_and_penalty_fixes` | `002_bonus_and_penalty_fixes.py` | `penalties.{bonus_applied, reason, date}` + UNIQUE `(membership_id, date, reason)`, `users.bonus_points`, `memberships.auto_renew_enabled`, `seasons.prize_rules_snapshot`, таблицы `daily_streak_snapshots`, `suspicious_pairs`, `bonus_rules`, `season_prize_rules`, `pricing_rules`, `offer_versions`, `user_consents` |
+| `002_bonus_and_penalty_fixes` | `002_bonus_and_penalty_fixin.py` | `penalties.{bonus_applied, reason, date}` + UNIQUE `(membership_id, date, reason)`, `users.bonus_points`, `memberships.auto_renew_enabled`, `seasons.prize_rules_snapshot`, таблицы `daily_streak_snapshots`, `suspicious_pairs`, `bonus_rules`, `season_prize_rules`, `pricing_rules`, `offer_versions`, `user_consents` |
 | `003_migrate_bonus_points` | `003_migrate_bonus_points.py` | Sanity-check + перенос `memberships.bonus_points` → `users.bonus_points` |
 | `004_notifications_and_offer` | `004_notifications_and_offer.py` | `users.notifications_enabled`, `accepted_offer_at`, `deleted_at`, `data_anonymized`; `habits.timezone='Europe/Moscow'` default |
 | `005_users_gdpr_columns` | `005_users_gdpr_columns.py` | GDPR-специфичные колонки (расширение 004) |
@@ -220,6 +221,7 @@ PRIMARY KEY (user_id, offer_version_id)
 | `009_chat_id_partial_unique` | `009_chat_id_partial_unique.py` | Частичный UNIQUE-индекс на `habits.chat_id` (только `WHERE chat_id IS NOT NULL`) — гарантирует, что у двух активных клубов не может быть одного Telegram-чата |
 | `010_habit_topics` | `010_habit_topics.py` | `habits.checkin_topic_thread_id` и `habits.notifications_topic_thread_id` (BIGINT NULL) + partial btree-индексы. Включает топик-фильтр чек-инов. |
 | `011_habit_chat_topic` | `011_habit_chat_topic.py` | `habits.chat_topic_thread_id` (BIGINT NULL) + partial btree-индекс. Третий топик для общего чата участников клуба. |
+| `012_proof_types` | `012_proof_types.py` | `habits.proof_types JSONB NOT NULL DEFAULT '["video_note"]'` + CHECK (длина 1..3) + GIN-индекс. Бэкфилл: `UPDATE habits SET proof_types = jsonb_build_array(proof_type::text)`. `habits.proof_type` остаётся как алиас первого элемента массива для обратной совместимости. |
 
 > SQL-блоки 000–004 в старой версии этого документа устарели (не отражают 005–009).
 > Реальный код — в `apps/backend/alembic/versions/`.

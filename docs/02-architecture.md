@@ -284,9 +284,9 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | CI/CD | GitHub Actions (lint + test) + Dependabot | — |
 | Резервные копии | `backup_cron.sh` готов, **не развёрнут** (нет aws CLI, нет S3 env) | — |
 
-## 9. Известные проблемы и долги (snapshot 2026-07-22)
+## 9. Известные проблемы и долги (snapshot 2026-07-23)
 
-- (см. ниже — обновлено 2026-07-23)
+> Обновлено 2026-07-23 после закрытия задачи topic-scoped check-in.
 
 | Что | Где | Статус |
 |---|---|---|
@@ -294,12 +294,22 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | Контракт `chat_id` vs `habit_id` | `internal_payments.py` ↔ `bot/handlers/payments.py` | Сломано, требует фикса перед включением платежей |
 | `SENTRY_DSN` пуст | `.env` | Sentry no-op |
 | Бэкапы не развёрнуты | `infra/backup/`, `.env` | Сценарий в плане, не выполнен |
-| Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker |
-| Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет |
+| Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker (warning не блокирует) |
+| Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет деплой (см. §12 ниже) |
 | Server в Германии | `169.58.52.78` (Contabo) | ФЗ-152 под риском; миграция в Selectel — план |
-| `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов, сегодня) vs `SELECT count(*) FROM habits` | Clubs не созданы, POST /admin/v1/habits не отрабатывал — расследовать |
+| `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов) vs `SELECT count(*) FROM habits` | **Исправлено** — клубы созданы через admin API; 2 клуба в проде (`Планка`, `Пробежка`) |
 | `SERVICE_TOKEN_TTL_SECONDS=60`, `INIT_DATA_MAX_AGE_SECONDS=86400` | `.env` | Стандартно, см. `core/constants.py` |
 | Admin Mini App `OWNER_TELEGRAM_ID=0` по умолчанию | `docker-compose.yml` | Без явного ID в env owner-gate пускает никого — правильно. |
+
+### 9.1. Закрытые проблемы (snapshot 2026-07-23)
+
+| Что | Где | Фикс |
+|---|---|---|
+| Bot webhook SSL error → pending_update_count растёт | `bot/main.py`, `infra/.env` | `WEBHOOK_BASE_URL=https://169.58.52.78` → `https://api.prideclub.fun`; fail-fast в проде через `_validate_webhook_url` |
+| Worker `NameError: CheckinWrongTopicError is not defined` → молчаливый retry-loop | `apps/worker/worker/tasks/process_checkin.py:99` | Добавлен импорт в `from app.core.exceptions import ...` |
+| Mini App `status=pending` не обновляется после кружка | топик-фильтр + worker | `forward_to_thread_id` корректно резолвится через `message_thread_id` от Telegram |
+| PATCH `/admin/v1/habits/{id}` не сохранял price_month | `apps/frontend/src/admin/pages/HabitEditForm.tsx` | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks`; типы `AdminHabitUpdatePayload` расширены |
+| Backend ForwardRef('Response') "class not fully defined" | `apps/backend/app/core/middleware.py` | Убран `from __future__ import annotations` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
 
 ---
 
@@ -368,4 +378,109 @@ Topic-scoped фильтр дополняет существующие антиф
 - Кнопка «💬 Перейти в чат» появляется только если `chat_topic_thread_id` задан.
 - Секция «Клуб в Telegram»: если `membership.status === "active"` — disabled-кнопка
   «❤️ Вы состоите в клубе»; иначе — CTA «👋 Присоединиться к клубу».
+
+---
+
+## 11. Multi-proof_types — клуб принимает 1-3 типа чек-ина (миграция 012)
+
+> Реализовано 2026-07-23. Детальная схема — `docs/06-data-model.md` §3
+> (миграция 012) и §10 (anti-fraud rules).
+
+### 11.1. Проблема
+
+Раньше у клуба был ровно один `proof_type` (`video_note` | `photo` | `text`).
+Владелец не мог разрешить «кружок ИЛИ фото» — только одно из трёх.
+
+### 11.2. Решение
+
+- БД: `habits.proof_types JSONB NOT NULL` — массив из 1..3 строк ∈ enum.
+- `habits.proof_type` остаётся как **alias** `proof_types[0]` для обратной
+  совместимости со старыми клиентами.
+- Backend API `AdminHabitCreateRequest` / `AdminHabitUpdateRequest` принимают
+  `proof_types` (или устаревший `proof_type`, конвертируется в массив).
+- CheckinService проверяет `proof.proof_type.value in habit.proof_types`.
+- Admin Mini App: `CheckboxGroup` вместо `RadioGroup` (1..3 опции, минимум 1
+  обязателен).
+
+### 11.3. Обратная совместимость
+
+Миграция 012 бэкфиллит существующие строки:
+
+```sql
+UPDATE habits SET proof_types = jsonb_build_array(proof_type::text);
+```
+
+Существующие клубы (2 в проде) сохраняют `proof_types = ["video_note"]`.
+Чек-ины работают как раньше.
+
+### 11.4. Что НЕ менялось
+
+- Frontend User Mini App (PR плана №8 — отдельный коммит).
+- Bot pre-filter (PR плана №9 — отдельный коммит).
+- Миграция `012_proof_types.py` — append-only (правило §3.2
+  AGENT_BOOTSTRAP.md).
+
+---
+
+## 12. Force-update финансов (owner-only escape hatch)
+
+> Реализовано 2026-07-23. См. также `apps/backend/app/api/admin/v1/habits.py`
+> (`PATCH /admin/v1/habits/{id}/force-financials`) и `HabitService.force_update_financials`.
+
+### 12.1. Зачем
+
+По умолчанию `price_month` и `penalty_amount` были заморожены после первого
+вступления в клуб (финансовая целостность, ФЗ-152). Owner не мог поднять цену
+даже при объявлении участникам за неделю. Типичный use case — поднять цену с
+нового месяца.
+
+### 12.2. Решение
+
+Заморозка СНЯТА. Middleware `/admin/v1/*` уже гейтит доступ только owner'у —
+если вызов прошёл, это owner, доверяем.
+
+`PATCH /admin/v1/habits/{id}` теперь принимает `price_month` / `penalty_amount`
+без проверки `active_members_count`. Endpoint `/force-financials` оставлен
+для targeted-обновления только финансов (без пересохранения остальных полей).
+
+### 12.3. Семантика (важно для compliance)
+
+**Меняется**:
+- `habits.price_month` — применяется к новым подпискам.
+- `habits.penalty_amount` — применяется к будущим штрафам.
+
+**НЕ меняется** (никогда):
+- `users.deposit_balance` участников.
+- `memberships.subscription_until` (оплаченный период остаётся).
+- `memberships.auto_renew_enabled`.
+- `memberships.status` (никого не выгоняет).
+
+Уже оплаченные подписки продолжают действовать до конца оплаченного периода
+по старой цене. Новые подписки — по новой.
+
+### 12.4. Audit
+
+Каждое force-update логируется WARN с полным контекстом:
+`admin_id`, `habit_id`, `old_price_month`, `new_price_month`, etc.
+
+---
+
+## 13. Деплой фронтенда — двухслойный nginx
+
+> ⚠️ Усложнение для деплоя. Стандартный `docker compose build frontend`
+> не обновляет dist в nginx-контейнере (см. `infra/deploy.sh` step 4).
+>
+> **Решение для разработчика**: после rsync `apps/frontend/` в `/app/apps/frontend/`
+> на сервере:
+>
+> ```bash
+> docker run --rm -v /app/apps/frontend:/app -w /app node:20-alpine \
+>   sh -c "npm ci --silent && npm run build"
+> docker cp /app/apps/frontend/dist/. habit-frontend:/usr/share/nginx/html/
+> docker exec habit-frontend nginx -s reload
+> ```
+>
+> Хостовая `/usr/share/nginx/html/` и контейнерная — **разные папки**,
+> потому что nginx-образ сам по себе содержит HTML. Build в образе работает
+> только при изменении `Dockerfile`, не исходников.
 

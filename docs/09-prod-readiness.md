@@ -31,7 +31,7 @@
 | 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
-| 9 | **PostgreSQL** (11 миграций, расширения) | ✅ Работает | `000_extensions` → `011_habit_chat_topic` (миграции 010/011 — topic-scoped чек-ины и третий топик) |
+| 9 | **PostgreSQL** (12 миграций, расширения) | ✅ Работает | `000_extensions` → `012_proof_types` (миграции 010/011 — topic-scoped чек-ины и третий топик; 012 — `proof_types JSONB` для multi-proof_types в админке) |
 | 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py`. T1: `parse_rate_limit_spec` в `core/utils.py`. |
 | 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` + T2 `SuspiciousPairsRepository.lookup_flagged` |
 | 12 | **Season prize distribution** | ✅ Работает | `close_season` через worker |
@@ -72,6 +72,12 @@
 | 3 | Worker логировал обычным текстом | Добавлен `worker/logging_setup.py` с structlog |
 | 4 | Не было общего HTTP rate-limit | `services/http_rate_limiter.py` + `RateLimitMiddleware` |
 | 5 | Не было домена / HTTPS | Куплен `prideclub.fun`, настроен nginx + Let's Encrypt, Mini App доступен |
+| 6 | Bot webhook SSL error → `pending_update_count` растёт | `WEBHOOK_BASE_URL=https://169.58.52.78` → `https://api.prideclub.fun`; fail-fast в проде через `_validate_webhook_url` |
+| 7 | Worker `NameError: CheckinWrongTopicError` в retry-loop | Добавлен импорт в `apps/worker/worker/tasks/process_checkin.py:7-12` |
+| 8 | Mini App `status=pending` не обновляется | Топик-фильтр пропускает кружки после правильной настройки `checkin_topic_thread_id` (id топика = `12` в проде) |
+| 9 | PATCH `/admin/v1/habits/{id}` не сохранял price_month | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks` в `HabitEditForm.tsx`; `AdminHabitUpdatePayload` расширен |
+| 10 | Backend `ForwardRef('Response') not fully defined` | Убран `from __future__ import annotations` в `core/middleware.py` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
+| 11 | Финансы (`price_month`, `penalty_amount`) были заморожены после первого участника | Заморозка снята в `HabitService.update`; middleware `/admin/v1/*` уже гейтит доступ только owner'у. Endpoint `PATCH /admin/v1/habits/{id}/force-financials` оставлен для targeted-обновления. См. `02-architecture.md` §12. |
 
 ---
 
