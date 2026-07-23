@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { adminHabitsApi, type AdminHabit } from "../api";
 import {
+  CheckboxGroup,
   CustomSelect,
   FieldRow,
-  RadioGroup,
   TextArea,
   TextInput,
 } from "../components/Form";
@@ -52,7 +52,7 @@ interface FormState {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: ProofType;
+  proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
   stat_gain_per_checkin: string;
@@ -73,7 +73,7 @@ const EMPTY: FormState = {
   checkin_window_start: "09:00",
   checkin_window_end: "21:00",
   timezone: "Europe/Moscow",
-  proof_type: "video_note",
+  proof_types: ["video_note"],
   price_month_rub: "299",
   penalty_amount_rub: "100",
   stat_gain_per_checkin: "2",
@@ -105,7 +105,9 @@ function habitToForm(h: AdminHabit): FormState {
     checkin_window_start: h.checkin_window_start.slice(0, 5),
     checkin_window_end: h.checkin_window_end.slice(0, 5),
     timezone: h.timezone,
-    proof_type: h.proof_type as ProofType,
+    proof_types: (h.proof_types && h.proof_types.length > 0
+      ? h.proof_types
+      : [h.proof_type]) as ProofType[],
     price_month_rub: kopToRubStr(h.price_month),
     penalty_amount_rub: kopToRubStr(h.penalty_amount),
     stat_gain_per_checkin: String(h.stat_gain_per_checkin),
@@ -272,7 +274,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         checkin_window_start: form.checkin_window_start,
         checkin_window_end: form.checkin_window_end,
         timezone: form.timezone,
-        proof_type: form.proof_type,
+        proof_types: form.proof_types,
         stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
@@ -605,12 +607,12 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
       </FieldRow>
 
-      <FieldRow label="Тип подтверждения">
-        <RadioGroup
-          name="proof_type"
+      <FieldRow label="Типы подтверждения (можно выбрать несколько)">
+        <CheckboxGroup
+          name="proof_types"
           options={PROOF_OPTIONS}
-          value={form.proof_type}
-          onChange={(next) => set("proof_type", next as ProofType)}
+          value={form.proof_types}
+          onChange={(next) => set("proof_types", next as ProofType[])}
         />
       </FieldRow>
 

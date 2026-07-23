@@ -11,8 +11,9 @@ export interface AdminHabit {
   checkin_window_end: string;
   timezone: string;
   penalty_amount: number;
-  price_month: number;
+price_month: number;
   proof_type: AdminHabitProofType;
+  proof_types: AdminHabitProofType[];
   prize_pool: number;
   is_active: boolean;
   photo_url: string | null;
@@ -99,7 +100,7 @@ export interface AdminHabitCreatePayload {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: AdminHabitProofType;
+  proof_types: AdminHabitProofType[];
   price_month: number;
   penalty_amount: number;
   stat_gain_per_checkin: number;
@@ -121,7 +122,7 @@ export interface AdminHabitUpdatePayload {
   checkin_window_start?: string;
   checkin_window_end?: string;
   timezone?: string;
-  proof_type?: AdminHabitProofType;
+  proof_types?: AdminHabitProofType[];
   stat_gain_per_checkin?: number;
   stat_loss_per_miss?: number;
   member_limit?: number | null;

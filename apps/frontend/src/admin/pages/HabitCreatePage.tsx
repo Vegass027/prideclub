@@ -4,9 +4,9 @@ import { EmptyState } from "@/shared/ui/EmptyState";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import {
+  CheckboxGroup,
   CustomSelect,
   FieldRow,
-  RadioGroup,
   TextArea,
   TextInput,
 } from "../components/Form";
@@ -56,7 +56,7 @@ interface FormState {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: ProofType;
+  proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
   stat_gain_per_checkin: string;
@@ -78,8 +78,8 @@ const INITIAL_STATE: FormState = {
   stat_icon: "🔥",
   checkin_window_start: "09:00",
   checkin_window_end: "21:00",
-  timezone: "Europe/Moscow",
-  proof_type: "video_note",
+timezone: "Europe/Moscow",
+  proof_types: ["video_note"],
   price_month_rub: "299",
   penalty_amount_rub: "100",
   stat_gain_per_checkin: "2",
@@ -116,7 +116,7 @@ interface RawForm {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: ProofType;
+  proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
   stat_gain_per_checkin: string;
@@ -280,7 +280,7 @@ export function HabitCreatePage() {
         checkin_window_start: state.checkin_window_start,
         checkin_window_end: state.checkin_window_end,
         timezone: state.timezone,
-        proof_type: state.proof_type,
+        proof_types: state.proof_types,
         price_month: priceKop,
         penalty_amount: penaltyKop,
         stat_gain_per_checkin: toIntOrNull(state.stat_gain_per_checkin) ?? 2,
@@ -642,12 +642,12 @@ export function HabitCreatePage() {
           />
         </FieldRow>
 
-        <FieldRow label="Тип подтверждения">
-          <RadioGroup
-            name="proof_type"
+        <FieldRow label="Типы подтверждения (можно выбрать несколько)">
+          <CheckboxGroup
+            name="proof_types"
             options={PROOF_OPTIONS}
-            value={state.proof_type}
-            onChange={(next) => set("proof_type", next as ProofType)}
+            value={state.proof_types}
+            onChange={(next) => set("proof_types", next as ProofType[])}
           />
         </FieldRow>
 
