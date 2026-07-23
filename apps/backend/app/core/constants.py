@@ -25,6 +25,11 @@ class ProofType(str, Enum):
     TEXT = "text"
 
 
+# Список всех значений ProofType для валидации входящих payload'ов
+# и для админских чекбоксов.
+PROOF_TYPE_VALUES: tuple[str, ...] = tuple(pt.value for pt in ProofType)
+
+
 class TransactionType(str, Enum):
     SUBSCRIPTION = "subscription"
     DEPOSIT_TOPUP = "deposit_topup"

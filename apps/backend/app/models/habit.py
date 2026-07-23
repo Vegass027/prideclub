@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, String, Text, Time, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import ProofType
@@ -34,6 +34,17 @@ class Habit(Base):
     proof_type: Mapped[ProofType] = mapped_column(
         Enum(ProofType, name="proof_type", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
+    )
+
+    # Список из 1..3 значений ∈ {"video_note", "photo", "text"} (миграция 012).
+    # `proof_type` выше — алиас `proof_types[0]`, обновляется синхронно
+    # в HabitService.create/update. CHECK constraint и GIN-индекс —
+    # в миграции 012.
+    proof_types: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default='["video_note"]',
     )
 
     prize_pool: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

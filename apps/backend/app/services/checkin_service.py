@@ -90,8 +90,9 @@ class CheckinService:
         # Антифрод — медиа должно соответствовать типу привычки.
         # proof.proof_type приходит из бота и проверяется здесь как
         # независимый от habit источник.
+        # Multi-proof (migration 012): проверяем вхождение в массив разрешённых.
         validate_proof_media(proof, max_age_seconds=60)
-        if proof.proof_type.value != habit.proof_type.value:
+        if proof.proof_type.value not in (habit.proof_types or []):
             from app.services.proof_validator import ProofValidationError
 
             raise ProofValidationError("wrong_type")

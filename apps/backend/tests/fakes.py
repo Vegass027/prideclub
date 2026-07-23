@@ -120,8 +120,12 @@ class FakeHabitRepo:
             "prize_pool": 0,
             "is_active": False,
             "proof_type": ProofType.VIDEO_NOTE,
+            "proof_types": [ProofType.VIDEO_NOTE.value],
         }
         merged = {**defaults, **fields}
+        # Синхронизируем proof_type с первым из proof_types если нужно.
+        if "proof_types" in merged and merged["proof_types"]:
+            merged["proof_type"] = ProofType(merged["proof_types"][0])
         habit = Habit(**merged)
         self._store[str(habit.id)] = habit
         return habit
@@ -185,8 +189,13 @@ class FakeSuspiciousPairsRepository:
 
 
 def make_habit(
-    *, id: str | None = None, chat_id: int = 100, proof: ProofType = ProofType.VIDEO_NOTE
+    *,
+    id: str | None = None,
+    chat_id: int = 100,
+    proof: ProofType = ProofType.VIDEO_NOTE,
+    proof_types: list[str] | None = None,
 ) -> Habit:
+    pts = proof_types if proof_types is not None else [proof.value]
     return Habit(
         id=id or str(uuid4()),
         title="Test Habit",
@@ -198,6 +207,7 @@ def make_habit(
         price_month=1000,
         prize_pool=0,
         proof_type=proof,
+        proof_types=pts,
     )
 
 

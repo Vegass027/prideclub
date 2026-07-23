@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.core.constants import PROOF_TYPE_VALUES, ProofType
 from app.core.exceptions import (
     HabitArchivedError,
     HabitNotFoundError,
@@ -65,7 +66,7 @@ class HabitService:
         checkin_window_start: Any,
         checkin_window_end: Any,
         timezone_str: str,
-        proof_type: Any,
+        proof_types: list[str],
         price_month: int,
         penalty_amount: int,
         stat_gain_per_checkin: int,
@@ -82,6 +83,11 @@ class HabitService:
         уведомлений (https://t.me/c/<chat_id>/<thread_id>).
         Опционально — топик общего чата клуба в той же группе.
         Бот ничего не создаёт — топики делает владелец в Telegram.
+
+        Multi-proof (migration 012): `proof_types` — массив 1..3 строк
+        из {"video_note", "photo", "text"}. `proof_type` в БД
+        выставляется как `proof_types[0]` (для обратной совместимости
+        со старыми клиентами Bot API).
         """
         _validate_title(title)
         _validate_stat_name(stat_name)
@@ -96,6 +102,7 @@ class HabitService:
             stat_loss_per_miss=stat_loss_per_miss,
         )
         _validate_member_limit(member_limit)
+        _validate_proof_types(proof_types)
 
         checkin_topic = parse_telegram_topic_link(checkin_topic_link)
         notifications_topic = parse_telegram_topic_link(notifications_topic_link)
@@ -168,7 +175,8 @@ class HabitService:
             "checkin_window_start": checkin_window_start,
             "checkin_window_end": checkin_window_end,
             "timezone": timezone_str,
-            "proof_type": proof_type,
+            "proof_types": proof_types,
+            "proof_type": ProofType(proof_types[0]),
             "penalty_amount": penalty_amount,
             "price_month": price_month,
             "prize_pool": 0,
@@ -228,6 +236,11 @@ class HabitService:
             _validate_telegram_invite_link(fields["telegram_invite_link"])
         if "timezone" in fields:
             _validate_timezone(fields["timezone"])
+        if "proof_types" in fields:
+            _validate_proof_types(fields["proof_types"])
+            # Синхронизируем proof_type (первый элемент) для обратной
+            # совместимости со старыми клиентами.
+            fields["proof_type"] = ProofType(fields["proof_types"][0])
         if "checkin_window_start" in fields or "checkin_window_end" in fields:
             start = fields.get("checkin_window_start", habit.checkin_window_start)
             end = fields.get("checkin_window_end", habit.checkin_window_end)
@@ -607,3 +620,29 @@ def _validate_member_limit(limit: int | None) -> None:
             "member_limit должен быть NULL или положительным INTEGER",
             code="habit_member_limit_invalid",
         )
+
+
+def _validate_proof_types(proof_types: list[str]) -> None:
+    """Массив 1..3 уникальных значений ∈ PROOF_TYPE_VALUES."""
+    if not isinstance(proof_types, list):
+        raise HabitValidationError(
+            "proof_types должен быть массивом",
+            code="habit_proof_types_type",
+        )
+    if len(proof_types) < 1 or len(proof_types) > 3:
+        raise HabitValidationError(
+            "proof_types должен содержать от 1 до 3 значений",
+            code="habit_proof_types_count",
+        )
+    if len(set(proof_types)) != len(proof_types):
+        raise HabitValidationError(
+            "proof_types не должны содержать дубликатов",
+            code="habit_proof_types_duplicates",
+        )
+    for pt in proof_types:
+        if not isinstance(pt, str) or pt not in PROOF_TYPE_VALUES:
+            raise HabitValidationError(
+                f"proof_types содержит недопустимое значение: {pt!r}. "
+                f"Допустимо: {PROOF_TYPE_VALUES}",
+                code="habit_proof_types_invalid",
+            )

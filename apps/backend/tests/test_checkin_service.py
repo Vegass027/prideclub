@@ -185,6 +185,64 @@ async def test_checkin_wrong_proof_type() -> None:
     assert exc.value.code == "wrong_type"
 
 
+@pytest.mark.asyncio
+async def test_checkin_accepts_proof_type_in_proof_types() -> None:
+    """Миграция 012: если habit принимает [video_note, photo] — кружок ОК."""
+    habit = make_habit(
+        proof=ProofType.VIDEO_NOTE,
+        proof_types=[ProofType.VIDEO_NOTE.value, ProofType.PHOTO.value],
+    )
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+    checkin, created = await service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=1,
+        now_utc=datetime.now(tz=UTC),
+    )
+    assert created is True
+    assert checkin.status == CheckinStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_checkin_rejects_proof_type_not_in_proof_types() -> None:
+    """Миграция 012: habit принимает [photo, text] — кружок отклонён."""
+    habit = make_habit(
+        proof=ProofType.PHOTO,
+        proof_types=[ProofType.PHOTO.value, ProofType.TEXT.value],
+    )
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+    )
+    with pytest.raises(ProofValidationError) as exc:
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),  # video_note — не в списке разрешённых
+            proof_message_id=1,
+            now_utc=datetime.now(tz=UTC),
+        )
+    assert exc.value.code == "wrong_type"
+
+
 async def _wrap(coro):
     return await coro
 

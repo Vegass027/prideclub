@@ -49,7 +49,7 @@ def _base_kwargs(**overrides) -> dict:
         checkin_window_start=time(6, 0),
         checkin_window_end=time(11, 0),
         timezone_str="Europe/Moscow",
-        proof_type=ProofType.VIDEO_NOTE,
+        proof_types=["video_note"],
         price_month=100_00,
         penalty_amount=10_00,
         stat_gain_per_checkin=2,
@@ -441,3 +441,92 @@ class TestUpdateTopics:
         assert updated.chat_id == -1001234567890
         assert updated.checkin_topic_thread_id == 5
         assert updated.notifications_topic_thread_id == 6
+
+
+# ───────── Multi-proof_types (миграция 012) ─────────
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_multiple_proof_types() -> None:
+    """Клуб создаётся с proof_types из 2-3 значений."""
+    svc, repo, _ = _make_service()
+    habit = await svc.create(
+        admin_id=42,
+        **_base_kwargs(proof_types=["video_note", "photo"]),
+    )
+    assert habit.proof_types == ["video_note", "photo"]
+    assert habit.proof_type.value == "video_note"  # alias первого
+
+
+@pytest.mark.asyncio
+async def test_create_validates_proof_types_count() -> None:
+    """0 или >3 значений → HabitValidationError."""
+    svc, _, _ = _make_service()
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.create(admin_id=42, **_base_kwargs(proof_types=[]))
+    assert exc.value.code == "habit_proof_types_count"
+
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.create(
+            admin_id=42,
+            **_base_kwargs(proof_types=["video_note", "photo", "text", "extra"]),
+        )
+    assert exc.value.code == "habit_proof_types_count"
+
+
+@pytest.mark.asyncio
+async def test_create_validates_proof_types_duplicates() -> None:
+    svc, _, _ = _make_service()
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.create(
+            admin_id=42,
+            **_base_kwargs(proof_types=["video_note", "video_note"]),
+        )
+    assert exc.value.code == "habit_proof_types_duplicates"
+
+
+@pytest.mark.asyncio
+async def test_create_validates_proof_types_values() -> None:
+    svc, _, _ = _make_service()
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.create(
+            admin_id=42,
+            **_base_kwargs(proof_types=["video_note", "audio"]),
+        )
+    assert exc.value.code == "habit_proof_types_invalid"
+
+
+@pytest.mark.asyncio
+async def test_update_proof_types_syncs_proof_type_alias() -> None:
+    """update с proof_types синхронизирует proof_type (alias первого)."""
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()), proof=ProofType.VIDEO_NOTE)
+    repo.add(h)
+    updated = await svc.update(
+        admin_id=42,
+        habit_id=h.id,
+        fields={"proof_types": ["photo", "text"]},
+    )
+    assert updated.proof_types == ["photo", "text"]
+    assert updated.proof_type == ProofType.PHOTO  # alias
+
+
+@pytest.mark.asyncio
+async def test_update_proof_types_validates() -> None:
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    repo.add(h)
+    with pytest.raises(HabitValidationError):
+        await svc.update(
+            admin_id=42,
+            habit_id=h.id,
+            fields={"proof_types": ["unknown"]},
+        )

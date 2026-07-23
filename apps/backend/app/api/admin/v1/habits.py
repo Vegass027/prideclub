@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.internal_bot import AVAILABLE_CHATS_KEY, _record_available_chat
 from app.api.v1.users import current_user
-from app.core.constants import ProofType
+
 from app.core.logging import get_logger
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
@@ -99,6 +99,7 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         penalty_amount=habit.penalty_amount,
         price_month=habit.price_month,
         proof_type=habit.proof_type.value,
+        proof_types=list(habit.proof_types or []),
         prize_pool=habit.prize_pool,
         is_active=habit.is_active,
         photo_url=habit.photo_url,
@@ -144,7 +145,7 @@ async def create_habit(
         checkin_window_start=payload.checkin_window_start,
         checkin_window_end=payload.checkin_window_end,
         timezone_str=payload.timezone,
-        proof_type=ProofType(payload.proof_type),
+        proof_types=payload.proof_types or [],
         price_month=payload.price_month,
         penalty_amount=payload.penalty_amount,
         stat_gain_per_checkin=payload.stat_gain_per_checkin,
@@ -600,12 +601,10 @@ async def update_habit(
 ) -> AdminHabitOut:
     """Частичное обновление полей клуба (TZ §3.6.7 — финансовые заморожены)."""
     fields = payload.model_dump(exclude_unset=True)
-    if (
-        "proof_type" in fields
-        and fields["proof_type"] is not None
-        and isinstance(fields["proof_type"], str)
-    ):
-        fields["proof_type"] = ProofType(fields["proof_type"])
+    # proof_type синхронизируется в HabitService.update на основе proof_types
+    # (миграция 012). Если клиент передал только proof_type — Pydantic
+    # validator в AdminHabitUpdateRequest уже сконвертировал в [proof_type].
+    fields.pop("proof_type", None)
     habit = await service.update(
         admin_id=user.id,
         habit_id=habit_id,

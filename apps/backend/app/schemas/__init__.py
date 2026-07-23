@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.core.constants import ProofType, PROOF_TYPE_VALUES
+
+
+class MarketplaceResponse(BaseModel):
+    items: list[HabitOut]
 
 
 class HabitOut(BaseModel):
@@ -18,6 +24,7 @@ class HabitOut(BaseModel):
     penalty_amount: int
     price_month: int
     proof_type: str
+    proof_types: list[str] = Field(default_factory=list)
     prize_pool: int
     members_count: int = 0
     is_active: bool
@@ -30,10 +37,6 @@ class HabitOut(BaseModel):
     notifications_topic_link: str | None = None
     chat_topic_link: str | None = None
     chat_link: str | None = None
-
-
-class MarketplaceResponse(BaseModel):
-    items: list[HabitOut]
 
 
 class MembershipOut(BaseModel):
@@ -89,6 +92,12 @@ class AdminHabitCreateRequest(BaseModel):
     - `checkin_topic_link` и `notifications_topic_link` обязательны — клуб
       нельзя создать без привязки к топикам форума. Формат
       `https://t.me/c/<chat_id>/<thread_id>`.
+
+    Multi-proof (migration 012):
+    - `proof_types: list[str]` — массив 1..3 значений ∈ {video_note, photo, text}.
+    - `proof_type` опционален — если указан, конвертируется в `[proof_type]`
+      для обратной совместимости. Если переданы оба — валидируется, что
+      `proof_type ∈ proof_types`.
     """
 
     title: str = Field(min_length=3, max_length=128)
@@ -101,7 +110,8 @@ class AdminHabitCreateRequest(BaseModel):
     checkin_window_start: time
     checkin_window_end: time
     timezone: str = Field(min_length=1, max_length=64)
-    proof_type: str = Field(pattern="^(video_note|photo|text)$")
+    proof_type: str | None = Field(default=None, pattern="^(video_note|photo|text)$")
+    proof_types: list[str] | None = Field(default=None, min_length=1, max_length=3)
     price_month: int = Field(gt=0)
     penalty_amount: int = Field(gt=0)
     stat_gain_per_checkin: int = Field(default=2, gt=0)
@@ -112,12 +122,56 @@ class AdminHabitCreateRequest(BaseModel):
     notifications_topic_link: str = Field(min_length=1, max_length=512)
     chat_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
 
+    @model_validator(mode="after")
+    def _resolve_proof_types(self) -> AdminHabitCreateRequest:
+        """Привести proof_types к каноническому виду:
+        - ровно 1..3 уникальных значений из PROOF_TYPE_VALUES;
+        - proof_type (если указан) обязан входить в proof_types;
+        - если proof_types не передан, берём [proof_type] или ['video_note'].
+        """
+        valid = PROOF_TYPE_VALUES
+        pt = self.proof_type
+        pts = self.proof_types
+
+        if pts is None and pt is None:
+            pts = ["video_note"]
+        elif pts is None:
+            pts = [pt]
+
+        # Валидация значений.
+        unknown = [p for p in pts if p not in valid]
+        if unknown:
+            raise ValueError(
+                f"proof_types содержит недопустимые значения: {unknown}. "
+                f"Допустимо: {valid}"
+            )
+        # Уникальность + 1..3.
+        if len(set(pts)) != len(pts):
+            raise ValueError("proof_types не должны содержать дубликатов")
+        if not (1 <= len(pts) <= 3):
+            raise ValueError("proof_types должны содержать от 1 до 3 значений")
+
+        # Если задан proof_type — он должен быть в proof_types.
+        if pt is not None and pt not in pts:
+            raise ValueError(
+                f"proof_type={pt} должен входить в proof_types={pts}"
+            )
+
+        self.proof_types = pts
+        self.proof_type = pts[0]
+        return self
+
 
 class AdminHabitUpdateRequest(BaseModel):
     """PATCH /admin/v1/habits/{id} — частичное обновление.
 
     Любые поля опциональны. Финансовые поля замораживаются после первого вступления
     (TZ §3.6.7) — сервис бросит HabitValidationError если в клубе уже есть участники.
+
+    Multi-proof (migration 012):
+    - `proof_types` и `proof_type` оба опциональны, но если переданы —
+      валидируются так же, как в Create (1..3 уникальных, входят в
+      PROOF_TYPE_VALUES, proof_type ∈ proof_types).
     """
 
     title: str | None = Field(default=None, min_length=3, max_length=128)
@@ -131,6 +185,7 @@ class AdminHabitUpdateRequest(BaseModel):
     checkin_window_end: time | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     proof_type: str | None = Field(default=None, pattern="^(video_note|photo|text)$")
+    proof_types: list[str] | None = Field(default=None, min_length=1, max_length=3)
     price_month: int | None = Field(default=None, gt=0)
     penalty_amount: int | None = Field(default=None, gt=0)
     stat_gain_per_checkin: int | None = Field(default=None, gt=0)
@@ -140,6 +195,35 @@ class AdminHabitUpdateRequest(BaseModel):
     checkin_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
     notifications_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
     chat_topic_link: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def _resolve_proof_types(self) -> AdminHabitUpdateRequest:
+        valid = PROOF_TYPE_VALUES
+        pt = self.proof_type
+        pts = self.proof_types
+
+        # Если ничего не передано — оставляем как есть, сервис ничего не меняет.
+        if pts is None and pt is None:
+            return self
+        if pts is None:
+            pts = [pt]
+        else:
+            unknown = [p for p in pts if p not in valid]
+            if unknown:
+                raise ValueError(
+                    f"proof_types содержит недопустимые значения: {unknown}"
+                )
+            if len(set(pts)) != len(pts):
+                raise ValueError("proof_types не должны содержать дубликатов")
+            if not (1 <= len(pts) <= 3):
+                raise ValueError("proof_types должны содержать от 1 до 3 значений")
+
+        if pt is not None and pt not in pts:
+            raise ValueError(f"proof_type={pt} должен входить в proof_types={pts}")
+
+        self.proof_types = pts
+        self.proof_type = pts[0]
+        return self
 
 
 class AdminHabitToggleRequest(BaseModel):
@@ -159,6 +243,7 @@ class AdminHabitOut(BaseModel):
     penalty_amount: int
     price_month: int
     proof_type: str
+    proof_types: list[str] = Field(default_factory=list)
     prize_pool: int
     is_active: bool
     photo_url: str | None
