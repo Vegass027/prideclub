@@ -1,10 +1,14 @@
-from __future__ import annotations
-
 import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 
+# NOTE: `from __future__ import annotations` намеренно НЕ используется здесь.
+# С ним `Response` становится ForwardRef('Response'), и FastAPI/Pydantic
+# падает с "TypeAdapter[Annotated[ForwardRef('Response'), ...]] is not fully
+# defined" при попытке построить OpenAPI-схему для middleware. Это известный
+# баг FastAPI + Pydantic v2 + PEP 563 forward refs на чужих типах (starlette
+# Response, JSONResponse и т.п.).
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware

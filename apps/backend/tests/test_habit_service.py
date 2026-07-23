@@ -263,22 +263,26 @@ class TestUpdate:
                 fields={"title": "Новое имя"},
             )
 
-    async def test_financial_fields_locked_after_first_member(self) -> None:
+    async def test_financial_fields_editable_after_first_member(self) -> None:
+        """Owner может менять price_month/penalty_amount даже после первого участника.
+
+        Middleware /admin/v1/* уже гейтит доступ только owner'у —
+        заморозка финансов СНЯТА. Используется сценарий «поднять цену
+        с нового месяца с уведомлением участников».
+        """
         svc, repo, ms_repo = _make_service()
         habit = await svc.create(admin_id=42, **_base_kwargs())
+        # Регистрируем активного участника.
+        ms_repo.add_for(user_id=1, habit_id=str(habit.id))
+        repo.set_active_member_count(str(habit.id), 1)
 
-        async def fake_count(habit_id: str) -> int:
-            return 1 if habit_id == habit.id else 0
-
-        repo.count_active_members = fake_count  # type: ignore[method-assign]
-
-        with pytest.raises(HabitValidationError) as exc_info:
-            await svc.update(
-                admin_id=42,
-                habit_id=habit.id,
-                fields={"price_month": 50_00},
-            )
-        assert exc_info.value.code == "habit_financial_fields_frozen"
+        updated = await svc.update(
+            admin_id=42,
+            habit_id=str(habit.id),
+            fields={"price_month": 50_00, "penalty_amount": 20_00},
+        )
+        assert updated.price_month == 50_00
+        assert updated.penalty_amount == 20_00
 
     async def test_financial_fields_editable_when_no_members(self) -> None:
         svc, repo, _ = _make_service()

@@ -123,6 +123,8 @@ export interface AdminHabitUpdatePayload {
   checkin_window_end?: string;
   timezone?: string;
   proof_types?: AdminHabitProofType[];
+  price_month?: number;
+  penalty_amount?: number;
   stat_gain_per_checkin?: number;
   stat_loss_per_miss?: number;
   member_limit?: number | null;

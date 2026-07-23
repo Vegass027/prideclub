@@ -91,6 +91,13 @@ const toIntOrNull = (raw: string): number | null => {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 };
 
+const rubToKopecks = (raw: string): number => {
+  const trimmed = raw.trim().replace(",", ".");
+  const asNumber = Number(trimmed);
+  if (!Number.isFinite(asNumber)) return 0;
+  return Math.round(asNumber * 100);
+};
+
 const kopToRubStr = (kop: number): string =>
   Number.isFinite(kop) ? String(kop / 100) : "";
 
@@ -180,7 +187,6 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
 
   if (!habit) return null;
 
-  const financialsFrozen = habit.active_members_count > 0;
   const touchedFields = (key: keyof FormState) => {
     setTouched((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
   };
@@ -275,6 +281,8 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         checkin_window_end: form.checkin_window_end,
         timezone: form.timezone,
         proof_types: form.proof_types,
+        price_month: rubToKopecks(form.price_month_rub),
+        penalty_amount: rubToKopecks(form.penalty_amount_rub),
         stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
@@ -616,32 +624,29 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
       </FieldRow>
 
-      {!financialsFrozen && (
-        <>
-          <FieldRow label="Цена в месяц (₽)">
-            <TextInput
-              value={form.price_month_rub}
-              onChange={(e) => set("price_month_rub", e.target.value)}
-              inputMode="decimal"
-            />
-          </FieldRow>
+      <FieldRow label="Цена в месяц (₽)">
+        <TextInput
+          value={form.price_month_rub}
+          onChange={(e) => set("price_month_rub", e.target.value)}
+          inputMode="decimal"
+        />
+        <p className="mt-1 text-xs text-muted">
+          Изменения применяются к новым подпискам. Уже оплаченные
+          участники продолжают действовать до конца оплаченного периода
+          по старой цене.
+        </p>
+      </FieldRow>
 
-          <FieldRow label="Штраф за пропуск (₽)">
-            <TextInput
-              value={form.penalty_amount_rub}
-              onChange={(e) => set("penalty_amount_rub", e.target.value)}
-              inputMode="decimal"
-            />
-          </FieldRow>
-        </>
-      )}
-
-      {financialsFrozen && (
-        <div className="rounded-card border border-white/10 bg-surface/60 p-3 text-xs text-muted">
-          Цена и штраф заморожены — в клубе уже {habit.active_members_count}{" "}
-          участник{habit.active_members_count === 1 ? "" : "ов"}.
-        </div>
-      )}
+      <FieldRow label="Штраф за пропуск (₽)">
+        <TextInput
+          value={form.penalty_amount_rub}
+          onChange={(e) => set("penalty_amount_rub", e.target.value)}
+          inputMode="decimal"
+        />
+        <p className="mt-1 text-xs text-muted">
+          Применяется к будущим штрафам. Прошлые штрафы не пересчитываются.
+        </p>
+      </FieldRow>
 
       <FieldRow label="Прирост / убыль за чек-ин">
         <div className="grid grid-cols-2 gap-2">

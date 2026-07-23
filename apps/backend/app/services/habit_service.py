@@ -37,9 +37,6 @@ from app.repositories.membership_repository import MembershipRepository
 _TELEGRAM_INVITE_RE = re.compile(r"^https://(t\.me|telegram\.me)/[A-Za-z0-9_+\-/]+$")
 
 
-_FROZEN_AFTER_FIRST_MEMBER_FIELDS = frozenset({"price_month", "penalty_amount"})
-
-
 class HabitService:
     def __init__(
         self,
@@ -369,20 +366,12 @@ class HabitService:
                         f"Топик {thread_id} уже привязан к клубу «{dup.title}»"
                     )
 
-        protected_fields = _FROZEN_AFTER_FIRST_MEMBER_FIELDS & set(fields.keys())
-        if protected_fields:
-            active_members = await self._habit_repo.count_active_members(habit_id)
-            if active_members > 0:
-                raise HabitValidationError(
-                    (
-                        "Финансовые поля заморожены: в клубе уже есть активные "
-                        "участники. Создайте новый клуб и переведите участников."
-                    ),
-                    code="habit_financial_fields_frozen",
-                )
-
-        forbidden = _FROZEN_AFTER_FIRST_MEMBER_FIELDS - set(fields.keys())
-        update_fields = {k: v for k, v in fields.items() if k not in forbidden}
+        # Заморозка price_month/penalty_amount после первого участника СНЯТА.
+        # Middleware /admin/v1/* уже гейтит доступ только owner'у —
+        # владелец может менять цену когда угодно (типичный use case:
+        # поднять цену с нового месяца, см. force_update_financials для
+        # targeted-обновления только финансов).
+        update_fields = dict(fields)
 
         updated = await self._habit_repo.update(habit, fields=update_fields)
         self._logger.info(
