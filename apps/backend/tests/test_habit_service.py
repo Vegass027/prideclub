@@ -530,3 +530,188 @@ async def test_update_proof_types_validates() -> None:
             habit_id=h.id,
             fields={"proof_types": ["unknown"]},
         )
+
+
+# ───────── force_update_financials (owner-only escape hatch) ─────────
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_requires_confirm() -> None:
+    """Без confirm=true — HabitValidationError, никаких изменений."""
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    repo.add(h)
+    old_price = h.price_month
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.force_update_financials(
+            admin_id=42,
+            habit_id=h.id,
+            price_month=999,
+            penalty_amount=None,
+            confirm=False,
+        )
+    assert exc.value.code == "habit_force_financials_confirm_required"
+    # Состояние не изменилось.
+    assert h.price_month == old_price
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_requires_at_least_one_field() -> None:
+    """Пустые поля → HabitValidationError."""
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    repo.add(h)
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.force_update_financials(
+            admin_id=42,
+            habit_id=h.id,
+            price_month=None,
+            penalty_amount=None,
+            confirm=True,
+        )
+    assert exc.value.code == "habit_force_financials_no_fields"
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_validates_positive_amounts() -> None:
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    repo.add(h)
+    with pytest.raises(HabitValidationError) as exc:
+        await svc.force_update_financials(
+            admin_id=42,
+            habit_id=h.id,
+            price_month=-1,
+            penalty_amount=None,
+            confirm=True,
+        )
+    assert exc.value.code == "habit_price_invalid"
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_updates_values() -> None:
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(
+        id=str(uuid4()),
+        chat_id=-1001,
+    )
+    h.price_month = 100_00
+    h.penalty_amount = 10_00
+    repo.add(h)
+    result = await svc.force_update_financials(
+        admin_id=42,
+        habit_id=h.id,
+        price_month=500_00,
+        penalty_amount=50_00,
+        confirm=True,
+    )
+    assert result["old_price_month"] == 100_00
+    assert result["new_price_month"] == 500_00
+    assert result["old_penalty_amount"] == 10_00
+    assert result["new_penalty_amount"] == 50_00
+    assert h.price_month == 500_00
+    assert h.penalty_amount == 50_00
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_no_op_when_unchanged() -> None:
+    """Если значения совпадают — no-op (без UPDATE), без audit log."""
+    from uuid import uuid4
+
+    from tests.fakes import make_habit
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    h.price_month = 100_00
+    h.penalty_amount = 10_00
+    repo.add(h)
+    result = await svc.force_update_financials(
+        admin_id=42,
+        habit_id=h.id,
+        price_month=100_00,  # то же самое
+        penalty_amount=10_00,  # то же самое
+        confirm=True,
+    )
+    assert result["old_price_month"] == 100_00
+    assert result["new_price_month"] == 100_00
+
+
+@pytest.mark.asyncio
+async def test_force_update_financials_only_changes_target_fields() -> None:
+    """ГЛАВНЫЙ ТЕСТ: force_update_financials НЕ трогает ничего, кроме price/penalty.
+
+    Проверяет что:
+    - users.deposit_balance участника не изменился,
+    - memberships.subscription_until не изменился,
+    - memberships.auto_renew_enabled не изменился,
+    - memberships.status не изменился,
+    - active_members_count не сбросился.
+    """
+    from uuid import uuid4
+
+    from tests.fakes import (
+        FakeMembershipRepo,
+        make_habit,
+    )
+
+    svc, repo, _ = _make_service()
+    h = make_habit(id=str(uuid4()))
+    h.price_month = 100_00
+    h.penalty_amount = 10_00
+    repo.add(h)
+
+    # Создаём активное membership с конкретным состоянием.
+    membership = svc._membership_repo.add_for(  # noqa: SLF001
+        user_id=12345,
+        habit_id=h.id,
+    )
+    membership.deposit_balance = 500_00
+    membership.subscription_until = None
+    membership.auto_renew_enabled = True
+    repo.set_active_member_count(h.id, 5)
+
+    snapshot = {
+        "user_id": membership.user_id,
+        "deposit_balance": membership.deposit_balance,
+        "subscription_until": membership.subscription_until,
+        "auto_renew_enabled": membership.auto_renew_enabled,
+        "active_members_count": 5,
+    }
+
+    result = await svc.force_update_financials(
+        admin_id=42,
+        habit_id=h.id,
+        price_month=500_00,
+        penalty_amount=50_00,
+        confirm=True,
+    )
+    # В FakeService session=None, commit() не вызываем — проверяем состояние in-memory.
+
+    # Цены поменялись.
+    assert result["new_price_month"] == 500_00
+    assert result["new_penalty_amount"] == 50_00
+
+    # Участник не тронут.
+    from_repo = await svc._membership_repo.get(membership.id)  # noqa: SLF001
+    assert from_repo.deposit_balance == snapshot["deposit_balance"]
+    assert from_repo.subscription_until == snapshot["subscription_until"]
+    assert from_repo.auto_renew_enabled == snapshot["auto_renew_enabled"]
+    assert from_repo.status.value == "active"  # MembershipStatus.ACTIVE
+    # Счётчик участников не сбросился.
+    assert await repo.count_active_members(h.id) == 5  # noqa: SLF001

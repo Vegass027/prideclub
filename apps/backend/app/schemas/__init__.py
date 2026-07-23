@@ -269,6 +269,35 @@ class AdminHabitsListResponse(BaseModel):
     items: list[AdminHabitOut]
 
 
+class AdminHabitForceFinancialsRequest(BaseModel):
+    """Force-update price_month / penalty_amount вне заморозки.
+
+    Доступно ТОЛЬКО owner'у (middleware /admin/v1/* уже гейтит доступ).
+    `confirm=True` обязательно — защита от случайного клика.
+
+    Семантика:
+    - Меняет ТОЛЬКО habits.price_month и/или habits.penalty_amount.
+    - НЕ трогает: users.deposit_balance, memberships.subscription_until,
+      memberships.auto_renew_enabled, memberships.status — у участников
+      ничего не меняется. Уже оплаченные подписки продолжают действовать
+      до subscription_until по старой цене.
+    """
+
+    price_month: int | None = Field(default=None, gt=0)
+    penalty_amount: int | None = Field(default=None, gt=0)
+    confirm: bool = Field(default=False)
+
+
+class AdminHabitForceFinancialsResponse(BaseModel):
+    ok: bool
+    habit_id: str
+    old_price_month: int
+    new_price_month: int
+    old_penalty_amount: int
+    new_penalty_amount: int
+    updated_at: datetime
+
+
 class AdminHabitActionResponse(BaseModel):
     ok: bool
     habit_id: str

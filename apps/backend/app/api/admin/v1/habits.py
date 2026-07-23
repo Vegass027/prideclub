@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.internal_bot import AVAILABLE_CHATS_KEY, _record_available_chat
 from app.api.v1.users import current_user
-
 from app.core.logging import get_logger
 from app.core.security import TelegramUser
 from app.db.redis import get_redis
@@ -38,6 +37,8 @@ from app.schemas import (
     AdminHabitAvailableChatsResponse,
     AdminHabitChatStatusResponse,
     AdminHabitCreateRequest,
+    AdminHabitForceFinancialsRequest,
+    AdminHabitForceFinancialsResponse,
     AdminHabitOut,
     AdminHabitPreviewChatRequest,
     AdminHabitPreviewChatResponse,
@@ -613,6 +614,51 @@ async def update_habit(
     await service._session.commit()  # noqa: SLF001
     active_count = await service._habit_repo.count_active_members(habit_id)  # noqa: SLF001
     return _habit_to_out(habit, active_members_count=active_count)
+
+
+@router.patch(
+    "/habits/{habit_id}/force-financials",
+    response_model=AdminHabitForceFinancialsResponse,
+)
+async def force_financials(
+    habit_id: str,
+    payload: AdminHabitForceFinancialsRequest,
+    user: TelegramUser = Depends(current_user),
+    service: HabitService = Depends(_get_habit_service),
+) -> AdminHabitForceFinancialsResponse:
+    """Force-update price_month / penalty_amount после первого участника.
+
+    Доступно только owner'у — middleware /admin/v1/* уже гейтит доступ.
+    Подтверждение (`confirm=true`) обязательно — защита от случайного клика.
+
+    Семантика:
+    - Меняет ТОЛЬКО habits.price_month и/или habits.penalty_amount.
+    - НЕ трогает: users.deposit_balance, memberships.subscription_until,
+      memberships.auto_renew_enabled, memberships.status.
+    - Уже оплаченные подписки участников продолжают действовать до
+      subscription_until по старой цене. Никто не выгоняется.
+
+    Все force-update логируются как WARN с полным контекстом (audit).
+    """
+    from datetime import UTC, datetime
+
+    result = await service.force_update_financials(
+        admin_id=user.id,
+        habit_id=habit_id,
+        price_month=payload.price_month,
+        penalty_amount=payload.penalty_amount,
+        confirm=payload.confirm,
+    )
+    await service._session.commit()  # noqa: SLF001
+    return AdminHabitForceFinancialsResponse(
+        ok=True,
+        habit_id=habit_id,
+        old_price_month=result["old_price_month"],
+        new_price_month=result["new_price_month"],
+        old_penalty_amount=result["old_penalty_amount"],
+        new_penalty_amount=result["new_penalty_amount"],
+        updated_at=datetime.now(UTC),
+    )
 
 
 @router.post("/habits/{habit_id}/activate", response_model=AdminHabitActionResponse)

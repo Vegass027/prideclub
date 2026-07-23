@@ -495,6 +495,99 @@ class HabitService:
         )
         return habit
 
+    async def force_update_financials(
+        self,
+        *,
+        admin_id: int,
+        habit_id: str,
+        price_month: int | None,
+        penalty_amount: int | None,
+        confirm: bool,
+    ) -> dict[str, Any]:
+        """Force-update price_month / penalty_amount вне заморозки.
+
+        Доступно только owner (см. middleware /admin/v1/*).
+
+        Что меняет: только habits.price_month и/или habits.penalty_amount.
+        Что НЕ меняет: users.deposit_balance, memberships.subscription_until,
+        memberships.auto_renew_enabled, memberships.status. Уже оплаченные
+        подписки участников продолжают действовать по старой цене до конца
+        оплаченного периода.
+
+        Возвращает dict со старыми/новыми значениями для UI-подтверждения.
+        """
+        if not confirm:
+            raise HabitValidationError(
+                "Требуется подтверждение (confirm=true) — это защита "
+                "от случайного изменения финансов клуба",
+                code="habit_force_financials_confirm_required",
+            )
+        if price_month is None and penalty_amount is None:
+            raise HabitValidationError(
+                "Укажи хотя бы одно поле: price_month или penalty_amount",
+                code="habit_force_financials_no_fields",
+            )
+        if price_month is not None and price_month <= 0:
+            raise HabitValidationError(
+                "price_month должен быть положительным INTEGER (копейки)",
+                code="habit_price_invalid",
+            )
+        if penalty_amount is not None and penalty_amount <= 0:
+            raise HabitValidationError(
+                "penalty_amount должен быть положительным INTEGER (копейки)",
+                code="habit_penalty_invalid",
+            )
+
+        habit = await self._habit_repo.get(habit_id)
+        if habit is None:
+            raise HabitNotFoundError()
+        if habit.archived_at is not None:
+            raise HabitArchivedError()
+
+        old_price_month = int(habit.price_month)
+        old_penalty_amount = int(habit.penalty_amount)
+
+        update_fields: dict[str, Any] = {}
+        if price_month is not None and price_month != old_price_month:
+            update_fields["price_month"] = price_month
+        if penalty_amount is not None and penalty_amount != old_penalty_amount:
+            update_fields["penalty_amount"] = penalty_amount
+
+        if not update_fields:
+            return {
+                "habit": habit,
+                "old_price_month": old_price_month,
+                "new_price_month": old_price_month,
+                "old_penalty_amount": old_penalty_amount,
+                "new_penalty_amount": old_penalty_amount,
+            }
+
+        updated = await self._habit_repo.update(habit, fields=update_fields)
+
+        # Audit log: фиксируем все force-update финансов клуба.
+        # ВАЖНО: audit обязателен — это операция с деньгами.
+        self._logger.warning(
+            "habit_force_financials_updated",
+            extra={
+                "admin_id": admin_id,
+                "habit_id": habit_id,
+                "title": habit.title,
+                "chat_id": habit.chat_id,
+                "old_price_month": old_price_month,
+                "new_price_month": int(updated.price_month),
+                "old_penalty_amount": old_penalty_amount,
+                "new_penalty_amount": int(updated.penalty_amount),
+            },
+        )
+
+        return {
+            "habit": updated,
+            "old_price_month": old_price_month,
+            "new_price_month": int(updated.price_month),
+            "old_penalty_amount": old_penalty_amount,
+            "new_penalty_amount": int(updated.penalty_amount),
+        }
+
 
 def _validate_title(title: str | None) -> None:
     if not isinstance(title, str):
