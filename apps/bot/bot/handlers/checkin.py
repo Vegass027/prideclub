@@ -21,6 +21,30 @@ _SUCCESS_CODES: frozenset[str] = frozenset({"ok", "checkin_already_exists"})
 _SILENT_CODES: frozenset[str] = frozenset({"habit_not_found"})
 
 
+# Маппинг proof_type → (эмодзи, заголовок). Для pre-filter сообщений.
+_PROOF_TYPE_DISPLAY: dict[str, tuple[str, str]] = {
+    "video_note": ("🎥", "Видео-кружочек"),
+    "photo": ("📸", "Фото"),
+    "text": ("✍️", "Текст"),
+}
+
+
+def _detect_proof_type(message: Message) -> str | None:
+    """aiogram Message → один из {video_note, photo, text} или None.
+
+    None означает «неподдерживаемый тип» (стикер, документ, голосовое).
+    Возвращаем None — хэндлер уже отфильтровал через F.video_note|F.photo|F.text,
+    но если сюда попало что-то ещё (теоретически), вернём None.
+    """
+    if message.video_note:
+        return "video_note"
+    if message.photo:
+        return "photo"
+    if message.text:
+        return "text"
+    return None
+
+
 def _parse_proof(message: Message) -> dict[str, Any] | None:
     """aiogram Message → Backend payload."""
     sent_at = (message.date or datetime.now(tz=UTC)).astimezone(UTC)
@@ -74,6 +98,71 @@ async def _reply(
     )
 
 
+def _allowed_list_text(proof_types: list[str]) -> list[str]:
+    """Render allowed_proof_types в строки для reject_wrong_type_multi."""
+    return [
+        f"{_PROOF_TYPE_DISPLAY.get(pt, ('•', pt))[0]} {_PROOF_TYPE_DISPLAY.get(pt, ('•', pt))[1]}"
+        for pt in proof_types
+    ]
+
+
+async def _prefilter(
+    backend: BackendClient,
+    chat_id: int,
+    user_id: int,
+    detected_type: str | None,
+    name: str,
+) -> str | None:
+    """Pre-filter ДО отправки в backend.
+
+    Возвращает:
+    - None — пропустить pre-filter, шлём в backend как раньше.
+    - "" — молча отказать (клуб не привязан к чату, как habit_not_found).
+    - "text with {name}" — ответить пользователю и НЕ слать в backend.
+
+    Имя подставляется в шаблон; если detected_type не None и тип не в
+    allowed_proof_types — отвечаем понятным сообщением.
+    """
+    try:
+        state = await backend.get_habit_state(chat_id, user_id)
+    except Exception as exc:  # noqa: BLE001 — сеть/Redis/etc., fallback
+        log.warning(
+            "prefilter_state_failed",
+            extra={"err": str(exc), "kind": exc.__class__.__name__},
+        )
+        # Без state пропускаем pre-filter.
+        return None
+
+    if not state.get("found"):
+        log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
+        return ""
+
+    if state.get("already_checked_in"):
+        log.info(
+            "prefilter_already_checked_in",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_ALREADY_CHECKED_IN.format(name=name)
+
+    if detected_type is None:
+        # Defense — F.video_note|F.photo|F.text уже отфильтровали.
+        return checkin_texts.REJECT_UNSUPPORTED_TYPE.format(name=name)
+
+    allowed = list(state.get("proof_types") or [])
+    if detected_type not in allowed:
+        if len(allowed) == 1:
+            emoji, title = _PROOF_TYPE_DISPLAY.get(
+                allowed[0], ("•", allowed[0])
+            )
+            return checkin_texts.reject_wrong_type_single(name, emoji, title)
+        return checkin_texts.reject_wrong_type_multi(
+            name, _allowed_list_text(allowed)
+        )
+
+    # Всё ок — пропускаем.
+    return None
+
+
 @router.message(F.video_note | F.photo | F.text)
 async def handle_proof(
     message: Message,
@@ -83,6 +172,25 @@ async def handle_proof(
     if message.chat.id == message.from_user.id:
         return  # личка
 
+    detected_type = _detect_proof_type(message)
+    name = message.from_user.first_name or ""
+
+    # Pre-filter (PR №9): проверяем тип и дубликат ДО отправки в backend.
+    prefilter_reply = await _prefilter(
+        backend=backend,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        detected_type=detected_type,
+        name=name,
+    )
+
+    if prefilter_reply is not None:
+        if prefilter_reply == "":
+            return  # молча (habit не найден)
+        await _reply(bot, message, prefilter_reply)
+        return
+
+    # Pre-filter пройден → шлём в backend как раньше.
     proof = _parse_proof(message)
     if proof is None:
         return

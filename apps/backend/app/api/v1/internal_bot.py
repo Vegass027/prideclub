@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +30,9 @@ from app.api.v1.users import current_user_internal
 from app.core.logging import get_logger
 from app.db.redis import get_redis
 from app.db.session import get_session
+from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
+from app.repositories.membership_repository import MembershipRepository
 
 
 router = APIRouter()
@@ -269,5 +272,82 @@ async def bot_chat_removed(
         ok=True,
         chat_id=payload.chat_id,
         code="redis_only" if removed_count > 0 else "noop",
+    )
+
+
+# ---------- HabitState: pre-filter для бота (PR №9) --------------------------
+#
+# Бот вызывает этот endpoint ПЕРЕД отправкой чек-ина в /internal/checkins/process.
+# Возвращает всё, что бот должен знать, чтобы:
+# - отвергнуть неподдерживаемый тип proof (pre-filter по proof_types),
+# - отвергнуть повторный чек-ин за сегодня (pre-filter по дубликату).
+#
+# Почему НЕ дожидаемся worker: backend возвращает {ok: True, task_id: ...}
+# сразу после send_task() — а worker отвергает задачу асинхронно, и бот
+# про это не узнаёт (он уже ответил юзеру "Принято"). Pre-filter в боте —
+# единственный способ показать правильное сообщение.
+
+
+class HabitStateResponse(BaseModel):
+    found: bool
+    habit_id: str | None = None
+    proof_types: list[str] = Field(default_factory=list)
+    checkin_topic_thread_id: int | None = None
+    already_checked_in: bool = False
+    checked_in_at: datetime | None = None
+
+
+@router.get("/bot/habit_state", response_model=HabitStateResponse)
+async def get_habit_state(
+    chat_id: int = Query(..., description="Telegram chat_id супергруппы клуба"),
+    user_id: int = Query(..., description="telegram_id пользователя"),
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(current_user_internal),
+) -> HabitStateResponse:
+    """Состояние клуба и членства для бота.
+
+    Если клуб не найден или бот не привязан к чату — `found=False`,
+    остальные поля пустые. Бот в этом случае должен молчать (как при
+    `habit_not_found`).
+
+    Если membership пользователя в клубе нет — `found=True`, но
+    `already_checked_in=False` (бот пропустит пре-фильтр дубликата,
+    и worker отвергнет чек-ин как no_membership).
+    """
+    log = get_logger("bot_habit_state")
+
+    habit_repo = HabitRepository(session)
+    habit = await habit_repo.get_by_chat_id(chat_id)
+    if habit is None or habit.chat_id == 0:
+        log.warning(
+            "habit_state_habit_not_found",
+            extra={"chat_id": chat_id, "user_id": user_id},
+        )
+        return HabitStateResponse(found=False)
+
+    membership_repo = MembershipRepository(session)
+    membership = await membership_repo.get_for_user_in_habit(
+        user_id=user_id, habit_id=habit.id
+    )
+
+    already_checked_in = False
+    checked_in_at: datetime | None = None
+    if membership is not None:
+        club_date_now = habit.club_date(datetime.now(tz=UTC))
+        checkin = await CheckinRepository(session).get_for_date(
+            membership_id=membership.id,
+            on_date=club_date_now,
+        )
+        if checkin is not None:
+            already_checked_in = True
+            checked_in_at = checkin.verified_at
+
+    return HabitStateResponse(
+        found=True,
+        habit_id=str(habit.id),
+        proof_types=list(habit.proof_types or []),
+        checkin_topic_thread_id=habit.checkin_topic_thread_id,
+        already_checked_in=already_checked_in,
+        checked_in_at=checked_in_at,
     )
 
