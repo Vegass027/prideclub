@@ -67,16 +67,21 @@ def _parse_proof(message: Message) -> dict[str, Any] | None:
     return None
 
 
-def _text_for_code(code: str | None) -> str:
-    """Маппинг backend/worker code → пользовательский текст."""
+def _text_for_code(code: str | None, *, name: str = "") -> str:
+    """Маппинг backend/worker code → пользовательский текст.
+
+    `name` (first_name юзера) подставляется в шаблоны с {name}.
+    Если name пустое — шаблон отрендерится без обращения, просто "{name}"
+    останется плейсхолдером (намеренно: имя не всегда доступно).
+    """
     if code in ("forwarded",):
-        return checkin_texts.REJECT_FORWARDED
+        return checkin_texts.REJECT_FORWARDED.format(name=name)
     if code in ("too_short",):
-        return checkin_texts.REJECT_TOO_SHORT
+        return checkin_texts.REJECT_TOO_SHORT.format(name=name)
     if code in ("wrong_topic", "checkin_wrong_topic"):
-        return checkin_texts.REJECT_WRONG_TOPIC
+        return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
     if code in ("out_of_window", "checkin_window_closed"):
-        return checkin_texts.REJECT_OUT_OF_WINDOW
+        return checkin_texts.REJECT_OUT_OF_WINDOW.format(name=name)
     return checkin_texts.REJECT_UNKNOWN
 
 
@@ -223,7 +228,7 @@ async def handle_proof(
                 "task_id": result.get("task_id"),
             },
         )
-        await _reply(bot, message, checkin_texts.ACCEPTED_OK)
+        await _reply(bot, message, checkin_texts.ACCEPTED_OK.format(name=name))
         return
 
     if code in _SILENT_CODES:
@@ -231,4 +236,4 @@ async def handle_proof(
         return
 
     log.warning("checkin_rejected", extra={"code": code})
-    await _reply(bot, message, _text_for_code(code))
+    await _reply(bot, message, _text_for_code(code, name=name))

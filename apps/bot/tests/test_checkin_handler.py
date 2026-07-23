@@ -185,21 +185,25 @@ def test_parse_proof_photo() -> None:
 
 
 def test_text_for_code_forwarded() -> None:
-    assert _text_for_code("forwarded") == checkin_texts.REJECT_FORWARDED
+    expected = checkin_texts.REJECT_FORWARDED.format(name="Test")
+    assert _text_for_code("forwarded", name="Test") == expected
 
 
 def test_text_for_code_too_short() -> None:
-    assert _text_for_code("too_short") == checkin_texts.REJECT_TOO_SHORT
+    expected = checkin_texts.REJECT_TOO_SHORT.format(name="Test")
+    assert _text_for_code("too_short", name="Test") == expected
 
 
 def test_text_for_code_wrong_topic() -> None:
-    assert _text_for_code("wrong_topic") == checkin_texts.REJECT_WRONG_TOPIC
-    assert _text_for_code("checkin_wrong_topic") == checkin_texts.REJECT_WRONG_TOPIC
+    expected = checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
+    assert _text_for_code("wrong_topic", name="Test") == expected
+    assert _text_for_code("checkin_wrong_topic", name="Test") == expected
 
 
 def test_text_for_code_out_of_window() -> None:
-    assert _text_for_code("out_of_window") == checkin_texts.REJECT_OUT_OF_WINDOW
-    assert _text_for_code("checkin_window_closed") == checkin_texts.REJECT_OUT_OF_WINDOW
+    expected = checkin_texts.REJECT_OUT_OF_WINDOW.format(name="Test")
+    assert _text_for_code("out_of_window", name="Test") == expected
+    assert _text_for_code("checkin_window_closed", name="Test") == expected
 
 
 def test_text_for_code_unknown() -> None:
@@ -222,7 +226,7 @@ async def test_handle_proof_ok_true_code_none_sends_accepted() -> None:
     assert len(backend.calls) == 1
     assert backend.calls[0]["path"] == "/internal/checkins/process"
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test").format(name="Test")
     assert bot.sent[0]["chat_id"] == msg.chat_id
     assert bot.sent[0]["message_thread_id"] == msg.message_thread_id
     # В топиках-форумах бот не может reply'ить на чужие сообщения —
@@ -239,7 +243,7 @@ async def test_handle_proof_already_exists_sends_accepted() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -251,7 +255,7 @@ async def test_handle_proof_forwarded_sends_rejection() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.REJECT_FORWARDED
+    assert bot.sent[0]["text"] == checkin_texts.REJECT_FORWARDED.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -263,7 +267,7 @@ async def test_handle_proof_too_short_sends_rejection() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.REJECT_TOO_SHORT
+    assert bot.sent[0]["text"] == checkin_texts.REJECT_TOO_SHORT.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -275,7 +279,7 @@ async def test_handle_proof_wrong_topic_sends_rejection() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.REJECT_WRONG_TOPIC
+    assert bot.sent[0]["text"] == checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -287,7 +291,7 @@ async def test_handle_proof_out_of_window_sends_rejection() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.REJECT_OUT_OF_WINDOW
+    assert bot.sent[0]["text"] == checkin_texts.REJECT_OUT_OF_WINDOW.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -351,7 +355,7 @@ async def test_handle_proof_text_message_works() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
     # убедимся, что payload содержит proof_type=text
     assert backend.calls[0]["json"]["proof_type"] == "text"
 
@@ -466,7 +470,7 @@ async def test_prefilter_state_error_falls_back_to_backend() -> None:
     assert len(backend.calls) == 1
     assert backend.calls[0]["path"] == "/internal/checkins/process"
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
 
 
 @pytest.mark.asyncio
@@ -494,4 +498,4 @@ async def test_prefilter_correct_type_proceeds_to_backend() -> None:
     assert len(backend.calls) == 1
     assert backend.calls[0]["path"] == "/internal/checkins/process"
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK
+    assert bot.sent[0]["text"] == checkin_texts.ACCEPTED_OK.format(name="Test")
