@@ -1,6 +1,6 @@
 # Habit Club — Статус бэкенда и план до прода
 
-> Дата среза: 2026-07-23 (обновлено после фичи topic-scoped чек-ины и третий топик)
+> Дата среза: 2026-07-23 (обновлено после lint-zero итерации: commits `7a39fc1`, `de57457`)
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
 > Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
 > `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
@@ -18,6 +18,11 @@
 - ✅ **Hardening итерация T1–T7** (см. `TZ_kharakteristiki_personazha.md` §8.1) —
   рефакторинг сервисов/репозиториев, без функциональных изменений.
   Все сервисы перезапущены на проде, `/health=ok`.
+- ✅ **Lint-zero итерация** (commits `7a39fc1` + `de57457`, 2026-07-23): ruff
+  теперь чистый во всех трёх сервисах (backend/bot/worker) без per-file-ignore
+  для B008. Все 86 handler-сигнатур переведены на `Annotated[X, Depends(get_x)]`
+  per FastAPI docs. Без функциональных изменений, все контейнеры healthy после
+  деплоя.
 
 ### 1.1 Что полностью работает (есть на проде, проверено E2E)
 
@@ -80,6 +85,7 @@
 | 10 | Backend `ForwardRef('Response') not fully defined` | Убран `from __future__ import annotations` в `core/middleware.py` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
 | 11 | Финансы (`price_month`, `penalty_amount`) были заморожены после первого участника | Заморозка снята в `HabitService.update`; middleware `/admin/v1/*` уже гейтит доступ только owner'у. Endpoint `PATCH /admin/v1/habits/{id}/force-financials` оставлен для targeted-обновления. См. `02-architecture.md` §12. |
 | 12 | Бот отвечал «Принято, молодец» даже когда worker асинхронно отвергал чек-ин (`code: wrong_type`) | Backend возвращает `{ok: True, task_id: ...}` сразу после `send_task()`. Worker отвергает задачу позже — бот не узнаёт. Решено pre-filter'ом в боте: новый `GET /internal/bot/habit_state?chat_id=...&user_id=...` проверяет `allowed_proof_types` и `already_checked_in` ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» или «ты уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. Проверено юзером в Telegram: после деплоя бот корректно отвечает. |
+| 13 | ruff падал с 368 ошибками в CI (368 — реальное число, не «49+» как ошибочно считалось) | Двухкоммитный фикс: `7a39fc1` — auto-fix 200 ошибок + 86 B008→Annotated; `de57457` — фикс импорта `TelegramUserDbDep` (забыл обновить 3 файла после выноса alias'а в `users.py`, ImportError блокировал backend старт, починено на сервере и проверено `/health, /ready, /metrics`). |
 
 ---
 
@@ -166,6 +172,7 @@ _Обновлено после T1–T7 (22.07.2026). Полная таблица
 | Legacy `Any` без импорта в `PenaltyService.__init__` | `penalty_service.py:48` | Перенесено в T11 (deferred до после Фазы B). Частично закрыто через T2 — `_suspicious_service: Any` ушёл, остался в одном сигнатуре. |
 | Admin Mini App интеграция — пустые/default-value на UI | `apps/frontend/src/admin/pages/*` | Сделано (commit `ad0267b`), но UI минимум — после Фазы B будет polish. |
 | ~~Topic-scoped чек-ины~~ | — | ✅ Закрыто 2026-07-23: миграции 010 (`checkin_topic_thread_id`, `notifications_topic_thread_id`) и 011 (`chat_topic_thread_id`) применены на проде. Бот фильтрует по `message_thread_id`, штрафы публикуются в топик уведомлений, кнопки «🎬 Сделать чек-ин» и «💬 Перейти в чат» открывают нужные топики. |
+| ~~ruff: 368 ошибок в backend+bot+worker~~ | — | ✅ Закрыто 2026-07-23 (commits `7a39fc1`, `de57457`): `Annotated[X, Depends(get_x)]` per FastAPI docs во всех 86 handler-сигнатурах, удалены дубликаты (`get_membership_service`, `membership_service.leave`), устранены F821 (Response, pytest, _drop_stale_records), длинные строки перенесены, `asyncio.to_thread` для sync I/O в `uploads.py`. ruff чистый во всех сервисах без per-file-ignore для B008. Подробности и паттерн — `docs/04-code-standards.md` §1. |
 
 ---
 
