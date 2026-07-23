@@ -102,12 +102,14 @@ export function TodayPage() {
       )}
 
       {habit.photo_url ? (
-        <img
-          src={habit.photo_url}
-          alt={habit.title}
-          className="mb-3 block w-full max-h-56 rounded-card border border-white/5 object-cover"
-          loading="lazy"
-        />
+        <div className="mb-3 flex max-h-56 items-center justify-center rounded-card border border-white/5 bg-canvas/60 p-2">
+          <img
+            src={habit.photo_url}
+            alt={habit.title}
+            className="block max-h-52 w-full object-contain"
+            loading="lazy"
+          />
+        </div>
       ) : null}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">

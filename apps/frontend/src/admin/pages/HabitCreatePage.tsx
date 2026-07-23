@@ -351,12 +351,12 @@ export function HabitCreatePage() {
         <FieldRow label="Фото клуба">
           <div className="flex flex-col gap-3">
             {state.photo_url ? (
-              <div className="relative w-full overflow-hidden rounded-card border border-white/10 bg-surface">
-                {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+              <div className="mt-3 flex max-h-64 items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2">
                 <img
                   src={state.photo_url}
-                  alt="Превью фото клуба"
-                  className="block w-full max-h-64 object-cover"
+                  alt="Превью"
+                  className="block max-h-60 w-full object-contain"
+                  loading="lazy"
                 />
                 <button
                   type="button"

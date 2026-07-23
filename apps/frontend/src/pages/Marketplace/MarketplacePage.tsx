@@ -122,18 +122,20 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
   return (
     <article className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
       {habit.photo_url ? (
-        <img
-          src={habit.photo_url}
-          alt={habit.title}
-          className="block h-32 w-full object-cover"
-          loading="lazy"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.display = "none";
-          }}
-        />
+        <div className="flex h-40 w-full items-center justify-center bg-canvas/60">
+          <img
+            src={habit.photo_url}
+            alt={habit.title}
+            className="block max-h-40 w-full object-contain"
+            loading="lazy"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        </div>
       ) : (
         <div
-          className="flex h-32 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-4xl"
+          className="flex h-40 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-4xl"
           aria-hidden="true"
         >
           🎯

@@ -31,6 +31,7 @@ export function ProfilePage() {
               src={photoUrl}
               fallback={tgUser.first_name ?? "?"}
               size="lg"
+              glow
             />
             <div className="min-w-0">
               <p className="truncate text-base font-semibold text-text">
@@ -89,22 +90,41 @@ export function ProfilePage() {
           <ul className="space-y-2">
             {myHabits!.items.map((h) => (
               <li key={h.id}>
-                <div className="rounded-card border border-white/5 bg-surface p-3 shadow-card">
-                  <div className="mb-2 flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-sm font-semibold text-text">{h.title}</h3>
-                      {h.description && (
-                        <p className="mt-0.5 line-clamp-1 text-xs text-muted">{h.description}</p>
-                      )}
+                <div className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
+                  {h.photo_url ? (
+                    <div className="flex h-24 w-full items-center justify-center bg-canvas/60">
+                      <img
+                        src={h.photo_url}
+                        alt={h.title}
+                        className="block max-h-24 w-full object-contain"
+                        loading="lazy"
+                      />
                     </div>
+                  ) : (
+                    <div
+                      className="flex h-24 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-2xl"
+                      aria-hidden="true"
+                    >
+                      🎯
+                    </div>
+                  )}
+                  <div className="p-3">
+                    <div className="mb-2 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="truncate text-sm font-semibold text-text">{h.title}</h3>
+                        {h.description && (
+                          <p className="mt-0.5 line-clamp-1 text-xs text-muted">{h.description}</p>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      onClick={() => navigate(`/habits/${h.id}/today`)}
+                      variant="secondary"
+                      className="min-h-0 w-full px-3 py-1.5 text-xs"
+                    >
+                      Открыть клуб →
+                    </Button>
                   </div>
-                  <Button
-                    onClick={() => navigate(`/habits/${h.id}/today`)}
-                    variant="secondary"
-                    className="min-h-0 w-full px-3 py-1.5 text-xs"
-                  >
-                    Открыть клуб →
-                  </Button>
                 </div>
               </li>
             ))}
