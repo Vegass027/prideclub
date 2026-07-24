@@ -55,6 +55,22 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
         existing = await checkin_repo.get_for_date(str(membership.id), club_date)
         if existing is not None:
             continue
+        # 7.3: новый участник, вступивший в club_date, не считается
+        # пропавшим — пропуск начинается со следующего клуб-дня.
+        # joined_at NOT NULL в schema, default = now() — значит
+        # None здесь невозможен в проде; defensive check избыточен.
+        if membership.joined_at.date() >= club_date:
+            continue
+        penalty = await penalty_service.apply_window_expired(
+            violator_membership_id=str(membership.id),
+            club_date=club_date,
+        )
+        if penalty is not None:
+            penalized += 1
+            notifications.append(
+                (membership, int(penalty.amount))
+            )
+            continue
         penalty = await penalty_service.apply_window_expired(
             violator_membership_id=str(membership.id),
             club_date=club_date,

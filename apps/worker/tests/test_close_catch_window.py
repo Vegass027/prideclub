@@ -12,6 +12,26 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from worker.tasks import close_catch_window
+
+
+@pytest.fixture(autouse=True)
+def _freeze_now(monkeypatch):
+    """Фиксируем now_utc = 2026-07-21 12:00 UTC для всех тестов файла.
+
+    Без этого тесты хрупкие: club_date и is_within_checkin_window
+    зависят от datetime.now(UTC), который плавает в течение суток.
+    12:00 UTC > 07:00 UTC = окно закрыто → cron должен штрафовать.
+    """
+    fixed_now = datetime(2026, 7, 21, 12, 0, tzinfo=ZoneInfo("UTC"))
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(close_catch_window, "datetime", _FrozenDatetime)
+
 
 @pytest.mark.asyncio
 async def test_close_window_creates_penalty_for_missing_checkin(worker_db):
@@ -220,3 +240,73 @@ async def test_close_window_pauses_membership_when_deposit_zero(worker_db):
             await session.execute(select(Membership))
         ).scalars().one()
         assert m.status == MembershipStatus.PAUSED
+
+
+# ---------- PR №7.3: guard «joined_at >= club_date» ------------------------
+# Новый участник, вступивший в club_date, не считается пропавшим — пропуск
+# начинается со следующего клуб-дня.
+
+
+@pytest.mark.asyncio
+async def test_close_window_skips_member_joined_today(worker_db):
+    """Member, вступивший сегодня → не штрафуется за этот club_date.
+
+    now_utc зафиксирован autouse-фикстурой на 2026-07-21 12:00 UTC,
+    club_date = 2026-07-21. joined_at = 14:00 UTC того же дня →
+    date() == club_date → guard срабатывает.
+    """
+    from sqlalchemy import select
+
+    from app.models.penalty import Penalty
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=108)
+        habit = await worker_db.add_habit(
+            session, id="00000000-0000-0000-0000-000000000007"
+        )
+        # joined_at = сегодня 14:00 UTC (тот же день, после окна)
+        await worker_db.add_membership(
+            session,
+            user_id=user.id,
+            habit_id=habit.id,
+            joined_at=datetime(2026, 7, 21, 14, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        await session.commit()
+
+    result = await close_catch_window._process()
+
+    assert result["summary"] == [{"habit_id": habit.id, "penalized": 0}]
+
+    async with worker_db.session_factory() as session:
+        penalties = (await session.execute(select(Penalty))).scalars().all()
+        assert penalties == []
+
+
+@pytest.mark.asyncio
+async def test_close_window_penalizes_member_joined_yesterday(worker_db):
+    """Контр-тест: Member, вступивший вчера → штрафуется за сегодня."""
+    from sqlalchemy import select
+
+    from app.models.penalty import Penalty
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=109)
+        habit = await worker_db.add_habit(
+            session, id="00000000-0000-0000-0000-000000000008"
+        )
+        # joined_at = вчера — guard не срабатывает
+        await worker_db.add_membership(
+            session,
+            user_id=user.id,
+            habit_id=habit.id,
+            joined_at=datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        await session.commit()
+
+    result = await close_catch_window._process()
+
+    assert result["summary"] == [{"habit_id": habit.id, "penalized": 1}]
+
+    async with worker_db.session_factory() as session:
+        penalties = (await session.execute(select(Penalty))).scalars().all()
+        assert len(penalties) == 1
