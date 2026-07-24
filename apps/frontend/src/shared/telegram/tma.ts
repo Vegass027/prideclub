@@ -34,6 +34,9 @@ declare global {
         setBottomBarColor?: (color: string) => void;
         colorScheme?: "light" | "dark";
         themeParams?: Record<string, string>;
+        // Telegram WebApp API 6.0+. Callback-style (older SDK returned Promise).
+        showAlert?: (message: string, callback?: () => void) => void;
+        showConfirm?: (message: string, callback?: (ok: boolean) => void) => void;
       };
     };
   }
@@ -126,4 +129,21 @@ export function openTelegramLink(url: string): void {
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Native Telegram alert popup (Telegram WebApp API 6.0+, callback-style).
+ * Resolves when user dismisses the dialog.
+ * Fallback: in dev/tests outside TWA we log to console so callers don't crash.
+ */
+export function showAlert(message: string): Promise<void> {
+  const showAlertFn = window.Telegram?.WebApp?.showAlert;
+  if (typeof showAlertFn !== "function") {
+    // eslint-disable-next-line no-console
+    console.warn("[showAlert]", message);
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    showAlertFn(message, () => resolve());
+  });
 }

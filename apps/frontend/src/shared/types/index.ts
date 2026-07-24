@@ -98,11 +98,21 @@ export interface BalanceResponse {
   history: Transaction[];
 }
 
+export interface TopupResponse {
+  ok: boolean;
+  transaction_id?: string;
+  new_deposit_balance?: number;
+  code?: string;
+}
+
 export interface LeaderboardEntry {
   rank: number;
   membership_id: string;
   first_name: string;
   metric_value: number;
+  // Относительный путь /api/v1/users/{id}/photo → backend делает 307 redirect
+  // на Telegram CDN. null = нет аватарки или cron не подтянул → инициалы.
+  photo_url: string | null;
 }
 
 export interface LeaderboardResponse {

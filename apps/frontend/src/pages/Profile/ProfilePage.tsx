@@ -61,7 +61,17 @@ export function ProfilePage() {
               <p className="text-2xl font-bold text-text">{formatKopecks(balance?.deposit_balance ?? 0)}</p>
             )}
           </div>
-          <Button onClick={() => setTopUpOpen(true)} variant="primary" className="px-4 py-2 text-sm">
+          <Button
+            onClick={() => setTopUpOpen(true)}
+            variant="primary"
+            className="px-4 py-2 text-sm"
+            disabled={(myHabits?.items.length ?? 0) === 0}
+            title={
+              (myHabits?.items.length ?? 0) === 0
+                ? "Нужно состоять хотя бы в одном клубе"
+                : undefined
+            }
+          >
             + Пополнить
           </Button>
         </div>
@@ -168,7 +178,7 @@ export function ProfilePage() {
       <TopUpModal
         open={topUpOpen}
         onClose={() => setTopUpOpen(false)}
-        currentBalance={balance?.deposit_balance ?? 0}
+        habits={myHabits?.items ?? []}
       />
 
       <BottomNav />

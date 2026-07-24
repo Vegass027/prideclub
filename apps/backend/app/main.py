@@ -20,6 +20,7 @@ from app.api.v1 import (
     leaderboard,
     members,
     memberships,
+    payments,
     users,
 )
 from app.core.config import get_settings
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(memberships.router, prefix="/api/v1", tags=["memberships"])
     app.include_router(members.router, prefix="/api/v1", tags=["members"])
     app.include_router(balance.router, prefix="/api/v1", tags=["balance"])
+    app.include_router(payments.router, prefix="/api/v1", tags=["payments"])
     app.include_router(leaderboard.router, prefix="/api/v1", tags=["leaderboard"])
     app.include_router(
         internal_checkins.router, prefix="/internal", tags=["internal"]

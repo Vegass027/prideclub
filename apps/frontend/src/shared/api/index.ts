@@ -7,6 +7,7 @@ import type {
   MarketplaceResponse,
   MembersResponse,
   TodayResponse,
+  TopupResponse,
 } from "@/shared/types";
 
 export const marketplaceApi = {
@@ -36,6 +37,8 @@ export const membersApi = {
 
 export const balanceApi = {
   get: () => apiClient.get<BalanceResponse>("/balance").then((r) => r.data),
+  topup: (payload: { habit_id: string; amount_kopecks: number }) =>
+    apiClient.post<TopupResponse>("/payments/topup", payload).then((r) => r.data),
 };
 
 export const leaderboardApi = {
