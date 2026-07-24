@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
@@ -51,6 +54,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # оттуда. Нельзя создавать в DI — там нет event loop.
     app.state.bot_http = make_session()
     logger.info("backend.startup.bot_http_ready")
+
+    # Startup: директория для локального кеша аватарок (Pravki.md §7.1 v3).
+    # Создаём в lifespan (sync I/O в thread, не блокируем event loop).
+    # <STATIC_DIR>/avatars/{user_id}.jpg — file_id хранится в БД, Redis
+    # кеширует file_id на 6ч для инвалидации при смене фото.
+    static_dir = Path(os.environ.get("STATIC_DIR", "/app/static"))
+    avatars_dir = static_dir / "avatars"
+    await asyncio.to_thread(avatars_dir.mkdir, parents=True, exist_ok=True)
+    app.state.avatars_dir = avatars_dir
+    logger.info("backend.startup.avatars_dir_ready", extra={"path": str(avatars_dir)})
 
     # Startup: инициализируем Redis-пул сразу, чтобы первый запрос не
     # упёрся в холодный connect (50-200ms). Если Redis недоступен — логируем,

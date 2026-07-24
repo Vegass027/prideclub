@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -333,6 +334,33 @@ class FakeCache:
 
     async def invalidate_today(self, habit_id: str, membership_id: str) -> None:
         self.invalidated.append((habit_id, membership_id))
+
+
+class FakeAvatarService:
+    """Замена AvatarService для unit-тестов.
+
+    По умолчанию get_or_fetch_local_path возвращает None (404).
+    Тест может подложить fake JPEG-файл через `set_local_path` или
+    переопределить `get_or_fetch_local_path` напрямую.
+    """
+
+    def __init__(self) -> None:
+        self._local_paths: dict[int, Path] = {}
+
+    def set_local_path(self, user_id: int, path: Path) -> None:
+        self._local_paths[user_id] = path
+
+    async def get_or_fetch_local_path(
+        self, user_id: int, file_id: str | None
+    ) -> Path | None:
+        if not file_id:
+            return None
+        return self._local_paths.get(user_id)
+
+    async def get_cdn_url(
+        self, user_id: int, file_id: str | None
+    ) -> str | None:
+        return None
 
 
 class FakePenaltyRepo:

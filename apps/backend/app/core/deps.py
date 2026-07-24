@@ -34,17 +34,21 @@ def get_avatar_service(
     request: Request,
     redis: RedisDep,
 ) -> AvatarService:
-    """DI provider для AvatarService (Pravki.md §7.1).
+    """DI provider для AvatarService (Pravki.md §7.1 v3, подход D).
 
     http-сессия берётся из app.state.bot_http (создаётся в lifespan
     main.py). Нельзя создавать ClientSession здесь — DI выполняется
     в threadpool без running event loop (RuntimeError). AvatarService
     переиспользует сессию для connection pool (TCP keep-alive).
+
+    avatars_dir хранится в app.state.avatars_dir (создаётся в lifespan
+    main.py: makedirs с exist_ok=True, mkdir /app/static/avatars).
     """
     return AvatarService(
         bot_token=get_settings().bot_token,
         redis=redis,
         http=request.app.state.bot_http,
+        avatars_dir=request.app.state.avatars_dir,
     )
 
 

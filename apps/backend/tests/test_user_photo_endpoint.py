@@ -226,9 +226,17 @@ def test_photo_endpoint_404_when_no_photo_file_id(
     assert r.json()["code"] == "photo_unavailable"
 
 
-def test_photo_endpoint_307_redirect_with_photo(
+def test_photo_endpoint_returns_jpeg_with_photo(
     app_with_mocked_avatar: tuple[Any, Any], _sqlite_engine: Any
 ) -> None:
+    """Pravki.md §7.1 v3 (подход D): endpoint отдаёт JPEG из локального кеша,
+    не 307 redirect. Токен бота НЕ утекает в Network tab.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from app.core.deps import get_avatar_service
+
     app, fake_svc = app_with_mocked_avatar
     _, factory = _sqlite_engine
     import asyncio
@@ -237,18 +245,66 @@ def test_photo_endpoint_307_redirect_with_photo(
         _seed_user_with_photo(factory, user_id=789, photo_file_id="AgAC_file_id_xyz")
     )
 
+    # Override DI чтобы AvatarService.get_or_fetch_local_path вернул
+    # реальный JPEG-файл (а не замоканный Path).
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(b"\xff\xd8\xff\xe0fake_jpeg_bytes")
+        tmp_path = Path(tmp.name)
+
+    real_svc = AsyncMock(spec=AvatarService)
+    real_svc.get_or_fetch_local_path.return_value = tmp_path
+
+    async def _override():
+        return real_svc
+
+    app.dependency_overrides[get_avatar_service] = _override
+
     with TestClient(app) as client:
         r = client.get(
             "/api/v1/users/789/photo",
             headers={"X-Telegram-Init-Data": _build_init_data(user_id=789)},
-            follow_redirects=False,
         )
-    assert r.status_code == 307
-    assert r.headers["location"] == (
-        "https://api.telegram.org/file/botTEST/photos/file_42.jpg"
-    )
-    # AvatarService был вызван с правильным user_id
-    fake_svc.get_cdn_url.assert_awaited_once()
-    call_args = fake_svc.get_cdn_url.call_args
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.headers["cache-control"] == "private, max-age=21600"
+    # Бинарь = содержимое tmp-файла.
+    assert r.content == b"\xff\xd8\xff\xe0fake_jpeg_bytes"
+    # AvatarService был вызван с правильным user_id и file_id.
+    real_svc.get_or_fetch_local_path.assert_awaited_once()
+    call_args = real_svc.get_or_fetch_local_path.call_args
     assert call_args.args[0] == 789
     assert call_args.args[1] == "AgAC_file_id_xyz"
+
+    tmp_path.unlink()
+
+
+def test_photo_endpoint_404_when_avatar_service_returns_none(
+    app_with_mocked_avatar: tuple[Any, Any], _sqlite_engine: Any
+) -> None:
+    """Если AvatarService.get_or_fetch_local_path возвращает None
+    (Telegram недоступен / file_id есть но скачать нельзя) → 404."""
+    from app.core.deps import get_avatar_service
+
+    app, _ = app_with_mocked_avatar
+    _, factory = _sqlite_engine
+    import asyncio
+
+    asyncio.run(
+        _seed_user_with_photo(factory, user_id=890, photo_file_id="AgAC_some_file")
+    )
+
+    real_svc = AsyncMock(spec=AvatarService)
+    real_svc.get_or_fetch_local_path.return_value = None
+
+    async def _override():
+        return real_svc
+
+    app.dependency_overrides[get_avatar_service] = _override
+
+    with TestClient(app) as client:
+        r = client.get(
+            "/api/v1/users/890/photo",
+            headers={"X-Telegram-Init-Data": _build_init_data(user_id=890)},
+        )
+    assert r.status_code == 404
+    assert r.json()["code"] == "photo_unavailable"
