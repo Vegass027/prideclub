@@ -289,6 +289,11 @@ async def worker_db(monkeypatch):
                 penalty_amount=penalty_amount,
                 price_month=price_month,
                 proof_type=proof_type or ProofType.VIDEO_NOTE,
+                # proof_types (миграция 012): на проде заполняется
+                # server_default='["video_note"]'. На SQLite-тестах
+                # server_default не работает → заполняем явно, иначе
+                # CheckinService отвергает любой чек-ин с wrong_type.
+                proof_types=[(proof_type or ProofType.VIDEO_NOTE).value],
                 prize_pool=prize_pool,
                 is_active=is_active,
                 checkin_topic_thread_id=checkin_topic_thread_id,
