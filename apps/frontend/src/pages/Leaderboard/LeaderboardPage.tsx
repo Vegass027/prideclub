@@ -95,7 +95,7 @@ function LeaderboardRow({
       >
         {row.rank}
       </div>
-      <Avatar src={photoSrc} fallback={row.first_name} size="sm" />
+      <Avatar src={photoSrc} fallback={row.first_name} size="sm" loading="eager" />
       <span className="flex-1 truncate text-sm font-medium text-text">
         {row.first_name}
       </span>

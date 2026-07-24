@@ -128,36 +128,140 @@ async def _download_avatar_jpeg(
     bot_token: str,
     file_id: str,
 ) -> bytes | None:
-    """Скачивает JPEG с Telegram CDN. None при ошибке."""
+    """Скачивает JPEG с Telegram CDN. None при ошибке.
+
+    Скачиваем самый большой доступный size (Telegram отдаёт ordered
+    from smallest to largest, photos[0][-1] — biggest). Дальше
+    _resize_jpeg делает серверный resize до AVATAR_SIZE_PX=160.
+
+    Зачем biggest, а не medium по индексу: количество элементов в
+    массиве `sizes` не гарантированно (зависит от генерации Telegram
+    для конкретного фото). Скачиваем biggest → resize детерминирован.
+
+    Chunked download с resume: на некоторых сетях (CDN edge, firewall)
+    connection обрывается на ~16 KB. Используем Range: bytes=N- чтобы
+    продолжить с обрыва. До 3 retry с exponential backoff.
+    """
     file_path = await _fetch_file_path(http, bot_token, file_id)
     if not file_path:
         return None
     cdn_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-    try:
-        async with http.get(
-            cdn_url,
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            if resp.status != 200:
+
+    chunks: list[bytes] = []
+    total_size: int | None = None
+    start_offset = 0
+
+    for attempt in range(10):
+        try:
+            headers = {"Range": f"bytes={start_offset}-"} if start_offset > 0 else {}
+            async with http.get(
+                cdn_url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers=headers,
+            ) as resp:
+                if resp.status not in (200, 206):
+                    log.warning(
+                        "user_photos.download_non_200",
+                        extra={"file_id_prefix": file_id[:16], "status": resp.status, "attempt": attempt},
+                    )
+                    return None
+                if resp.headers.get("Content-Range"):
+                    # 206 Partial Content. Пример: "bytes 16000-94934/94935"
+                    cr = resp.headers["Content-Range"]
+                    total_size = int(cr.split("/")[-1])
+                elif resp.headers.get("Content-Length") and start_offset == 0:
+                    total_size = int(resp.headers["Content-Length"])
+
+                chunk = await resp.content.read(_MAX_JPEG_BYTES + 1)
+                if not chunk:
+                    return None
+                if len(chunk) > _MAX_JPEG_BYTES:
+                    log.warning(
+                        "user_photos.download_too_large",
+                        extra={"file_id_prefix": file_id[:16], "size": len(chunk)},
+                    )
+                    return None
+
+                chunks.append(chunk)
+                start_offset += len(chunk)
+
+                # EOI check: если файл полный (или последний chunk имеет EOI).
+                if chunk[-2:] == b"\xff\xd9":
+                    return b"".join(chunks)
+
+                # Не EOI, не докачали — retry с offset.
+                if start_offset >= (total_size or float("inf")):
+                    # Content-Length достигнут, но EOI нет → битый JPEG.
+                    log.warning(
+                        "user_photos.download_no_eoi",
+                        extra={"file_id_prefix": file_id[:16], "size": start_offset},
+                    )
+                    return None
+
                 log.warning(
-                    "user_photos.download_non_200",
-                    extra={"file_id_prefix": file_id[:16], "status": resp.status},
+                    "user_photos.download_resume",
+                    extra={
+                        "file_id_prefix": file_id[:16],
+                        "got": start_offset,
+                        "expected": total_size,
+                        "attempt": attempt,
+                    },
                 )
-                return None
-            content = await resp.content.read(_MAX_JPEG_BYTES + 1)
-            if len(content) > _MAX_JPEG_BYTES:
-                log.warning(
-                    "user_photos.download_too_large",
-                    extra={"file_id_prefix": file_id[:16], "size": len(content)},
-                )
-                return None
-            return content
-    except (TimeoutError, aiohttp.ClientError) as exc:
-        log.warning(
-            "user_photos.download_network_error",
-            extra={"file_id_prefix": file_id[:16], "err": str(exc)},
-        )
-        return None
+                await asyncio.sleep(0.5 * (2 ** attempt))
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            log.warning(
+                "user_photos.download_network_error",
+                extra={"file_id_prefix": file_id[:16], "err": str(exc), "attempt": attempt},
+            )
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+            return None
+    return None
+
+
+# Target avatar size after server-side resize (Pravki §7.1 v3.1).
+# 160x160 покрывает retina displays (2x @ 36px CircleAvatar = 72 device px).
+# 8x меньше файлов чем 640x640: ~2-3 KB vs ~16 KB. На 100 users в лидерборде
+# = 200-300 KB вместо 1.6 MB.
+AVATAR_SIZE_PX = 160
+
+
+def _resize_jpeg(raw_bytes: bytes, target_px: int = AVATAR_SIZE_PX) -> bytes | None:
+    """Resize JPEG до target_px x target_px через Pillow. Sync I/O.
+
+    Сохраняет aspect ratio, центрирует crop до квадрата. Возвращает
+    None при ошибке (битый JPEG, формат не поддерживается).
+    """
+    import io
+
+    from PIL import Image
+
+    def _sync_resize() -> bytes | None:
+        try:
+            img = Image.open(io.BytesIO(raw_bytes))
+            # RGBA → RGB (JPEG не поддерживает alpha).
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+            # Crop до квадрата (центрированный).
+            w, h = img.size
+            side = min(w, h)
+            left = (w - side) // 2
+            top = (h - side) // 2
+            img = img.crop((left, top, left + side, top + side))
+            # Resize. LANCZOS — высокое качество для downscaling.
+            img = img.resize((target_px, target_px), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            return buf.getvalue()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "user_photos.resize_error",
+                extra={"err": str(exc), "size": len(raw_bytes)},
+            )
+            return None
+
+    return _sync_resize()
 
 
 def _avatar_path(avatars_dir: Path, user_id: int) -> Path:
@@ -242,15 +346,30 @@ async def _process(*, session_factory=None) -> dict:
                     cached += 1
                 else:
                     # file_id новый или файл отсутствует → скачиваем.
-                    jpeg_bytes = await _download_avatar_jpeg(
+                    raw_jpeg = await _download_avatar_jpeg(
                         http, settings.bot_token, file_id
                     )
                     await asyncio.sleep(_REQUEST_SLEEP_SECONDS)
-                    if jpeg_bytes is not None:
-                        await _write_atomic(local_path, jpeg_bytes)
-                        user.photo_file_id = file_id
-                        user.photo_fetched_at = datetime.now(tz=UTC)
-                        updated += 1
+                    if raw_jpeg is not None:
+                        # Server-side resize до 160x160 (Pravki §7.1 v3.1).
+                        # Скачали biggest от Telegram (photos[0][-1]), resize
+                        # детерминирован через Pillow LANCZOS. Не полагаемся
+                        # на конкретный medium size из Bot API (количество
+                        # sizes в массиве не гарантировано).
+                        resized = await asyncio.to_thread(
+                            _resize_jpeg, raw_jpeg, AVATAR_SIZE_PX
+                        )
+                        if resized is None:
+                            errors += 1
+                            log.warning(
+                                "user_photos.resize_failed",
+                                extra={"user_id": user_id},
+                            )
+                        else:
+                            await _write_atomic(local_path, resized)
+                            user.photo_file_id = file_id
+                            user.photo_fetched_at = datetime.now(tz=UTC)
+                            updated += 1
                     else:
                         # Скачивание не удалось, не обновляем file_id
                         # (мог быть временный сбой TG).

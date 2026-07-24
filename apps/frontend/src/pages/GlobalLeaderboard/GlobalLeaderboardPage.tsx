@@ -140,7 +140,7 @@ function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel:
       >
         {row.rank}
       </span>
-      <Avatar src={photoSrc} fallback={row.first_name} size="sm" />
+      <Avatar src={photoSrc} fallback={row.first_name} size="sm" loading="eager" />
       <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
       <div className="flex flex-col items-end leading-tight">
         <span className="text-sm font-bold tabular-nums text-primary">
