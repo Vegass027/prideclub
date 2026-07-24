@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useLeaderboardOverview, usePhotoBlob, type LeaderboardTab } from "@/shared/hooks";
+import { useLeaderboardOverview, type LeaderboardTab } from "@/shared/hooks";
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
@@ -118,7 +118,12 @@ function ClubTopBlock({ habitId, title, membersCount, top, metricLabel }: ClubTo
 }
 
 function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel: string }) {
-  const photoBlob = usePhotoBlob(row.photo_url);
+  // photo_url: "/api/v1/users/{id}/photo" — backend 307 → Telegram CDN.
+  // <img> сама следует редиректу; не используем usePhotoBlob (blob fetch
+  // через axios не работает с 307).
+  const photoSrc = row.photo_url
+    ? new URL(row.photo_url, window.location.origin).toString()
+    : null;
   return (
     <li className="flex items-center gap-3 rounded-md bg-canvas/60 px-2.5 py-1.5">
       <span
@@ -135,11 +140,18 @@ function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel:
       >
         {row.rank}
       </span>
-      <Avatar src={photoBlob} fallback={row.first_name} size="sm" />
+      <Avatar src={photoSrc} fallback={row.first_name} size="sm" />
       <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
-      <span className="text-sm font-bold tabular-nums text-primary">
-        {row.metric_value} {metricLabel}
-      </span>
+      <div className="flex flex-col items-end leading-tight">
+        <span className="text-sm font-bold tabular-nums text-primary">
+          {row.metric_value} {metricLabel}
+        </span>
+        <span className="text-[10px] tabular-nums text-muted">
+          📅 {row.breakdown.checkin_count}
+          {" · "}🎯 {row.breakdown.catches_count}
+          {" · "}🚔 {row.breakdown.penalties_count}
+        </span>
+      </div>
     </li>
   );
 }

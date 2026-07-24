@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,32 @@ class CheckinRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def count_done_for_memberships(
+        self, membership_ids: list[str]
+    ) -> dict[str, int]:
+        """Возвращает {membership_id: COUNT(done)} для списка memberships.
+
+        Один SQL: GROUP BY membership_id. Используется leaderboard для
+        breakdown и members API для checkin_count.
+        """
+        if not membership_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(Checkin.membership_id, func.count(Checkin.id))
+                .where(
+                    Checkin.membership_id.in_(membership_ids),
+                    Checkin.status == CheckinStatus.DONE,
+                )
+                .group_by(Checkin.membership_id)
+            )
+        ).all()
+        return {str(m_id): int(c) for m_id, c in rows}
+
+    async def count_done_for_membership(self, membership_id: str) -> int:
+        result = await self.count_done_for_memberships([membership_id])
+        return result.get(str(membership_id), 0)
 
     async def get_recent_dates(
         self,

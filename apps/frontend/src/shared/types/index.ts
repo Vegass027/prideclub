@@ -45,7 +45,10 @@ export interface Membership {
 
 export interface CheckinStatusOut {
   status: CheckinStatus;
+  checkin_count: number;
   streak_days: number;
+  penalties_count: number;
+  penalties_total: number;
   deadline_at: string | null;
 }
 
@@ -61,7 +64,7 @@ export interface MemberRow {
   first_name: string;
   username: string | null;
   status: CheckinStatus;
-  streak_days: number;
+  checkin_count: number;
   can_catch: boolean;
 }
 
@@ -105,11 +108,23 @@ export interface TopupResponse {
   code?: string;
 }
 
+export interface LeaderboardBreakdown {
+  /** Total done чекинов за всё время (sortable в табе "Серии"). */
+  checkin_count: number;
+  /** Consecutive streak от today (0 если сегодня не отмечен). */
+  streak_days: number;
+  /** Сколько раз поймали как нарушителя (sortable в табе "Позор"). */
+  penalties_count: number;
+  /** Сколько раз сам поймал других (sortable в табе "Ловцы"). */
+  catches_count: number;
+}
+
 export interface LeaderboardEntry {
   rank: number;
   membership_id: string;
   first_name: string;
   metric_value: number;
+  breakdown: LeaderboardBreakdown;
   // Относительный путь /api/v1/users/{id}/photo → backend делает 307 redirect
   // на Telegram CDN. null = нет аватарки или cron не подтянул → инициалы.
   photo_url: string | null;

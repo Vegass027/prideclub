@@ -33,7 +33,7 @@ from app.db.redis import close_redis, get_redis
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Lifespan: pre-warm Redis на старте, закрыть соединение на shutdown.
+    """Lifespan: pre-warm Redis + aiohttp session на старте, закрыть на shutdown.
 
     `@app.on_event` deprecated в FastAPI 0.110+ — заменяем на единый
     lifespan-контекст. Преимущества:
@@ -41,7 +41,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     - Один declaration для обеих фаз — нет риска забыть про одну.
     - TestClient корректно дёргает lifespan при `with TestClient(app)`.
     """
+    from app.core.telegram_bot_api import close_session, make_session
+
     logger = get_logger("backend.lifespan")
+
+    # Startup: aiohttp.ClientSession для исходящих к Telegram Bot API.
+    # Создаём в lifespan (где есть event loop), кладём в app.state.
+    # DI-провайдеры (get_avatar_service, notification_service) читают
+    # оттуда. Нельзя создавать в DI — там нет event loop.
+    app.state.bot_http = make_session()
+    logger.info("backend.startup.bot_http_ready")
 
     # Startup: инициализируем Redis-пул сразу, чтобы первый запрос не
     # упёрся в холодный connect (50-200ms). Если Redis недоступен — логируем,
@@ -61,6 +70,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await close_redis()
+        await close_session(app.state.bot_http)
         logger.info("backend.shutdown")
 
 

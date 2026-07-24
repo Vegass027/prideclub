@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -33,11 +33,26 @@ router = APIRouter()
 LEADERBOARD_LIMIT = 100
 
 
+class LeaderboardBreakdown(BaseModel):
+    """Доп. метрики для строки лидерборда.
+
+    primary = `metric_value` (sortable, выбирается по табу).
+    breakdown — остальные 3 числа для UI ("🔥 X / 💸 Y ₽ / 🎯 Z").
+    Не участвуют в сортировке и не показываются как primary.
+    """
+
+    checkin_count: int
+    streak_days: int
+    penalties_count: int
+    catches_count: int
+
+
 class LeaderboardEntry(BaseModel):
     rank: int
     membership_id: str
     first_name: str
     metric_value: int
+    breakdown: LeaderboardBreakdown
     # Относительный путь к нашему photo-endpoint (см. Pravki.md §7.1).
     # Клиент сам построит абсолютный URL (под текущим origin).
     # None = нет аватарки или worker ещё не подтянул → fallback на инициалы.
@@ -62,6 +77,109 @@ class LeaderboardOverviewResponse(BaseModel):
     tab: str
     metric_label: str
     clubs: list[OverviewClub]
+
+
+async def _membership_breakdown(
+    session: AsyncSession,
+    membership_ids: list[str],
+) -> dict[str, LeaderboardBreakdown]:
+    """Одним SQL-пакетом возвращает breakdown для каждого membership.
+
+    Считает 4 числа параллельно:
+        checkin_count = COUNT(checkin WHERE done)
+        streak_days   — НЕ вычисляем здесь (per-row, нужен Python-цикл).
+                        Возвращаем 0 — клиент видит streak только для себя
+                        (TodayPage), в лидерборде streak не показываем.
+                        Это сознательное упрощение: streak = O(N) Python
+                        для каждой строки лидерборда не оправдан.
+        penalties_count = COUNT(penalty WHERE violator)
+        catches_count  = COUNT(penalty WHERE catcher)
+    """
+    from app.repositories.checkin_repository import CheckinRepository
+    from app.repositories.penalty_repository import PenaltyRepository
+
+    if not membership_ids:
+        return {}
+
+    checkin_repo = CheckinRepository(session)
+    penalty_repo = PenaltyRepository(session)
+
+    checkin_by = await checkin_repo.count_done_for_memberships(membership_ids)
+    viol_by = await penalty_repo.totals_for_memberships(
+        membership_ids, as_violator=True
+    )
+    catch_by = await penalty_repo.totals_for_memberships(
+        membership_ids, as_violator=False
+    )
+
+    return {
+        m_id: LeaderboardBreakdown(
+            checkin_count=checkin_by.get(m_id, 0),
+            streak_days=0,
+            penalties_count=viol_by.get(m_id, (0, 0))[0],
+            catches_count=catch_by.get(m_id, (0, 0))[0],
+        )
+        for m_id in membership_ids
+    }
+
+
+async def _user_breakdown(
+    session: AsyncSession,
+    user_ids: list[int],
+) -> dict[int, LeaderboardBreakdown]:
+    """Per-user breakdown для global leaderboard — суммирует по active memberships."""
+    from sqlalchemy import select
+
+    from app.core.constants import MembershipStatus
+    from app.repositories.checkin_repository import CheckinRepository
+    from app.repositories.penalty_repository import PenaltyRepository
+
+    if not user_ids:
+        return {}
+
+    mem_rows = (
+        await session.execute(
+            select(Membership.user_id, Membership.id).where(
+                Membership.user_id.in_(user_ids),
+                Membership.status == MembershipStatus.ACTIVE,
+            )
+        )
+    ).all()
+    user_to_memberships: dict[int, list[str]] = {}
+    for uid, mid in mem_rows:
+        user_to_memberships.setdefault(int(uid), []).append(str(mid))
+
+    all_membership_ids: list[str] = [
+        m for mids in user_to_memberships.values() for m in mids
+    ]
+    if not all_membership_ids:
+        return {
+            uid: LeaderboardBreakdown(
+                checkin_count=0, streak_days=0, penalties_count=0, catches_count=0
+            )
+            for uid in user_ids
+        }
+
+    checkin_repo = CheckinRepository(session)
+    penalty_repo = PenaltyRepository(session)
+    checkin_by_mem = await checkin_repo.count_done_for_memberships(all_membership_ids)
+    viol_by_mem = await penalty_repo.totals_for_memberships(
+        all_membership_ids, as_violator=True
+    )
+    catch_by_mem = await penalty_repo.totals_for_memberships(
+        all_membership_ids, as_violator=False
+    )
+
+    out: dict[int, LeaderboardBreakdown] = {}
+    for uid in user_ids:
+        mids = user_to_memberships.get(uid, [])
+        out[uid] = LeaderboardBreakdown(
+            checkin_count=sum(checkin_by_mem.get(m, 0) for m in mids),
+            streak_days=0,
+            penalties_count=sum(viol_by_mem.get(m, (0, 0))[0] for m in mids),
+            catches_count=sum(catch_by_mem.get(m, (0, 0))[0] for m in mids),
+        )
+    return out
 
 
 async def _build_rows(
@@ -94,6 +212,8 @@ async def _build_rows(
         for m_id, user_id, first_name, photo_file_id in rows
     }
 
+    breakdown_by_membership = await _membership_breakdown(session, membership_ids)
+
     sorted_metrics = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)
     out: list[LeaderboardEntry] = []
     for rank, (m_id, value) in enumerate(sorted_metrics, start=1):
@@ -108,6 +228,12 @@ async def _build_rows(
                 membership_id=str(m_id),
                 first_name=first_name,
                 metric_value=value,
+                breakdown=breakdown_by_membership.get(
+                    str(m_id),
+                    LeaderboardBreakdown(
+                        checkin_count=0, streak_days=0, penalties_count=0, catches_count=0
+                    ),
+                ),
                 photo_url=photo_url,
             )
         )
@@ -119,6 +245,15 @@ async def _streak_leaderboard(
     membership_repo: MembershipRepository,
     habit_id: str,
 ) -> list[LeaderboardEntry]:
+    """Чекины: COUNT(done) по каждому membership в клубе.
+
+    Семантика (Pravki.md 2026-07-24): "сколько раз отчекинился, столько
+    и на счетчике". Раньше здесь был consecutive streak от today назад
+    — сбрасывался в 0 если сегодня не отчекинился. Юзер ожидал total
+    count всех done-чекинов за всё время. Логика заменена: метрика =
+    суммарное число done-чекинов membership ≤ today (без требования
+    непрерывности).
+    """
     members = await membership_repo.list_for_habit(habit_id)
     if not members:
         return []
@@ -132,32 +267,18 @@ async def _streak_leaderboard(
 
     rows = (
         await session.execute(
-            select(Checkin.membership_id, Checkin.date)
+            select(Checkin.membership_id, func.count(Checkin.id))
             .where(
                 Checkin.membership_id.in_(member_ids),
                 Checkin.date <= today,
                 Checkin.status == "done",
             )
-            .order_by(Checkin.date.desc())
+            .group_by(Checkin.membership_id)
         )
     ).all()
 
-    days_by_member: dict[str, set[date]] = defaultdict(set)
-    for m_id, d in rows:
-        days_by_member[str(m_id)].add(d)
-
-    streaks: dict[str, int] = {}
-    for m_id, days in days_by_member.items():
-        streak = 0
-        cur = today
-        from datetime import timedelta
-
-        while cur in days:
-            streak += 1
-            cur = cur - timedelta(days=1)
-        streaks[m_id] = streak
-
-    return await _build_rows(session, _truncate_metrics(streaks))
+    counts: dict[str, int] = {str(m_id): int(c) for m_id, c in rows}
+    return await _build_rows(session, _truncate_metrics(counts))
 
 
 async def _catch_leaderboard(
@@ -263,39 +384,33 @@ async def shame(
 async def _global_streak(
     session: AsyncSession, user_id: int
 ) -> tuple[list[LeaderboardEntry], int]:
-    """Глобальные серии: сумма streak_days по всем активным клубам пользователя.
+    """Глобальные чекины: SUM(COUNT(done)) по всем активным клубам юзера.
 
-    Returns:
-        (rows, total) — rows обрезан до LEADERBOARD_LIMIT, total — общее
-        число юзеров с ненулевой метрикой (до обрезки).
+    Семантика (Pravki.md 2026-07-24): "сколько раз отчекинился за всё
+    время, столько и на счетчике". Суммируем done-чекины во всех активных
+    memberships юзера. Сначала group by (user_id, membership_id) →
+    count, потом group by user_id → sum. Сложная агрегация в SQL
+    делается одним запросом с подзапросом.
     """
+    per_member_sq = (
+        select(
+            Membership.user_id.label("user_id"),
+            Checkin.membership_id.label("membership_id"),
+            func.count(Checkin.id).label("c"),
+        )
+        .join(Checkin, Checkin.membership_id == Membership.id)
+        .where(Membership.status == "active", Checkin.status == "done")
+        .group_by(Membership.user_id, Checkin.membership_id)
+        .subquery()
+    )
     rows = (
         await session.execute(
-            select(Checkin.date, Checkin.membership_id, Membership.user_id)
-            .join(Membership, Membership.id == Checkin.membership_id)
-            .where(Membership.status == "active", Checkin.status == "done")
+            select(per_member_sq.c.user_id, func.sum(per_member_sq.c.c))
+            .group_by(per_member_sq.c.user_id)
         )
     ).all()
-
-    # group by (user_id, membership_id) → set of dates
-    dates_by_member: dict[tuple[int, str], set[date]] = defaultdict(set)
-    member_to_user: dict[str, int] = {}
-    for d, m_id, u_id in rows:
-        dates_by_member[(u_id, str(m_id))].add(d)
-        member_to_user[str(m_id)] = u_id
-
-    metrics_per_user: dict[int, int] = defaultdict(int)
-    for (u_id, _m_id), days in dates_by_member.items():
-        streak = 0
-        cur = max(days)
-        from datetime import timedelta
-
-        while cur in days:
-            streak += 1
-            cur = cur - timedelta(days=1)
-        metrics_per_user[u_id] += streak
-
-    return _build_global_rows(session, metrics_per_user)
+    metrics: dict[int, int] = {int(uid): int(total) for uid, total in rows}
+    return await _build_global_rows(session, metrics)
 
 
 async def _global_counts(
@@ -322,7 +437,7 @@ async def _global_counts(
     for u_id, count in rows:
         metrics[u_id] += int(count)
 
-    return _build_global_rows(session, metrics)
+    return await _build_global_rows(session, metrics)
 
 
 async def _build_global_rows(
@@ -361,6 +476,8 @@ async def _build_global_rows(
         for u_id, fn, pf in name_rows
     }
 
+    breakdown_by_user = await _user_breakdown(session, user_ids)
+
     out: list[LeaderboardEntry] = []
     for rank, (u_id, value) in enumerate(top, start=1):
         if value <= 0:
@@ -376,6 +493,12 @@ async def _build_global_rows(
                 membership_id=f"u:{u_id}",
                 first_name=first_name,
                 metric_value=value,
+                breakdown=breakdown_by_user.get(
+                    u_id,
+                    LeaderboardBreakdown(
+                        checkin_count=0, streak_days=0, penalties_count=0, catches_count=0
+                    ),
+                ),
                 photo_url=photo_url,
             )
         )

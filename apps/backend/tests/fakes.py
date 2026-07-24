@@ -311,6 +311,21 @@ class FakeCheckinRepo:
         self._store[(membership_id, on_date)] = c
         return c, True
 
+    async def count_done_for_memberships(
+        self, membership_ids: list[str]
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {mid: 0 for mid in membership_ids}
+        for (m_id, _d), c in self._store.items():
+            if c.status != CheckinStatus.DONE:
+                continue
+            if m_id in counts:
+                counts[m_id] += 1
+        return counts
+
+    async def count_done_for_membership(self, membership_id: str) -> int:
+        result = await self.count_done_for_memberships([membership_id])
+        return result.get(membership_id, 0)
+
 
 class FakeCache:
     def __init__(self) -> None:
@@ -324,7 +339,8 @@ class FakePenaltyRepo:
     """Замена PenaltyRepository для unit-тестов.
 
     Тест наполняет через `add()`; lookup `get(penalty_id)` возвращает
-    объект Penalty или None.
+    объект Penalty или None. totals_for_membership* считает по self._store
+    (имитирует реальную агрегацию).
     """
 
     def __init__(self) -> None:
@@ -335,6 +351,37 @@ class FakePenaltyRepo:
 
     async def get(self, penalty_id: str) -> Penalty | None:
         return self._store.get(penalty_id)
+
+    async def totals_for_memberships(
+        self,
+        membership_ids: list[str],
+        *,
+        as_violator: bool = True,
+    ) -> dict[str, tuple[int, int]]:
+        result: dict[str, tuple[int, int]] = {}
+        for mid in membership_ids:
+            cnt = 0
+            total = 0
+            for p in self._store.values():
+                if as_violator and str(p.membership_id) == mid:
+                    cnt += 1
+                    total += int(p.amount)
+                elif not as_violator and str(p.catcher_membership_id) == mid:
+                    cnt += 1
+                    total += int(p.amount)
+            result[mid] = (cnt, total)
+        return result
+
+    async def totals_for_membership(
+        self,
+        membership_id: str,
+        *,
+        as_violator: bool = True,
+    ) -> tuple[int, int]:
+        result = await self.totals_for_memberships(
+            [membership_id], as_violator=as_violator
+        )
+        return result.get(membership_id, (0, 0))
 
 
 class FakeBonusRuleRepo:

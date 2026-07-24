@@ -17,12 +17,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.telegram_bot_api import get_session as get_bot_http
 from app.db.redis import get_redis
 from app.db.session import get_session
 from app.services.avatar_service import AvatarService
@@ -32,17 +31,20 @@ RedisDep = Annotated[Redis, Depends(get_redis)]
 
 
 def get_avatar_service(
+    request: Request,
     redis: RedisDep,
 ) -> AvatarService:
     """DI provider для AvatarService (Pravki.md §7.1).
 
-    Создаёт новый instance на каждый запрос (легковесный — только три
-    ссылки). aiohttp.ClientSession — singleton (TCP keep-alive pool).
+    http-сессия берётся из app.state.bot_http (создаётся в lifespan
+    main.py). Нельзя создавать ClientSession здесь — DI выполняется
+    в threadpool без running event loop (RuntimeError). AvatarService
+    переиспользует сессию для connection pool (TCP keep-alive).
     """
     return AvatarService(
         bot_token=get_settings().bot_token,
         redis=redis,
-        http=get_bot_http(),
+        http=request.app.state.bot_http,
     )
 
 

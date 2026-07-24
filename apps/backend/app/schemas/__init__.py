@@ -53,8 +53,19 @@ class MembershipOut(BaseModel):
 
 
 class CheckinStatusOut(BaseModel):
+    """Статус чек-ина пользователя в клубе + сводная статистика.
+
+    Pravki.md 2026-07-24: "сколько отчекинился раз столько и на счетчике".
+    checkin_count — общее число done-чекинов за всё время (total).
+    streak_days — consecutive (текущая серия подряд, обнуляется если
+    сегодня не отмечен). penalties_count/total — антифрод-метрики.
+    """
+
     status: str  # done | missed | pending | not_started
+    checkin_count: int
     streak_days: int
+    penalties_count: int
+    penalties_total: int  # в копейках
     deadline_at: datetime | None
 
 

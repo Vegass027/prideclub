@@ -4,11 +4,14 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import TelegramUserDbDep
+from app.core.constants import CheckinStatus
 from app.core.deps import RedisDep, SessionDep
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
+from app.models.checkin import Checkin
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -20,12 +23,19 @@ router = APIRouter()
 
 
 class MemberRowOut(BaseModel):
+    """Строка члена клуба в списке участников.
+
+    checkin_count — общее число done-чекинов за всё время
+    (Pravki.md 2026-07-24: "сколько отчекинился, столько и на счетчике").
+    Раньше был `streak_days=0` (заглушка).
+    """
+
     membership_id: str
     user_id: int
     first_name: str
     username: str | None
     status: str
-    streak_days: int
+    checkin_count: int
     can_catch: bool
 
 
@@ -58,18 +68,36 @@ async def list_members(
         raise HabitArchivedError()
 
     memberships = await membership_repo.list_for_habit(habit_id)
-    members: list[MemberRowOut] = []
     club_date = habit.club_date(datetime.now(tz=UTC))
 
     # Хак: достаём user.first_name из БД. В шаге 6 добавим UserRepository.
     user_id_to_name = await _user_names(session, [m.user_id for m in memberships])
 
+    # Одним запросом достаём COUNT(done) GROUP BY membership_id для всех
+    # членов клуба. Раньше возвращалось streak_days=0 (заглушка).
+    member_ids = [str(m.id) for m in memberships]
+    counts: dict[str, int] = {}
+    if member_ids:
+        rows = (
+            await session.execute(
+                select(Checkin.membership_id, func.count(Checkin.id))
+                .where(
+                    Checkin.membership_id.in_(member_ids),
+                    Checkin.status == CheckinStatus.DONE,
+                )
+                .group_by(Checkin.membership_id)
+            )
+        ).all()
+        counts = {str(m_id): int(c) for m_id, c in rows}
+
+    now = datetime.now(tz=UTC)
+    members: list[MemberRowOut] = []
     for m in memberships:
         existing = await checkin_repo.get_for_date(str(m.id), club_date)
         if existing is not None:
             status = existing.status.value
         else:
-            status = "pending" if habit.is_within_checkin_window(datetime.now(tz=UTC)) else "missed"
+            status = "pending" if habit.is_within_checkin_window(now) else "missed"
 
         members.append(
             MemberRowOut(
@@ -78,7 +106,7 @@ async def list_members(
                 first_name=user_id_to_name.get(m.user_id, "—"),
                 username=None,
                 status=status,
-                streak_days=0,
+                checkin_count=counts.get(str(m.id), 0),
                 can_catch=user.id != m.user_id and status == "missed",
             )
         )

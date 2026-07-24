@@ -13,6 +13,7 @@ from tests.fakes import (
     FakeCheckinRepo,
     FakeHabitRepo,
     FakeMembershipRepo,
+    FakePenaltyRepo,
     FakeSession,
     make_habit,
 )
@@ -41,6 +42,7 @@ async def test_topic_scoped_checkin_accepts_matching_thread() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     cache = FakeCache()
     session = FakeSession(checkin_repo)
 
@@ -49,6 +51,7 @@ async def test_topic_scoped_checkin_accepts_matching_thread() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
         cache=cache,  # type: ignore[arg-type]
     )
 
@@ -72,6 +75,7 @@ async def test_topic_scoped_checkin_rejects_wrong_thread() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     cache = FakeCache()
     session = FakeSession(checkin_repo)
 
@@ -80,6 +84,7 @@ async def test_topic_scoped_checkin_rejects_wrong_thread() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
         cache=cache,  # type: ignore[arg-type]
     )
 
@@ -104,6 +109,7 @@ async def test_topic_scoped_checkin_rejects_general_when_topic_required() -> Non
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     cache = FakeCache()
     session = FakeSession(checkin_repo)
 
@@ -112,6 +118,7 @@ async def test_topic_scoped_checkin_rejects_general_when_topic_required() -> Non
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
         cache=cache,  # type: ignore[arg-type]
     )
 
@@ -136,6 +143,7 @@ async def test_no_topic_checkin_accepts_any_thread() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     cache = FakeCache()
     session = FakeSession(checkin_repo)
 
@@ -144,6 +152,7 @@ async def test_no_topic_checkin_accepts_any_thread() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
         cache=cache,  # type: ignore[arg-type]
     )
 

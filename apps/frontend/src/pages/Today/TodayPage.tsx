@@ -38,6 +38,28 @@ function resolveProofTypes(habit: { proof_types: ProofType[]; proof_type: ProofT
   return [habit.proof_type];
 }
 
+function Stat({
+  label,
+  value,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: number | string;
+  icon: string;
+  tone: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-lg" aria-hidden="true">{icon}</span>
+      <div className="flex flex-col leading-tight">
+        <span className={`text-base font-bold tabular-nums ${tone}`}>{value}</span>
+        <span className="text-xs text-muted">{label}</span>
+      </div>
+    </div>
+  );
+}
+
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
@@ -112,10 +134,31 @@ export function TodayPage() {
       ) : null}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
-        <div className="mb-3 flex items-baseline">
-          <h2 className="text-2xl font-bold text-text">
-            {checkin.streak_days} <span className="text-base font-normal text-muted">дн. подряд</span>
-          </h2>
+        <div className="mb-3 grid grid-cols-2 gap-3">
+          <Stat
+            label="дн. всего"
+            value={checkin.checkin_count}
+            icon="📅"
+            tone="text-text"
+          />
+          <Stat
+            label="дн. подряд"
+            value={checkin.streak_days}
+            icon="🔥"
+            tone={checkin.streak_days > 0 ? "text-text" : "text-muted"}
+          />
+          <Stat
+            label="пойман"
+            value={checkin.penalties_count}
+            icon="🎯"
+            tone={checkin.penalties_count > 0 ? "text-red-400" : "text-muted"}
+          />
+          <Stat
+            label="потерял"
+            value={`${(checkin.penalties_total / 100).toFixed(0)} ₽`}
+            icon="💸"
+            tone={checkin.penalties_total > 0 ? "text-red-400" : "text-muted"}
+          />
         </div>
         <p className="text-sm text-muted">
           Окно чек-ина: <strong className="text-text">{habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}</strong>

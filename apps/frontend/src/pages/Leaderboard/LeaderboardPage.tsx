@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useLeaderboard, usePhotoBlob, type LeaderboardTab } from "@/shared/hooks";
+import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
 import { Avatar } from "@/shared/ui/Avatar";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
@@ -72,7 +72,13 @@ function LeaderboardRow({
   row: import("@/shared/types").LeaderboardEntry;
   metricLabel: string;
 }) {
-  const photoBlob = usePhotoBlob(row.photo_url);
+  // photo_url приходит как "/api/v1/users/{id}/photo" — backend отдаёт
+  // 307 redirect на Telegram CDN. Браузер сам следует редиректу, поэтому
+  // используем <img> напрямую (не usePhotoBlob — тот делает blob fetch
+  // через axios, который не следует 307 для blob response).
+  const photoSrc = row.photo_url
+    ? new URL(row.photo_url, window.location.origin).toString()
+    : null;
   return (
     <article className="flex items-center gap-3 rounded-card bg-surface/60 px-3 py-2.5">
       <div
@@ -89,13 +95,21 @@ function LeaderboardRow({
       >
         {row.rank}
       </div>
-      <Avatar src={photoBlob} fallback={row.first_name} size="sm" />
+      <Avatar src={photoSrc} fallback={row.first_name} size="sm" />
       <span className="flex-1 truncate text-sm font-medium text-text">
         {row.first_name}
       </span>
-      <span className="text-sm font-bold tabular-nums text-primary">
-        {row.metric_value} {metricLabel}
-      </span>
+      <div className="flex flex-col items-end leading-tight">
+        <span className="text-sm font-bold tabular-nums text-primary">
+          {row.metric_value} {metricLabel}
+        </span>
+        <span className="text-[10px] tabular-nums text-muted">
+          📅 {row.breakdown.checkin_count}
+          {" · "}🔥 {row.breakdown.streak_days}
+          {" · "}🎯 {row.breakdown.catches_count}
+          {" · "}🚔 {row.breakdown.penalties_count}
+        </span>
+      </div>
     </article>
   );
 }

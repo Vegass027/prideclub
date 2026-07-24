@@ -157,8 +157,8 @@ function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
         </div>
         <div className="mt-0.5 flex items-center gap-2">
           <StatusBadge status={row.status} />
-          {row.streak_days > 0 && (
-            <span className="text-xs text-muted">🔥 {row.streak_days}</span>
+          {row.checkin_count > 0 && (
+            <span className="text-xs text-muted">📅 {row.checkin_count} чек</span>
           )}
         </div>
       </div>

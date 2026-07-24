@@ -18,6 +18,7 @@ from tests.fakes import (
     FakeCheckinRepo,
     FakeHabitRepo,
     FakeMembershipRepo,
+    FakePenaltyRepo,
     FakeSession,
     make_habit,
 )
@@ -40,6 +41,7 @@ async def test_checkin_happy_path() -> None:
     membership_repo = FakeMembershipRepo()
     m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     cache = FakeCache()
     session = FakeSession(checkin_repo)
 
@@ -48,6 +50,7 @@ async def test_checkin_happy_path() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
         cache=cache,  # type: ignore[arg-type]
     )
 
@@ -71,12 +74,14 @@ async def test_checkin_idempotent_same_day() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     session = FakeSession(checkin_repo)
     service = CheckinService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
     now = datetime.now(tz=UTC)
@@ -108,11 +113,13 @@ async def test_checkin_rejects_paused_membership() -> None:
         user_id=1, habit_id=str(habit.id), status=MembershipStatus.PAUSED
     )
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     service = CheckinService(
         session=FakeSession(checkin_repo),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
     with pytest.raises(MembershipNotActiveError):
@@ -137,11 +144,13 @@ async def test_checkin_window_closed() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     service = CheckinService(
         session=FakeSession(checkin_repo),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
     # 12:00 по Москве → вне окна (8:00–9:00 МСК)
@@ -167,11 +176,13 @@ async def test_checkin_wrong_proof_type() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     service = CheckinService(
         session=FakeSession(checkin_repo),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
     with pytest.raises(ProofValidationError) as exc:
@@ -197,11 +208,13 @@ async def test_checkin_accepts_proof_type_in_proof_types() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     service = CheckinService(
         session=FakeSession(checkin_repo),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
     checkin, created = await service.process_checkin(
         user_id=1,
@@ -226,11 +239,13 @@ async def test_checkin_rejects_proof_type_not_in_proof_types() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     service = CheckinService(
         session=FakeSession(checkin_repo),
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
     with pytest.raises(ProofValidationError) as exc:
         await service.process_checkin(
@@ -260,6 +275,7 @@ async def test_get_today_status_streak_counts_consecutive_done_days() -> None:
     membership_repo = FakeMembershipRepo()
     m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     session = FakeSession(checkin_repo)
 
     # 3 done-дня подряд: 2026-01-10, 2026-01-09, 2026-01-08.
@@ -278,16 +294,18 @@ async def test_get_today_status_streak_counts_consecutive_done_days() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
     # now_utc = 2026-01-09 21:00 UTC = 2026-01-10 00:00 МСК → club_date = 2026-01-10
-    _habit, _m, status, streak = await service.get_today_status(
+    _habit, _m, stats = await service.get_today_status(
         user_id=1,
         habit_id=str(habit.id),
         now_utc=datetime(2026, 1, 9, 21, 0, tzinfo=UTC),
     )
-    assert streak == 3
-    assert status == "done"
+    assert stats.streak_days == 3
+    assert stats.status == "done"
+    assert stats.checkin_count == 3
 
 
 @pytest.mark.asyncio
@@ -298,6 +316,7 @@ async def test_get_today_status_streak_zero_when_no_checkins() -> None:
     membership_repo = FakeMembershipRepo()
     membership_repo.add_for(user_id=1, habit_id=str(habit.id))
     checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
     session = FakeSession(checkin_repo)
 
     service = CheckinService(
@@ -305,12 +324,17 @@ async def test_get_today_status_streak_zero_when_no_checkins() -> None:
         habit_repo=habit_repo,
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
     )
 
-    _habit, _m, status, streak = await service.get_today_status(
+    _habit, _m, stats = await service.get_today_status(
         user_id=1,
         habit_id=str(habit.id),
         now_utc=datetime(2026, 1, 9, 21, 0, tzinfo=UTC),
     )
-    assert streak == 0
-    assert status == "pending"  # окно чек-ина [00:00, 23:59] в make_habit — открыто в 00:00 МСК
+    assert stats.streak_days == 0
+    assert stats.checkin_count == 0
+    assert stats.penalties_count == 0
+    assert stats.penalties_total == 0
+    # окно чек-ина [00:00, 23:59] в make_habit — открыто в 00:00 МСК
+    assert stats.status == "pending"

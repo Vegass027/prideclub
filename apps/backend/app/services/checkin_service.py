@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -19,6 +20,7 @@ from app.models.membership import Membership
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
 from app.services.proof_validator import ProofMessage, validate_proof_media
 
 
@@ -26,6 +28,23 @@ class CachePort(Protocol):
     """Redis-порт: ровно один метод — инвалидировать статус дня."""
 
     async def invalidate_today(self, habit_id: str, membership_id: str) -> None: ...
+
+
+@dataclass(slots=True)
+class TodayStats:
+    """Сводка по юзеру в клубе для карточки Today (Pravki.md 2026-07-24).
+
+    checkin_count — total done-чекинов за всё время.
+    streak_days — consecutive от today назад (0 если сегодня не отмечен).
+    penalties_count / penalties_total — антифрод: сколько раз поймали
+    и сколько денег списали (в копейках).
+    """
+
+    status: str
+    checkin_count: int
+    streak_days: int
+    penalties_count: int
+    penalties_total: int
 
 
 class CheckinService:
@@ -40,12 +59,14 @@ class CheckinService:
         habit_repo: HabitRepository,
         membership_repo: MembershipRepository,
         checkin_repo: CheckinRepository,
+        penalty_repo: PenaltyRepository,
         cache: CachePort | None = None,
     ) -> None:
         self._session = session
         self._habit_repo = habit_repo
         self._membership_repo = membership_repo
         self._checkin_repo = checkin_repo
+        self._penalty_repo = penalty_repo
         self._cache = cache
         self._logger = get_logger("checkin_service")
 
@@ -150,8 +171,17 @@ class CheckinService:
 
     async def get_today_status(
         self, *, user_id: int, habit_id: str, now_utc: datetime
-    ) -> tuple[Habit, Membership, str, int]:
-        """Возвращает (habit, membership, status, streak_days)."""
+    ) -> tuple[Habit, Membership, TodayStats]:
+        """Возвращает (habit, membership, TodayStats).
+
+        Pravki.md 2026-07-24: расширено — добавили checkin_count (total
+        done), penalties_count и penalties_total для карточки клуба.
+        streak_days остался как consecutive (мотивационная метрика).
+
+        T4: SQL не делаем напрямую — все запросы через репозитории
+        (CheckinRepository / PenaltyRepository). Это позволяет
+        подменять их на FakeRepo в тестах.
+        """
         habit = await self._habit_repo.get(habit_id)
         if habit is None or habit.archived_at is not None:
             raise HabitArchivedError()
@@ -171,8 +201,21 @@ class CheckinService:
             else:
                 status = "missed"
 
+        checkin_count = await self._checkin_repo.count_done_for_membership(
+            str(membership.id)
+        )
+        penalties_count, penalties_total = await self._penalty_repo.totals_for_membership(
+            str(membership.id), as_violator=True
+        )
         streak = await self._compute_streak(membership.id, club_date)
-        return habit, membership, status, streak
+        stats = TodayStats(
+            status=status,
+            checkin_count=checkin_count,
+            streak_days=streak,
+            penalties_count=penalties_count,
+            penalties_total=penalties_total,
+        )
+        return habit, membership, stats
 
     async def _compute_streak(self, membership_id: str, up_to) -> int:
         """Считаем серию done-чекинов до up_to.

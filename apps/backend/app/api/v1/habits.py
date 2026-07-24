@@ -13,6 +13,7 @@ from app.db.redis import get_redis
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
 from app.schemas import (
     CheckinStatusOut,
     HabitOut,
@@ -43,6 +44,7 @@ async def get_checkin_service(
         habit_repo=HabitRepository(session),
         membership_repo=MembershipRepository(session),
         checkin_repo=CheckinRepository(session),
+        penalty_repo=PenaltyRepository(session),
         cache=cache,
     )
 
@@ -89,7 +91,7 @@ async def today(
     service: CheckinServiceDep,
     user: TelegramUserDbDep,
 ) -> TodayResponse:
-    habit, m, status, streak = await service.get_today_status(
+    habit, m, stats = await service.get_today_status(
         user_id=user.id, habit_id=habit_id, now_utc=datetime.now(tz=UTC)
     )
     return TodayResponse(
@@ -115,8 +117,11 @@ async def today(
         ),
         membership=MembershipOut.model_validate(m),
         checkin=CheckinStatusOut(
-            status=status,
-            streak_days=streak,
+            status=stats.status,
+            checkin_count=stats.checkin_count,
+            streak_days=stats.streak_days,
+            penalties_count=stats.penalties_count,
+            penalties_total=stats.penalties_total,
             deadline_at=None,
         ),
     )
