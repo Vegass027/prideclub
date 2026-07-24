@@ -25,7 +25,7 @@
 | accepted_offer_at | TIMESTAMPTZ | Согласие с офертой (последней версии) |
 | deleted_at | TIMESTAMPTZ | Право на удаление по ФЗ-152 |
 | data_anonymized | BOOLEAN | Признак анонимизации |
-| photo_file_id | VARCHAR(128) | Telegram file_id аватарки (Pravki.md §7.1, миграция 013). NULL = нет аватарки или worker `update_user_photos` ещё не подтянул. Endpoint `/api/v1/users/{id}/photo` → 404 если NULL |
+| photo_file_id | VARCHAR(128) | Telegram file_id аватарки (Pravki.md §7.1 v3, миграция 013). NULL = нет аватарки или worker `update_user_photos` ещё не подтянул. JPEG хранится в `<STATIC_DIR>/avatars/{user_id}.jpg` (volume `club_uploads`). Endpoint `/api/v1/users/{id}/photo` → 200 image/jpeg если файл есть, иначе 404. |
 | photo_fetched_at | TIMESTAMPTZ | Когда `update_user_photos` cron последний раз обновлял `photo_file_id` |
 | created_at | TIMESTAMPTZ | |
 
@@ -224,7 +224,7 @@ PRIMARY KEY (user_id, offer_version_id)
 | `010_habit_topics` | `010_habit_topics.py` | `habits.checkin_topic_thread_id` и `habits.notifications_topic_thread_id` (BIGINT NULL) + partial btree-индексы. Включает топик-фильтр чек-инов. |
 | `011_habit_chat_topic` | `011_habit_chat_topic.py` | `habits.chat_topic_thread_id` (BIGINT NULL) + partial btree-индекс. Третий топик для общего чата участников клуба. |
 | `012_proof_types` | `012_proof_types.py` | `habits.proof_types JSONB NOT NULL DEFAULT '["video_note"]'` + CHECK (длина 1..3) + GIN-индекс. Бэкфилл: `UPDATE habits SET proof_types = jsonb_build_array(proof_type::text)`. `habits.proof_type` остаётся как алиас первого элемента массива для обратной совместимости. |
-| `013_user_photo` | `013_user_photo.py` | `users.photo_file_id VARCHAR(128) NULL` + `users.photo_fetched_at TIMESTAMPTZ NULL` + partial index (`photo_file_id IS NOT NULL`). Для Pravki.md §7.1: подход C' — backend делает 307 redirect на Telegram CDN через endpoint `/api/v1/users/{id}/photo`. file_id постоянный (см. telegram FAQ), `bot.getFile` результат кэшируется в Redis 6ч. |
+| `013_user_photo` | `013_user_photo.py` | `users.photo_file_id VARCHAR(128) NULL` + `users.photo_fetched_at TIMESTAMPTZ NULL` + partial index (`photo_file_id IS NOT NULL`). Для Pravki.md §7.1 v3 (подход D, 2026-07-24): worker `update_user_photos` скачивает JPEG с Telegram CDN и сохраняет в `<STATIC_DIR>/avatars/{user_id}.jpg` (volume `club_uploads`). Endpoint `/api/v1/users/{id}/photo` → `FileResponse(image/jpeg)`. Nginx try_files на хосте проксирует на `habit_frontend /avatars/N.jpg` (cache hit) или fallback на backend (cold cache). Redis кеш `user_photo_file_id:{user_id}` (6h TTL) для инвалидации при смене фото. file_id постоянный (см. telegram FAQ), `bot.getFile` кеширует `file_path` в Redis. |
 
 > SQL-блоки 000–004 в старой версии этого документа устарели (не отражают 005–009).
 > Реальный код — в `apps/backend/alembic/versions/`.

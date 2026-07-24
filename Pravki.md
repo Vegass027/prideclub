@@ -1,0 +1,269 @@
+# Pravki.md — задачи и аудит
+
+> Snapshot от 2026-07-23 (поздний). Обновлено после 6 UI-фикс коммитов, аудита backend, push в `origin/feature/topic-scoped-checkin`.
+
+## 0. Workflow
+
+1. Сделать задачу локально (коммит в `feature/topic-scoped-checkin`).
+2. Задеплоить на сервер (только frontend, по `docs/02-architecture.md` §13).
+3. Юзер проверяет руками → говорит «всё ок».
+4. Только после «ок» — `git push origin feature/topic-scoped-checkin`.
+
+## 1. UI/UX — картинки и обрезка
+
+| # | Задача | Слой | Сложность | Статус |
+|---|---|---|---|---|
+| 1.1 | Картинка в карточке клуба не обрезается, подстраивается под размер | Frontend: `Marketplace`, `Today`, admin `Create/Edit` | S | ✅ `1736cdb` → `73e8b7d` (адаптивный контейнер) |
+| 1.2 | Картинки клубов в профиле в "Моих клубах" | Frontend: `Profile` | S | ✅ `1736cdb` → `73e8b7d` |
+
+## 2. UI/UX — текст и форматирование
+
+| # | Задача | Слой | Сложность | Статус |
+|---|---|---|---|---|
+| 2.1 | Убрать секунды у времени в списке клубов и карточке клуба (HH:MM) | Frontend: `Marketplace`, `Today`, `PaymentModal`, `HabitCard` | S | ✅ `c50c394` |
+| 2.2 | Названия клубов в клиентской части без `[...]` (как в админке) | Frontend | S | ✅ `73e8b7d` (используются `〖〗` везде в клиенте) |
+| 2.3 | Убрать id пользователя в профиле | Frontend: `Profile` | XS | ✅ `c50c394` |
+| 2.4 | Заменить `Пэйдж пропуск` на `Ежедневное задание:` + бейдж; убрать `Сменить` | Frontend: `Today` | M | ✅ `75c1a63` |
+| 2.5 | Убрать кнопку `Сменить клуб` в лидерборде; back `Лидеры клуба` → `/leaderboards` | Frontend: `Leaderboard` | S | ✅ `75c1a63` |
+| 2.6 | BottomNav «Профиль» — реальное фото из Telegram initData (вместо эмодзи 👤), со свечением | Frontend: `BottomNav` | S | ✅ `153dc83` |
+| 2.7 | Убрать депозит и `Europe/Moscow` subtitle из карточки клуба (Today) | Frontend: `Today` | XS | ✅ `73e8b7d` |
+
+## 3. UI/UX — компоненты и стили
+
+| # | Задача | Слой | Сложность | Статус |
+|---|---|---|---|---|
+| 3.1 | Свечение фиолетовым под аватаром пользователя (ring-2 + box-shadow на primary/60) | Frontend: `Avatar` (prop `glow`), `Profile` | S | ✅ `1736cdb` |
+| 3.2 | Кнопка «+ Пополнить» → мок-флоу с пресетами 299/599/999/1999 ₽ + запись `transactions(type='deposit_topup')` | Backend: `/api/v1/payments/topup` + Frontend: drawer в `Profile` | M | ✅ `3a40b31` (коммит 7.2) |
+
+## 4. Admin Mini App
+
+| # | Задача | Слой | Сложность | Статус |
+|---|---|---|---|---|
+| 4.1 | Убрать вкладку «Все» в админке (оставить Активные/Скрытые/Архив) | Frontend: `admin/pages/HabitsListPage` | S | ✅ `c50c394` |
+| 4.2 | Убрать текст «УЖЕ ПРИВЯЗАН К …» в админке (disabled достаточно) | Frontend: `admin/pages/HabitCreatePage` | S | ✅ `c50c394` |
+| 4.3 | Админ может менять фото карточки: нажал на превью → выбор файла → замена | Frontend: `admin/pages/HabitCreatePage` + `HabitEditForm` | S | ✅ `afc55d7` |
+
+## 5. Бизнес-логика — чек-ины
+
+| # | Задача | Слой | Сложность | Статус |
+|---|---|---|---|---|
+| 5.1 | Если юзер вступил в клуб после дедлайна — не считать пропуском за этот день | Backend: `MembershipService`, Worker: `close_catch_window` (cron) | M | 🔴 TODO (= задача 7.3) |
+| 5.2 | Бот должен отвечать именем пользователя в `✅ Принято, {name}!` для кружков и фото | Bot: `apps/bot/bot/handlers/checkin.py` (взять `message.from_user.first_name`) | XS | ✅ `d9144df` |
+| 5.3 | Бот должен отклонять кружок <3 сек **до** отправки в backend | Bot: pre-validate `video_note.duration` | S | ✅ `de87272` |
+
+## 6. Аудит (выполнено 2026-07-23)
+
+### 6.1 Призовой фонд — ✅ работает корректно
+
+**Цепочка:** `Penalty.amount → Habit.prize_pool (+= FOR UPDATE) → Season.prize_pool → распределение в close_season`.
+
+| Файл | Что делает |
+|---|---|
+| `repositories/habit_repository.py:119-135` | `add_to_prize_pool(habit_id, amount)` — атомарный инкремент с `session.get(..., with_for_update=True)`. Защита от гонки между `apply_catch` и `apply_window_expired` (две Celery-таски могут прийти одновременно) |
+| `services/penalty_service.py:71-156` (`apply_catch`) | `SELECT FOR UPDATE` на violator → `amount = min(penalty, deposit)` → `deposit -= amount` + `add_to_prize_pool(habit, amount)` + `penalty.fund_share = amount` (транзакция в БД) |
+| `services/penalty_service.py:159-231` (`apply_window_expired`) | Аналогично для cron — тот же `fund_share = amount` |
+| `services/season_service.py:60-122` (`close_season`) | `SELECT FOR UPDATE` на Season → проверка status==ACTIVE → `validate_prize_rules` → цикл по rules → **basis points арифметика** (`prize_pool * percentage_bp // 10_000`, никакого float/Decimal) → запись `Transaction(type=PRIZE)` для каждого победителя → status=CLOSED |
+
+**Инварианты (все соблюдены):**
+- Деньги — `int` копейки везде (`% 1 == 0` благодаря basis points)
+- `FOR UPDATE` на критических локах (нет race conditions)
+- Идемпотентность через уникальный индекс `penalties(membership_id, date, reason)` (нет двойных штрафов)
+- Целочисленное распределение (`BASIS_POINTS_TOTAL = 10_000`), без потери копеек
+- `validate_prize_rules` гарантирует что сумма percentages = ровно 100% (иначе `InvalidPrizeRulesError`)
+
+**Минорное замечание:** при распределении `share = per_member_pool // len(ranked)` остаток копеек теряется (идёт молча в ноль). Это нормально — нельзя раздать остаток копейки. Если нужно — можно добавить "first place gets remainder" как политику.
+
+### 6.2 Ловля (catch) — ✅ работает корректно
+
+| Файл | Что делает |
+|---|---|
+| `services/penalty_service.py:58-156` (`apply_catch`) | 1) Rate-limit через Redis Lua (`incr_catch`, 10/10s); 2) `CannotCatchSelfError`; 3) проверка membership status==ACTIVE; 4) проверка habit существует; 5) идемпотентность через существующий penalty; 6) `lock_for_update(violator)`; 7) проверка `suspicious_pairs` (если пара в flagged → `catcher_membership_id=None` — бонус не начислится); 8) списание депозита + инкремент prize_pool + создание Penalty + flush + создание Transaction; 9) если deposit=0 → status=PAUSED |
+| `services/bonus_service.py:54-123` (`apply_catch_bonus`) | 1) Идемпотентность через `penalty.bonus_applied`; 2) проверка `catcher_membership_id is not None` (нет бонуса если suspicious); 3) повторная проверка `lookup_flagged`; 4) `user.bonus_points += 1`; 5) создание `Transaction(type=BONUS_CATCH)` (для `integrity_check`); 6) если достигли `bonus_rule.threshold` → `_grant_reward` |
+| `services/catch_rate_limiter.py` | Lua-скрипт атомарного INCR + EXPIRE (защита от гонки INCR без EXPIRE) |
+| `core/constants.py:72` | `RATE_LIMIT_CATCH = "10/10s"` (настраивается) |
+
+**Инварианты (все соблюдены):**
+- `FOR UPDATE` на violator + `add_to_prize_pool` (нет race condition)
+- Идемпотентность penalty через `(membership_id, date, reason)` UNIQUE
+- Rate-limit 10/10s per user через Redis Lua (атомарный)
+- Self-catch запрещён (`CannotCatchSelfError`)
+- Suspicious pairs → бонус не начисляется, но штраф списывается (дисциплина не ослабляется)
+- Bonus transaction записан в `transactions` для каждого `bonus_applied=true` (для `integrity_check_bonus_transactions` cron)
+
+**Известные нюансы:**
+- Если у юзера нет Redis (rate limiter не инициализирован) → fail-open (нет rate-limit). Для прод-режима `redis_port=None` бросает `RateLimitDisabledError` после commit'а T5.
+- `suspicious_pairs` lookup происходит дважды: в `apply_catch` (для записи `catcher_membership_id=None`) и в `apply_catch_bonus` (defence in depth). Доп. запрос в БД, но атомарность гарантирована.
+
+### 6.3 Лидерборд — аудит для задачи «фото участников»
+
+**Текущее состояние:**
+- `LeaderboardEntry` (`apps/backend/app/api/v1/leaderboard.py:24`) содержит только `rank`, `membership_id`, `first_name`, `metric_value`. **Нет `photo_url`, нет `user_id`**.
+- `apps/backend/app/models/user.py` — модель User **не содержит** колонку `photo_url` (в отличие от Habit).
+- Mini App SDK (`window.Telegram.WebApp.initDataUnsafe.user.photo_url`) даёт фото **только текущего юзера**, не других участников.
+- Telegram Bot API: `getUserProfilePhotos(user_id)` → список `PhotoSize` с CDN-URL (`https://api.telegram.org/file/bot<TOKEN>/<file_path>`).
+
+**Вывод: показать фото других участников без бэкенда невозможно.**
+
+## 7. Задачи в работе / TODO
+
+### 7.1 Backend: фото участников в лидерборде — M ✅ ВЫПОЛНЕНО (v3, подход D)
+
+**Подход D (диск-кеш + nginx try_files, заменён 2026-07-24):**
+
+История: подходы A→B→C' развивались, но **307 redirect на Telegram CDN не работает в `<img>`**:
+- Telegram CDN отдаёт `Content-Type: application/octet-stream` + `Content-Disposition: attachment`.
+- Браузер принудительно скачивает файл вместо рендера в `<img>` (RFC 6266, behavior independent of CSP).
+- Токен бота **утекает** в URL `https://api.telegram.org/file/bot<TOKEN>/...` → виден в DevTools любому юзеру.
+
+Решение (подход D):
+- Worker `update_user_photos` скачивает JPEG с Telegram CDN **один раз** и сохраняет атомарно в `<STATIC_DIR>/avatars/{user_id}.jpg` (volume `club_uploads`).
+- Backend `AvatarService.get_or_fetch_local_path` — cache hit (file + file_id match) → мгновенный Path, без HTTP. Cache miss → скачивает с Telegram + сохраняет.
+- Redis кеш `user_photo_file_id:{user_id}` (6h TTL) для инвалидации при смене фото.
+- Endpoint `/api/v1/users/{id}/photo` → `FileResponse(image/jpeg)` с `Cache-Control: private, max-age=21600`.
+- **Nginx try_files** на хосте: `location /api/v1/users/N/photo$` сначала проксирует на `habit_frontend /avatars/N.jpg` (внутренний путь), где frontend nginx отдаёт файл из volume напрямую. На 404 (file miss) — fallback `@avatar_backend_fallback` на `habit_backend` (cold cache: backend скачает с TG, сохранит, frontend будет hit).
+- Frontend nginx location `/avatars/(\d+).jpg` — `alias /usr/share/nginx/html/static/avatars/$1.jpg;` (volume `club_uploads:/usr/share/nginx/html/static`).
+- После первого hit — backend не участвует для этого юзера (на горячих юзеров = 0 backend запросов).
+
+**Почему безопасно:**
+- `user_id` — int, не user input (Telegram-юзер видит аватарки других юзеров в лидерборде — намеренно).
+- File name = `f"{user_id}.jpg"` — path-traversal невозможен.
+- `MAX_JPEG_BYTES = 5 MB` — защита от аномальных ответов.
+- В cache-hit пути nginx не делает auth (initData не проверяется) — намеренно: файл уже прошёл через backend при первой загрузке. Auth всё равно защищает запись (TelegramUserDep → 401 без initData).
+- **Токен бота больше НЕ утекает** в URL клиента.
+
+**Почему надёжно (1000+ users):**
+- Один раз скачал — навсегда. При 1000 RPS лидерборда = 0 backend запросов для аватарок (все через nginx).
+- Worker cron раз в сутки в 04:00 UTC подтягивает фото для **всех** active memberships. На 1000 users = 3000 req/сутки = 0.035 req/sec (в 860 раз ниже глобального лимита Bot API 30/sec).
+- При смене аватара: `file_id` в Telegram меняется → worker скачает заново (cache miss по file_id).
+- На 1000 users = 30-50 МБ диск (не нагрузка). На 10k users = 300-500 МБ (S3 миграция — отдельная задача).
+
+**Реализованные файлы:**
+- `apps/backend/app/services/avatar_service.py` — `get_or_fetch_local_path` (диск-кеш + Redis), `get_cdn_url` (legacy)
+- `apps/backend/app/api/v1/users.py` — `FileResponse` (был 307)
+- `apps/backend/app/main.py` — lifespan: `mkdir <STATIC_DIR>/avatars` через `asyncio.to_thread`
+- `apps/backend/app/core/deps.py` — `get_avatar_service` читает `app.state.avatars_dir`
+- `apps/worker/worker/tasks/update_user_photos.py` — скачивает JPEG + сохраняет на volume
+- `infra/docker-compose.yml` — worker: volume `club_uploads:/app/static`, env `STATIC_DIR=/app/static`
+- `infra/nginx/frontend.nginx.conf` — location `/avatars/N.jpg` отдаёт файл из volume
+- `infra/nginx/nginx.prideclub.conf` — location `/api/v1/users/N/photo$` с try_files на frontend, fallback на backend
+- `apps/backend/alembic/versions/013_user_photo.py` — миграция (без изменений с прошлого раза)
+- `apps/backend/app/models/user.py` — `photo_file_id` + `photo_fetched_at` (без изменений)
+- `apps/backend/app/api/v1/leaderboard.py` — `LeaderboardEntry.photo_url` = `/api/v1/users/{id}/photo` (relative)
+- `apps/frontend/src/shared/types/index.ts` — `LeaderboardEntry.photo_url`
+- `apps/frontend/src/pages/Leaderboard/LeaderboardPage.tsx`, `GlobalLeaderboardPage.tsx` — `<img src={new URL(row.photo_url, window.location.origin).toString()}>` (не `usePhotoBlob`)
+
+**Тесты:** 209 backend passed (avatar_service + user_photo_endpoint + leaderboard + checkin + fakes), ruff clean.
+
+**Деплой:** alembic 013 уже применена, backend + worker rebuilt --no-cache, nginx config validated, **2 юзера имеют фото в volume** (printer 16 КБ, Дмитрий 32 КБ, всего 49 КБ). Worker cron в 04:00 UTC подтянет остальных.
+
+### 7.2 Backend: `/api/v1/payments/topup` (мок-пополнение депозита) — M ✅ ВЫПОЛНЕНО
+
+**Цель:** кнопка «+ Пополнить» в `Profile` → пресет 299/599/999/1999 ₽ → запись `transactions(type='deposit_topup')` + инкремент `memberships.deposit_balance`. Цель — **тестировать ловлю/штрафы/призовой фонд**.
+
+**Реализованные файлы:**
+- `apps/backend/app/api/v1/payments.py` — POST /api/v1/payments/topup (X-Telegram-Init-Data, Pydantic Field(gt=0, le=10_000_000))
+- `apps/backend/tests/test_topup.py` — 3 теста (happy path с проверкой транзакции, gt=0 → 422, no initData → 401)
+- `apps/frontend/src/shared/ui/TopUpModal.tsx` — radio-выбор клуба + useMutation + showAlert (нативный Telegram alert)
+- `apps/frontend/src/shared/telegram/tma.ts` — showAlert(message) helper
+- `apps/frontend/src/pages/Profile/ProfilePage.tsx` — disabled кнопка если myHabits пустой + tooltip
+
+**Деплой:** backend rebuilt, frontend nginx reload, smoke tested на проде.
+
+### 7.3 Backend: `close_catch_window` guard «joined_at >= club_date» — M
+
+**Цель:** новый участник, вступивший после дедлайна чек-ина, **не считается пропавшим** в день вступления. Пропуск начинается со следующего клуб-дня.
+
+**План:**
+| Шаг | Файл | Что |
+|---|---|---|
+| Worker | `apps/worker/worker/tasks/close_catch_window.py` | В цикле по memberships: пропускать если `membership.joined_at.date() >= club_date_today` |
+| Тест | `apps/worker/tests/test_close_catch_window.py` | Кейсы: join до дедлайна → штрафуется; join после дедлайна → не штрафуется |
+
+**Оценка:** ~30 минут (только worker + тест).
+
+### 7.4 Bot: имя пользователя в «Принято» — XS
+
+**Цель:** `↩️ ✅ Принято, {first_name}! Молодец😉` (сейчас `{first_name}` подставляется пусто).
+
+**План:**
+| Шаг | Файл | Что |
+|---|---|---|
+| Bot | `apps/bot/bot/handlers/checkin.py` | В функции `_accepted_text()` взять `message.from_user.first_name` вместо `{}` |
+| Тест | `apps/bot/tests/test_checkin_handler.py` | Проверить что `first_name` подставлен |
+
+**Оценка:** ~10 минут.
+
+### 7.5 Bot: pre-validate длительности кружка <3 сек — S
+
+**Цель:** бот отвечает «чек-ин не принят, нужно записать видео-кружок более 3 секунд» **до** отправки в backend. Сейчас бот принимает и пишет «Принято», а worker отвергает асинхронно (`code: too_short`).
+
+**План:**
+| Шаг | Файл | Что |
+|---|---|---|
+| Bot | `apps/bot/bot/handlers/checkin.py` | В `_prefilter()` (уже есть после PR №9) добавить проверку `video_note.duration < 3` → ответить `REJECT_TOO_SHORT` и не слать в backend |
+
+**Оценка:** ~20 минут.
+
+## 8. Готовые коммиты (сессия 2026-07-23)
+
+| SHA | Сообщение |
+|---|---|
+| `c50c394` | fix(frontend): UI cleanups — hide user id, drop window seconds, remove 'Все' tab, drop 'уже привязан' text |
+| `75c1a63` | fix(frontend): remove 'Сменить' switcher + leaderboard back → /leaderboards + daily task badge |
+| `1736cdb` | fix(frontend): photos contain (no crop) + avatar glow + club photos in profile |
+| `153dc83` | fix(frontend): BottomNav shows user's TG photo in 'Профиль' tab with violet glow |
+| `73e8b7d` | fix(frontend): photo container adapts to natural size + title brackets + drop deposit/tz in club card |
+| `afc55d7` | fix(admin): click photo preview to replace + standalone delete button |
+| `7733b95` | fix(admin): show club photo (gif/jpg/png/webp) + bullet-list of traits in HabitsListPage cards |
+| `d9144df` | fix(bot): format {name} placeholder in user-facing check-in messages (= 7.4) |
+| `de87272` | fix(bot): reject too-short video notes in pre-filter (PR №7.5) |
+| `9b0eb4a` | test(worker): populate proof_types in add_habit fixture (migration 012 regression) |
+| `02b949f` | fix(worker): skip new members in close_catch_window (PR №7.3) |
+| `3a40b31` | feat(frontend+backend): mock deposit topup (PR №7.2) |
+| `8f389e1` | feat(backend+worker+frontend): user photos in leaderboard (PR №7.1, approach C') |
+| `7a9eefd` | feat(backend+worker+nginx): avatars via disk cache + nginx try_files (PR №7.1 v3, approach D) |
+
+**Push:** все 13 коммитов запушены в `origin/feature/topic-scoped-checkin` (2026-07-24 10:30 UTC).
+
+## 9. Решения пользователя
+
+| Вопрос | Решение |
+|---|---|
+| Платежи (3.2): мок или писать в `transactions`? | **Писать в `transactions`** с `type='deposit_topup'`, `idempotency_key='mock:{uuid}'`. Когда подключим реальный сервис — структура таблицы уже совместима |
+| 5.1 (новый участник): только новые или откатить старые? | **Все, кто вступает впервые** — `joined_at.date() >= club_date` → не штрафуется за этот день. Старые membership'ы не трогать (`joined_at` уже в прошлом, проверка тривиально проходит) |
+| Депозит привязан к чему? | К `(user_id, habit_id)` — хранится на `memberships.deposit_balance` |
+| UI пополнения? | **Максимально простой мок** — кнопка `+ Пополнить`, пресет суммы, нажал → деньги на депозите. Цель — тестировать штрафы/ловлю/призовой фонд |
+
+## 10. Workflow развертывания
+
+```bash
+# Локально: коммиты сделаны. Пуш ТОЛЬКО после "ок" юзера.
+
+# Деплой фронта (только dist/ меняется, backend не трогаем):
+sshpass -p "$PASSWORD" ssh root@169.58.52.78 '
+  cd /app/infra
+  # multi-stage билд (если менялся только код в src/):
+  docker run --rm -v /app/apps/frontend:/app -w /app node:20-alpine \
+    sh -c "npm ci --silent && npm run build"
+  docker cp /app/apps/frontend/dist/. habit-frontend:/usr/share/nginx/html/
+  docker exec habit-frontend nginx -s reload
+'
+
+# Проверка:
+curl -s https://app.prideclub.fun/health
+
+# Юзер проверяет руками → говорит "всё ок":
+git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin feature/topic-scoped-checkin
+```
+
+## 11. Все задачи из §7 выполнены
+
+| # | Задача | Статус | Коммит |
+|---|---|---|---|
+| **7.4** Имя в «Принято» (XS) | ✅ | `d9144df` |
+| **7.5** Pre-validate кружка <3 сек (S) | ✅ | `de87272` |
+| **7.3** Guard «joined_at >= club_date» (M) | ✅ | `02b949f` |
+| **7.2** `/api/v1/payments/topup` (M) | ✅ | `3a40b31` |
+| **7.1** Фото участников в лидерборде (M) | ✅ | `8f389e1`, `7a9eefd` |
+
+Все 5 задач закрыты. Проект готов к soft-launch по функционалу.
