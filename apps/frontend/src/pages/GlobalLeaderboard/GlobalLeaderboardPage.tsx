@@ -125,22 +125,14 @@ function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel:
     ? new URL(row.photo_url, window.location.origin).toString()
     : null;
   return (
-    <li className="flex items-center gap-3 rounded-md bg-canvas/60 px-2.5 py-1.5">
-      <span
-        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
-          row.rank === 1
-            ? "bg-yellow-500/20 text-yellow-300"
-            : row.rank === 2
-              ? "bg-gray-400/20 text-gray-200"
-              : row.rank === 3
-                ? "bg-orange-700/20 text-orange-300"
-                : "bg-surface text-muted"
-        }`}
-        aria-label={`Место ${row.rank}`}
-      >
-        {row.rank}
-      </span>
-      <Avatar src={photoSrc} fallback={row.first_name} size="sm" loading="eager" />
+    <li className="flex items-center gap-3 rounded-md border border-white/10 bg-canvas/60 px-2.5 py-1.5">
+      <Avatar
+        src={photoSrc}
+        fallback={row.first_name}
+        size="sm"
+        loading="eager"
+        ring
+      />
       <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
       <div className="flex flex-col items-end leading-tight">
         <span className="text-sm font-bold tabular-nums text-primary">

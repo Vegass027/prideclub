@@ -147,9 +147,20 @@ interface MemberRowItemProps {
 }
 
 function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
+  // photo_url приходит как "/api/v1/users/{id}/photo" — оборачиваем в
+  // absolute URL для нашего backend (Pravki §7.1 v3.1, nginx try_files).
+  const photoSrc = row.photo_url
+    ? new URL(row.photo_url, window.location.origin).toString()
+    : null;
   return (
-    <article className="flex items-center gap-3 rounded-card border border-white/5 bg-surface p-3">
-      <Avatar src={null} fallback={row.first_name} size="md" />
+    <article className="flex items-center gap-3 rounded-card border border-white/10 bg-surface p-3">
+      <Avatar
+        src={photoSrc}
+        fallback={row.first_name}
+        size="md"
+        loading="eager"
+        ring
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-semibold text-text">{row.first_name}</span>

@@ -28,6 +28,10 @@ class MemberRowOut(BaseModel):
     checkin_count — общее число done-чекинов за всё время
     (Pravki.md 2026-07-24: "сколько отчекинился, столько и на счетчике").
     Раньше был `streak_days=0` (заглушка).
+
+    photo_url — relative путь /api/v1/users/{id}/photo (Pravki §7.1 v3.1).
+    NULL = нет аватарки или worker не подтянул. Frontend оборачивает
+    в new URL(photo_url, window.location.origin).
     """
 
     membership_id: str
@@ -37,6 +41,7 @@ class MemberRowOut(BaseModel):
     status: str
     checkin_count: int
     can_catch: bool
+    photo_url: str | None = None
 
 
 class MembersResponse(BaseModel):
@@ -72,6 +77,10 @@ async def list_members(
 
     # Хак: достаём user.first_name из БД. В шаге 6 добавим UserRepository.
     user_id_to_name = await _user_names(session, [m.user_id for m in memberships])
+    # photo_file_id для аватарок (Pravki §7.1 v3.1).
+    user_id_to_photo = await _user_photo_file_ids(
+        session, [m.user_id for m in memberships]
+    )
 
     # Одним запросом достаём COUNT(done) GROUP BY membership_id для всех
     # членов клуба. Раньше возвращалось streak_days=0 (заглушка).
@@ -99,6 +108,14 @@ async def list_members(
         else:
             status = "pending" if habit.is_within_checkin_window(now) else "missed"
 
+        # photo_url: relative путь, frontend обернёт в absolute URL
+        # (Pravki §7.1 v3.1, nginx try_files на /api/v1/users/N/photo).
+        photo_url = (
+            f"/api/v1/users/{m.user_id}/photo"
+            if m.user_id in user_id_to_photo
+            else None
+        )
+
         members.append(
             MemberRowOut(
                 membership_id=str(m.id),
@@ -108,6 +125,7 @@ async def list_members(
                 status=status,
                 checkin_count=counts.get(str(m.id), 0),
                 can_catch=user.id != m.user_id and status == "missed",
+                photo_url=photo_url,
             )
         )
 
@@ -122,6 +140,28 @@ async def _user_names(session: AsyncSession, user_ids: list[int]) -> dict[int, s
     if not user_ids:
         return {}
     result = await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
+    return {row[0]: row[1] for row in result.all()}
+
+
+async def _user_photo_file_ids(
+    session: AsyncSession, user_ids: list[int]
+) -> dict[int, str]:
+    """Возвращает {user_id: photo_file_id} для юзеров с фото.
+
+    NULL photo_file_id → не возвращаем. Используется для построения
+    photo_url на фронте (Pravki §7.1 v3.1).
+    """
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    if not user_ids:
+        return {}
+    result = await session.execute(
+        select(User.id, User.photo_file_id).where(
+            User.id.in_(user_ids), User.photo_file_id.is_not(None)
+        )
+    )
     return {row[0]: row[1] for row in result.all()}
 
 

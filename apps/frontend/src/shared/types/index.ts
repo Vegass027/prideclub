@@ -66,6 +66,8 @@ export interface MemberRow {
   status: CheckinStatus;
   checkin_count: number;
   can_catch: boolean;
+  /** Relative path /api/v1/users/{id}/photo (Pravki §7.1 v3.1). NULL = no avatar. */
+  photo_url: string | null;
 }
 
 export interface MembersResponse {
