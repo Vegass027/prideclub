@@ -6,8 +6,8 @@ default-argument pattern because:
 
 - it avoids function-call-in-default-argument lint warnings (B008),
 - it makes the dependency explicit at the type level,
-- it improves IDE auto-import / refactor support,
-- it lets multiple handlers share a single dependency declaration.
+- improves IDE auto-import / refactor support,
+- lets multiple handlers share a single dependency declaration.
 
 Database-level aliases (`SessionDep`, `RedisDep`) live here. Authentication
 aliases (`TelegramUserDep`, `TelegramUserDbDep`, `ServiceCallerDep`) live in
@@ -21,11 +21,32 @@ from fastapi import Depends
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.core.telegram_bot_api import get_session as get_bot_http
 from app.db.redis import get_redis
 from app.db.session import get_session
+from app.services.avatar_service import AvatarService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
 
 
-__all__ = ["SessionDep", "RedisDep"]
+def get_avatar_service(
+    redis: RedisDep,
+) -> AvatarService:
+    """DI provider для AvatarService (Pravki.md §7.1).
+
+    Создаёт новый instance на каждый запрос (легковесный — только три
+    ссылки). aiohttp.ClientSession — singleton (TCP keep-alive pool).
+    """
+    return AvatarService(
+        bot_token=get_settings().bot_token,
+        redis=redis,
+        http=get_bot_http(),
+    )
+
+
+AvatarServiceDep = Annotated[AvatarService, Depends(get_avatar_service)]
+
+
+__all__ = ["SessionDep", "RedisDep", "AvatarServiceDep", "get_avatar_service"]

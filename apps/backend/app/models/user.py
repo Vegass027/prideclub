@@ -28,6 +28,14 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Pravki.md §7.1: Telegram file_id аватарки для подхода C'
+    # (307 redirect на Telegram CDN). NULL = нет аватарки или worker
+    # ещё не подтянул. Endpoint /api/v1/users/{id}/photo → 404 если NULL.
+    photo_file_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    photo_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     notifications_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )

@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, Request
+from fastapi.responses import RedirectResponse
 
-from app.core.deps import SessionDep
+from app.core.deps import AvatarServiceDep, SessionDep
 from app.core.security import TelegramUser
+from app.models.user import User
 from app.repositories.user_repository import UserRepository
 
 
@@ -81,3 +83,45 @@ async def me(user: TelegramUserDep) -> dict:
         "language_code": user.language_code,
         "is_premium": user.is_premium,
     }
+
+
+@router.get("/users/{user_id}/photo")
+async def get_user_photo(
+    user_id: int,
+    caller: TelegramUserDep,
+    session: SessionDep,
+    avatar: AvatarServiceDep,
+) -> RedirectResponse:
+    """307 redirect на Telegram CDN с аватаркой пользователя.
+
+    Подход C' (см. Pravki.md §7.1):
+    - Токен бота остаётся server-side (URL приходит через 307 Location,
+      не в JSON клиента).
+    - Файл не хранится у нас — каждый запрос получает file_path через
+      bot.getFile (кэш в Redis на 6ч, см. AvatarService.REDIS_TTL_SECONDS).
+
+    Безопасность:
+    - TelegramUserDep требует initData (AuthMiddleware → 401 без него).
+      Это не даёт перебирать user_id анонимам и видеть кто в каких
+      клубах состоит (photo_file_id привязан к user).
+    - HTTP rate-limit 60/min/user стоит на /api/v1/* (см.
+      services.http_rate_limiter.make_api_v1_limiter).
+
+    Failure modes:
+    - Telegram Bot API timeout/error → 502 telegram_unavailable.
+      Клиент показывает инициалы (Avatar fallback).
+    - photo_file_id отсутствует → 404 photo_unavailable.
+    """
+    target = await session.get(User, user_id)
+    if target is None or not target.photo_file_id:
+        from app.core.exceptions import PhotoUnavailableError
+
+        raise PhotoUnavailableError()
+
+    cdn_url = await avatar.get_cdn_url(target.id, target.photo_file_id)
+    if cdn_url is None:
+        from app.core.exceptions import TelegramUnavailableError
+
+        raise TelegramUnavailableError()
+
+    return RedirectResponse(cdn_url, status_code=307)

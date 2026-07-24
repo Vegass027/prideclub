@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
+import { useLeaderboard, usePhotoBlob, type LeaderboardTab } from "@/shared/hooks";
+import { Avatar } from "@/shared/ui/Avatar";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -46,28 +47,7 @@ export function LeaderboardPage() {
         <ol className="space-y-1.5">
           {data!.items.map((row) => (
             <li key={row.membership_id}>
-              <article className="flex items-center gap-3 rounded-card bg-surface/60 px-3 py-2.5">
-                <div
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                    row.rank === 1
-                      ? "bg-yellow-500/20 text-yellow-300"
-                      : row.rank === 2
-                        ? "bg-gray-400/20 text-gray-200"
-                        : row.rank === 3
-                          ? "bg-orange-700/20 text-orange-300"
-                          : "bg-surface text-muted"
-                  }`}
-                  aria-label={`Место ${row.rank}`}
-                >
-                  {row.rank}
-                </div>
-                <span className="flex-1 truncate text-sm font-medium text-text">
-                  {row.first_name}
-                </span>
-                <span className="text-sm font-bold tabular-nums text-primary">
-                  {row.metric_value} {metricLabel(tab)}
-                </span>
-              </article>
+              <LeaderboardRow row={row} metricLabel={metricLabel(tab)} />
             </li>
           ))}
         </ol>
@@ -75,5 +55,40 @@ export function LeaderboardPage() {
 
       <HabitNav habitId={habitId!} />
     </ScreenLayout>
+  );
+}
+
+function LeaderboardRow({
+  row,
+  metricLabel,
+}: {
+  row: import("@/shared/types").LeaderboardEntry;
+  metricLabel: string;
+}) {
+  const photoBlob = usePhotoBlob(row.photo_url);
+  return (
+    <article className="flex items-center gap-3 rounded-card bg-surface/60 px-3 py-2.5">
+      <div
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+          row.rank === 1
+            ? "bg-yellow-500/20 text-yellow-300"
+            : row.rank === 2
+              ? "bg-gray-400/20 text-gray-200"
+              : row.rank === 3
+                ? "bg-orange-700/20 text-orange-300"
+                : "bg-surface text-muted"
+        }`}
+        aria-label={`Место ${row.rank}`}
+      >
+        {row.rank}
+      </div>
+      <Avatar src={photoBlob} fallback={row.first_name} size="sm" />
+      <span className="flex-1 truncate text-sm font-medium text-text">
+        {row.first_name}
+      </span>
+      <span className="text-sm font-bold tabular-nums text-primary">
+        {row.metric_value} {metricLabel}
+      </span>
+    </article>
   );
 }

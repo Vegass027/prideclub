@@ -26,6 +26,10 @@ class LeaderboardEntry(BaseModel):
     membership_id: str
     first_name: str
     metric_value: int
+    # Относительный путь к нашему photo-endpoint (см. Pravki.md §7.1).
+    # Клиент сам построит абсолютный URL (под текущим origin).
+    # None = нет аватарки или worker ещё не подтянул → fallback на инициалы.
+    photo_url: str | None = None
 
 
 class LeaderboardResponse(BaseModel):
@@ -52,25 +56,44 @@ async def _build_rows(
     membership_ids = list(metrics.keys())
     if not membership_ids:
         return []
+    # JOIN с users — достаём user_id (для photo_url), first_name, photo_file_id.
     rows = (
         await session.execute(
-            select(Membership.id, User.id, User.first_name)
+            select(
+                Membership.id,
+                User.id,
+                User.first_name,
+                User.photo_file_id,
+            )
             .join(User, User.id == Membership.user_id)
             .where(Membership.id.in_(membership_ids))
         )
     ).all()
 
-    by_id_name = {str(m_id): (first_name) for m_id, _, first_name in rows}
+    by_membership: dict[str, dict] = {
+        str(m_id): {
+            "first_name": first_name,
+            "user_id": user_id,
+            "has_photo": bool(photo_file_id),
+        }
+        for m_id, user_id, first_name, photo_file_id in rows
+    }
 
     sorted_metrics = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)
     out: list[LeaderboardEntry] = []
     for rank, (m_id, value) in enumerate(sorted_metrics, start=1):
+        meta = by_membership.get(str(m_id))
+        first_name = meta["first_name"] if meta else "—"
+        photo_url: str | None = None
+        if meta and meta["has_photo"]:
+            photo_url = f"/api/v1/users/{meta['user_id']}/photo"
         out.append(
             LeaderboardEntry(
                 rank=rank,
                 membership_id=str(m_id),
-                first_name=by_id_name.get(str(m_id), "—"),
+                first_name=first_name,
                 metric_value=value,
+                photo_url=photo_url,
             )
         )
     return out

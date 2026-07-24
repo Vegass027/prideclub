@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useLeaderboardOverview, type LeaderboardTab } from "@/shared/hooks";
+import { useLeaderboardOverview, usePhotoBlob, type LeaderboardTab } from "@/shared/hooks";
+import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
@@ -8,6 +9,7 @@ import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { Tabs } from "@/shared/ui/Tabs";
+import type { LeaderboardEntry } from "@/shared/types";
 
 const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "streak", label: "Серии", emoji: "🔥" },
@@ -77,7 +79,7 @@ interface ClubTopBlockProps {
   habitId: string;
   title: string;
   membersCount: number;
-  top: { rank: number; first_name: string; metric_value: number; membership_id: string }[];
+  top: LeaderboardEntry[];
   metricLabel: string;
 }
 
@@ -99,29 +101,7 @@ function ClubTopBlock({ habitId, title, membersCount, top, metricLabel }: ClubTo
       ) : (
         <ol className="mb-3 space-y-1">
           {top.map((row) => (
-            <li
-              key={row.membership_id}
-              className="flex items-center gap-3 rounded-md bg-canvas/60 px-2.5 py-1.5"
-            >
-              <span
-                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
-                  row.rank === 1
-                    ? "bg-yellow-500/20 text-yellow-300"
-                    : row.rank === 2
-                      ? "bg-gray-400/20 text-gray-200"
-                      : row.rank === 3
-                        ? "bg-orange-700/20 text-orange-300"
-                        : "bg-surface text-muted"
-                }`}
-                aria-label={`Место ${row.rank}`}
-              >
-                {row.rank}
-              </span>
-              <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
-              <span className="text-sm font-bold tabular-nums text-primary">
-                {row.metric_value} {metricLabel}
-              </span>
-            </li>
+            <TopThreeRow key={row.membership_id} row={row} metricLabel={metricLabel} />
           ))}
         </ol>
       )}
@@ -134,5 +114,32 @@ function ClubTopBlock({ habitId, title, membersCount, top, metricLabel }: ClubTo
         Открыть клуб →
       </Button>
     </article>
+  );
+}
+
+function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel: string }) {
+  const photoBlob = usePhotoBlob(row.photo_url);
+  return (
+    <li className="flex items-center gap-3 rounded-md bg-canvas/60 px-2.5 py-1.5">
+      <span
+        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+          row.rank === 1
+            ? "bg-yellow-500/20 text-yellow-300"
+            : row.rank === 2
+              ? "bg-gray-400/20 text-gray-200"
+              : row.rank === 3
+                ? "bg-orange-700/20 text-orange-300"
+                : "bg-surface text-muted"
+        }`}
+        aria-label={`Место ${row.rank}`}
+      >
+        {row.rank}
+      </span>
+      <Avatar src={photoBlob} fallback={row.first_name} size="sm" />
+      <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
+      <span className="text-sm font-bold tabular-nums text-primary">
+        {row.metric_value} {metricLabel}
+      </span>
+    </li>
   );
 }

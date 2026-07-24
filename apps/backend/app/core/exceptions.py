@@ -142,3 +142,15 @@ class CheckinWrongTopicError(DomainError):
 
     status_code = 422
     code = "not_checkin_topic"
+
+
+class PhotoUnavailableError(DomainError):
+    """Юзер не имеет photo_file_id (нет аватарки в Telegram или worker не подтянул)."""
+    status_code = 404
+    code = "photo_unavailable"
+
+
+class TelegramUnavailableError(DomainError):
+    """Telegram Bot API недоступен (timeout / 5xx / невалидный file_id)."""
+    status_code = 502
+    code = "telegram_unavailable"
