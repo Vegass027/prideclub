@@ -117,6 +117,10 @@ export interface LeaderboardEntry {
 
 export interface LeaderboardResponse {
   items: LeaderboardEntry[];
+  // Общее число юзеров с ненулевой метрикой до обрезки LEADERBOARD_LIMIT=100.
+  // None если обрезки не было (клуб < 100 или глобально < 100).
+  // UI: "Показаны топ-100 из N".
+  total: number | null;
 }
 
 export interface OverviewClub {

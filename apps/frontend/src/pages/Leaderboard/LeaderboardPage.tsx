@@ -44,13 +44,20 @@ export function LeaderboardPage() {
       )}
 
       {!isLoading && !isError && (data?.items.length ?? 0) > 0 && (
-        <ol className="space-y-1.5">
-          {data!.items.map((row) => (
-            <li key={row.membership_id}>
-              <LeaderboardRow row={row} metricLabel={metricLabel(tab)} />
-            </li>
-          ))}
-        </ol>
+        <>
+          {data?.total != null && (
+            <p className="text-center text-xs text-muted">
+              Показаны топ-100 из {data.total}
+            </p>
+          )}
+          <ol className="space-y-1.5">
+            {data!.items.map((row) => (
+              <li key={row.membership_id}>
+                <LeaderboardRow row={row} metricLabel={metricLabel(tab)} />
+              </li>
+            ))}
+          </ol>
+        </>
       )}
 
       <HabitNav habitId={habitId!} />

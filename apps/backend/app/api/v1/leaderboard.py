@@ -20,6 +20,18 @@ from app.repositories.membership_repository import MembershipRepository
 
 router = APIRouter()
 
+# Жёсткий потолок размера лидерборда (Pravki.md §8.1, обсуждение от
+# 2026-07-24). В клубе с 5 000 участников фронт не должен тащить 5 000
+# аватарок — это 5 000 параллельных GET /photo, ~75s network I/O в браузере
+# и мгновенный 429 от rate-limit middleware (60 req/min/user). Лимит 100
+# даёт:
+#   - backend CPU: 1 процесс справляется с 10 000 одновременных онлайн
+#     (вместо ~500 без лимита)
+#   - render time в браузере: ~1.5s вместо ~75s
+#   - memory в браузере: ~3 MB вместо ~150 MB
+# Если клуб < 100 — обрезка не применяется, отдаём весь список.
+LEADERBOARD_LIMIT = 100
+
 
 class LeaderboardEntry(BaseModel):
     rank: int
@@ -34,6 +46,9 @@ class LeaderboardEntry(BaseModel):
 
 class LeaderboardResponse(BaseModel):
     items: list[LeaderboardEntry]
+    # Общее число участников с ненулевой метрикой (до обрезки).
+    # None если обрезки не было. Используется UI: "Топ-100 из {total}".
+    total: int | None = None
 
 
 class OverviewClub(BaseModel):
@@ -142,7 +157,7 @@ async def _streak_leaderboard(
             cur = cur - timedelta(days=1)
         streaks[m_id] = streak
 
-    return await _build_rows(session, streaks)
+    return await _build_rows(session, _truncate_metrics(streaks))
 
 
 async def _catch_leaderboard(
@@ -164,7 +179,7 @@ async def _catch_leaderboard(
     ).all()
 
     metrics = {str(m_id): int(count) for m_id, count in rows}
-    return await _build_rows(session, metrics)
+    return await _build_rows(session, _truncate_metrics(metrics))
 
 
 async def _shame_leaderboard(
@@ -184,7 +199,23 @@ async def _shame_leaderboard(
     ).all()
 
     metrics = {str(m_id): int(count) for m_id, count in rows}
-    return await _build_rows(session, metrics)
+    return await _build_rows(session, _truncate_metrics(metrics))
+
+
+def _truncate_metrics(metrics: dict[str, int]) -> dict[str, int]:
+    """Оставляет топ-N (LEADERBOARD_LIMIT) по убыванию value.
+
+    Остальные не попадают в _build_rows → не в SQL JOIN → не возвращаются
+    клиенту. Полное число юзеров с ненулевой метрикой возвращается через
+    `total` в response (вызывающий код отдельно сохраняет len(metrics)).
+    """
+    if len(metrics) <= LEADERBOARD_LIMIT:
+        return metrics
+    # heapq.nlargest — O(N log K) вместо полной сортировки O(N log N).
+    import heapq
+
+    top = heapq.nlargest(LEADERBOARD_LIMIT, metrics.items(), key=lambda kv: kv[1])
+    return dict(top)
 
 
 @router.get("/habits/{habit_id}/leaderboard/streak", response_model=LeaderboardResponse)
@@ -196,7 +227,11 @@ async def streak(
     rows = await _streak_leaderboard(
         session, MembershipRepository(session), habit_id
     )
-    return LeaderboardResponse(items=rows)
+    # Для локального лидерборда: total = len(rows) если обрезали
+    # (потому что после _truncate_metrics+_build_rows мы уже не знаем
+    # исходное число). rows < LEADERBOARD_LIMIT → total=None.
+    total = len(rows) if len(rows) >= LEADERBOARD_LIMIT else None
+    return LeaderboardResponse(items=rows, total=total)
 
 
 @router.get("/habits/{habit_id}/leaderboard/catches", response_model=LeaderboardResponse)
@@ -208,7 +243,8 @@ async def catches(
     rows = await _catch_leaderboard(
         session, MembershipRepository(session), habit_id
     )
-    return LeaderboardResponse(items=rows)
+    total = len(rows) if len(rows) >= LEADERBOARD_LIMIT else None
+    return LeaderboardResponse(items=rows, total=total)
 
 
 @router.get("/habits/{habit_id}/leaderboard/shame", response_model=LeaderboardResponse)
@@ -220,11 +256,19 @@ async def shame(
     rows = await _shame_leaderboard(
         session, MembershipRepository(session), habit_id
     )
-    return LeaderboardResponse(items=rows)
+    total = len(rows) if len(rows) >= LEADERBOARD_LIMIT else None
+    return LeaderboardResponse(items=rows, total=total)
 
 
-async def _global_streak(session: AsyncSession, user_id: int) -> list[LeaderboardEntry]:
-    """Глобальные серии: сумма streak_days по всем активным клубам пользователя."""
+async def _global_streak(
+    session: AsyncSession, user_id: int
+) -> tuple[list[LeaderboardEntry], int]:
+    """Глобальные серии: сумма streak_days по всем активным клубам пользователя.
+
+    Returns:
+        (rows, total) — rows обрезан до LEADERBOARD_LIMIT, total — общее
+        число юзеров с ненулевой метрикой (до обрезки).
+    """
     rows = (
         await session.execute(
             select(Checkin.date, Checkin.membership_id, Membership.user_id)
@@ -251,32 +295,14 @@ async def _global_streak(session: AsyncSession, user_id: int) -> list[Leaderboar
             cur = cur - timedelta(days=1)
         metrics_per_user[u_id] += streak
 
-    if not metrics_per_user:
-        return []
-    user_ids = list(metrics_per_user.keys())
-    name_rows = (
-        await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
-    ).all()
-    names = {u_id: name for u_id, name in name_rows}
-
-    sorted_rows = sorted(metrics_per_user.items(), key=lambda kv: kv[1], reverse=True)
-    return [
-        LeaderboardEntry(
-            rank=rank,
-            membership_id=f"u:{u_id}",
-            first_name=names.get(u_id, "—"),
-            metric_value=value,
-        )
-        for rank, (u_id, value) in enumerate(sorted_rows, start=1)
-        if value > 0
-    ]
+    return _build_global_rows(session, metrics_per_user)
 
 
 async def _global_counts(
     session: AsyncSession,
     *,
     column,
-) -> list[LeaderboardEntry]:
+) -> tuple[list[LeaderboardEntry], int]:
     """Глобальные ловцы / позор: COUNT(penalty) GROUP BY user_id.
 
     column — Penalty.catcher_membership_id (ловцы) или Penalty.membership_id (позор).
@@ -296,25 +322,67 @@ async def _global_counts(
     for u_id, count in rows:
         metrics[u_id] += int(count)
 
-    if not metrics:
-        return []
-    user_ids = list(metrics.keys())
-    name_rows = (
-        await session.execute(select(User.id, User.first_name).where(User.id.in_(user_ids)))
-    ).all()
-    names = {u_id: name for u_id, name in name_rows}
+    return _build_global_rows(session, metrics)
 
-    sorted_rows = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)
-    return [
-        LeaderboardEntry(
-            rank=rank,
-            membership_id=f"u:{u_id}",
-            first_name=names.get(u_id, "—"),
-            metric_value=value,
+
+async def _build_global_rows(
+    session: AsyncSession,
+    metrics: dict[int, int],
+) -> tuple[list[LeaderboardEntry], int]:
+    """Сортирует metrics, обрезает до LEADERBOARD_LIMIT, возвращает (rows, total).
+
+    total = len(metrics) — общее число юзеров с ненулевой метрикой.
+    None total = обрезки не было (клуб < LEADERBOARD_LIMIT).
+    """
+    total = len(metrics)
+    if total == 0:
+        return [], None
+
+    # Сортируем и обрезаем по value desc
+    if total > LEADERBOARD_LIMIT:
+        import heapq
+
+        top = heapq.nlargest(
+            LEADERBOARD_LIMIT, metrics.items(), key=lambda kv: kv[1]
         )
-        for rank, (u_id, value) in enumerate(sorted_rows, start=1)
-        if value > 0
-    ]
+    else:
+        top = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)
+
+    user_ids = [u_id for u_id, _ in top]
+    name_rows = (
+        await session.execute(
+            select(User.id, User.first_name, User.photo_file_id).where(
+                User.id.in_(user_ids)
+            )
+        )
+    ).all()
+    by_user: dict[int, dict] = {
+        u_id: {"first_name": fn, "has_photo": bool(pf)}
+        for u_id, fn, pf in name_rows
+    }
+
+    out: list[LeaderboardEntry] = []
+    for rank, (u_id, value) in enumerate(top, start=1):
+        if value <= 0:
+            continue
+        meta = by_user.get(u_id)
+        first_name = meta["first_name"] if meta else "—"
+        photo_url: str | None = (
+            f"/api/v1/users/{u_id}/photo" if meta and meta["has_photo"] else None
+        )
+        out.append(
+            LeaderboardEntry(
+                rank=rank,
+                membership_id=f"u:{u_id}",
+                first_name=first_name,
+                metric_value=value,
+                photo_url=photo_url,
+            )
+        )
+
+    # total = None если обрезки не было (= влезает в LEADERBOARD_LIMIT),
+    # иначе реальное число. UI решает: "Показаны топ-100 из N" или ничего.
+    return out, (total if total > LEADERBOARD_LIMIT else None)
 
 
 @router.get("/leaderboard/streak", response_model=LeaderboardResponse)
@@ -322,8 +390,8 @@ async def global_streak(
     user: TelegramUserDbDep,
     session: SessionDep,
 ) -> LeaderboardResponse:
-    rows = await _global_streak(session, user.id)
-    return LeaderboardResponse(items=rows)
+    rows, total = await _global_streak(session, user.id)
+    return LeaderboardResponse(items=rows, total=total)
 
 
 @router.get("/leaderboard/catches", response_model=LeaderboardResponse)
@@ -331,8 +399,8 @@ async def global_catches(
     _: TelegramUserDbDep,
     session: SessionDep,
 ) -> LeaderboardResponse:
-    rows = await _global_counts(session, column=Penalty.catcher_membership_id)
-    return LeaderboardResponse(items=rows)
+    rows, total = await _global_counts(session, column=Penalty.catcher_membership_id)
+    return LeaderboardResponse(items=rows, total=total)
 
 
 @router.get("/leaderboard/shame", response_model=LeaderboardResponse)
@@ -340,8 +408,8 @@ async def global_shame(
     _: TelegramUserDbDep,
     session: SessionDep,
 ) -> LeaderboardResponse:
-    rows = await _global_counts(session, column=Penalty.membership_id)
-    return LeaderboardResponse(items=rows)
+    rows, total = await _global_counts(session, column=Penalty.membership_id)
+    return LeaderboardResponse(items=rows, total=total)
 
 
 async def _overview_metric(
