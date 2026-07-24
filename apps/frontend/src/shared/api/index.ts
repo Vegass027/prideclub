@@ -2,6 +2,7 @@ import { apiClient } from "@/shared/api/client";
 import type {
   BalanceResponse,
   CatchResponse,
+  LeaderboardClubsResponse,
   LeaderboardOverviewResponse,
   LeaderboardResponse,
   MarketplaceResponse,
@@ -61,6 +62,10 @@ export const leaderboardApi = {
   overview: (tab: "streak" | "catches" | "shame") =>
     apiClient
       .get<LeaderboardOverviewResponse>(`/leaderboard/${tab}/overview`)
+      .then((r) => r.data),
+  clubs: (tab: "streak" | "catches" | "shame") =>
+    apiClient
+      .get<LeaderboardClubsResponse>(`/leaderboard/${tab}/clubs`)
       .then((r) => r.data),
 };
 

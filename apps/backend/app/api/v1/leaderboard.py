@@ -79,6 +79,25 @@ class LeaderboardOverviewResponse(BaseModel):
     clubs: list[OverviewClub]
 
 
+class LeaderboardClub(BaseModel):
+    """Клуб в списке для глобального рейтинга (Pravki §7 v3.2).
+
+    Минимум полей — UI рендерит "〖Название〗 — N УЧАСТНИКОВ".
+    """
+
+    habit_id: str
+    title: str
+    members_count: int
+
+
+class LeaderboardClubsResponse(BaseModel):
+    """Список клубов юзера для выбранной категории."""
+
+    tab: str
+    metric_label: str
+    clubs: list[LeaderboardClub]
+
+
 async def _membership_breakdown(
     session: AsyncSession,
     membership_ids: list[str],
@@ -591,3 +610,47 @@ async def leaderboard_overview(
         )
 
     return LeaderboardOverviewResponse(tab=tab, metric_label=metric_label, clubs=clubs)
+
+
+@router.get("/leaderboard/{tab}/clubs", response_model=LeaderboardClubsResponse)
+async def leaderboard_clubs(
+    tab: str,
+    user: TelegramUserDbDep,
+    session: SessionDep,
+) -> LeaderboardClubsResponse:
+    """Список клубов юзера для категории таба (Pravki §7 v3.2, ребрендинг).
+
+    Возвращает только клубы, в которых user — active member. Без
+    top-3 (UI делает отдельный запрос на /habits/{id}/leaderboard).
+    Используется в /leaderboards — список аккордеонов с простым
+    текстом "название клуба — N УЧАСТНИКОВ".
+
+    tab in {"streak", "catches", "shame"} → metric_label локализован
+    (Серии / Охотники / Лентяи) для UI.
+    """
+    if tab not in ("streak", "catches", "shame"):
+        raise HTTPException(400, "tab must be streak|catches|shame")
+
+    metric_label = {
+        "streak": "Серии",
+        "catches": "Охотники",
+        "shame": "Лентяи",
+    }[tab]
+
+    habit_repo = HabitRepository(session)
+    membership_repo = MembershipRepository(session)
+
+    # Активные клубы юзера (без archived).
+    user_habits = await habit_repo.list_for_user(user.id)
+    clubs: list[LeaderboardClub] = []
+    for habit in user_habits:
+        members = await membership_repo.list_for_habit(str(habit.id))
+        clubs.append(
+            LeaderboardClub(
+                habit_id=str(habit.id),
+                title=habit.title,
+                members_count=len(members),
+            )
+        )
+
+    return LeaderboardClubsResponse(tab=tab, metric_label=metric_label, clubs=clubs)

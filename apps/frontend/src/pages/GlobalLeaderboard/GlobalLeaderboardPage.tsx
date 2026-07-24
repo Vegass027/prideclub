@@ -1,149 +1,163 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useLeaderboardOverview, type LeaderboardTab } from "@/shared/hooks";
-import { Avatar } from "@/shared/ui/Avatar";
+import { useLeaderboardClubs, type LeaderboardTab } from "@/shared/hooks";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
-import { Tabs } from "@/shared/ui/Tabs";
-import type { LeaderboardEntry } from "@/shared/types";
+import type { LeaderboardClub } from "@/shared/types";
 
-const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
+/** Pravki §7 v3.2 (ребрендинг): 3 категории с локализованными лейблами. */
+const SECTIONS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "streak", label: "Серии", emoji: "🔥" },
-  { id: "catches", label: "Ловцы", emoji: "🎯" },
-  { id: "shame", label: "Позор", emoji: "💀" },
+  { id: "catches", label: "Охотники", emoji: "🎯" },
+  { id: "shame", label: "Лентяи", emoji: "😴" },
 ];
 
 export function GlobalLeaderboardPage() {
-  const navigate = useNavigate();
-  const [tab, setTab] = useState<LeaderboardTab>("streak");
-  const { data, isLoading, isError, error } = useLeaderboardOverview(tab);
+  // "Серии" открыта по умолчанию.
+  const [openTab, setOpenTab] = useState<LeaderboardTab | null>("streak");
 
   return (
     <ScreenLayout>
-      <PageHeader
-        title="Рейтинг"
-        subtitle="Топ по каждому клубу, в котором ты состоишь"
-      />
+      <PageHeader title="Рейтинг" />
 
-      <Tabs tabs={TABS} active={tab} onChange={setTab} />
-
-      {isLoading && (
-        <div className="space-y-3">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-32 w-full" />
-        </div>
-      )}
-
-      {isError && (
-        <EmptyState icon="⚠️" title="Не удалось загрузить" description={String(error)} />
-      )}
-
-      {!isLoading && !isError && (data?.clubs.length ?? 0) === 0 && (
-        <EmptyState
-          icon="🏪"
-          title="Ты ещё не в клубах"
-          description="Вступи в любой клуб — здесь будет рейтинг участников."
-          action={
-            <Button onClick={() => navigate("/marketplace")} className="mt-3 px-4 py-2 text-sm">
-              Выбрать клуб
-            </Button>
-          }
-        />
-      )}
-
-      {!isLoading && !isError && data && data.clubs.length > 0 && (
-        <div className="space-y-3">
-          {data.clubs.map((club) => (
-            <ClubTopBlock
-              key={club.habit_id}
-              habitId={club.habit_id}
-              title={club.title}
-              membersCount={club.members_count}
-              top={club.top}
-              metricLabel={data.metric_label}
-            />
-          ))}
-        </div>
-      )}
+      <div className="space-y-2">
+        {SECTIONS.map((section) => (
+          <Accordion
+            key={section.id}
+            id={section.id}
+            label={section.label}
+            emoji={section.emoji}
+            isOpen={openTab === section.id}
+            onToggle={() =>
+              setOpenTab((prev) => (prev === section.id ? null : section.id))
+            }
+          />
+        ))}
+      </div>
 
       <BottomNav />
     </ScreenLayout>
   );
 }
 
-interface ClubTopBlockProps {
-  habitId: string;
-  title: string;
-  membersCount: number;
-  top: LeaderboardEntry[];
-  metricLabel: string;
-}
-
-function ClubTopBlock({ habitId, title, membersCount, top, metricLabel }: ClubTopBlockProps) {
-  const navigate = useNavigate();
+function Accordion({
+  id,
+  label,
+  emoji,
+  isOpen,
+  onToggle,
+}: {
+  id: LeaderboardTab;
+  label: string;
+  emoji: string;
+  isOpen: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <article className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
-      <header className="mb-3 flex items-center justify-between">
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-text">〖{title}〗</h3>
-          <p className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">
-            {membersCount} участников
-          </p>
-        </div>
-      </header>
-
-      {top.length === 0 ? (
-        <p className="py-3 text-center text-xs text-muted">пока никто не отметился</p>
-      ) : (
-        <ol className="mb-3 space-y-1">
-          {top.map((row) => (
-            <TopThreeRow key={row.membership_id} row={row} metricLabel={metricLabel} />
-          ))}
-        </ol>
-      )}
-
-      <Button
-        onClick={() => navigate(`/habits/${habitId}/leaderboard`)}
-        variant="secondary"
-        className="min-h-0 w-full px-3 py-1.5 text-xs"
+    <section className="overflow-hidden rounded-card border border-white/10 bg-surface">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/5"
+        aria-expanded={isOpen}
       >
-        Открыть клуб →
-      </Button>
-    </article>
+        <span className="text-xl" aria-hidden="true">
+          {emoji}
+        </span>
+        <span className="flex-1 text-base font-semibold text-text">{label}</span>
+        <span
+          aria-hidden="true"
+          className={`text-muted transition-transform ${isOpen ? "rotate-180" : ""}`}
+        >
+          ▾
+        </span>
+      </button>
+      {isOpen && <AccordionContent id={id} />}
+    </section>
   );
 }
 
-function TopThreeRow({ row, metricLabel }: { row: LeaderboardEntry; metricLabel: string }) {
-  // photo_url: "/api/v1/users/{id}/photo" — backend 307 → Telegram CDN.
-  // <img> сама следует редиректу; не используем usePhotoBlob (blob fetch
-  // через axios не работает с 307).
-  const photoSrc = row.photo_url
-    ? new URL(row.photo_url, window.location.origin).toString()
-    : null;
-  return (
-    <li className="flex items-center gap-3 rounded-md border border-white/10 bg-canvas/60 px-2.5 py-1.5">
-      <Avatar
-        src={photoSrc}
-        fallback={row.first_name}
-        size="sm"
-        loading="eager"
-        ring
-      />
-      <span className="flex-1 truncate text-sm text-text">{row.first_name}</span>
-      <div className="flex flex-col items-end leading-tight">
-        <span className="text-sm font-bold tabular-nums text-primary">
-          {row.metric_value} {metricLabel}
-        </span>
-        <span className="text-[10px] tabular-nums text-muted">
-          📅 {row.breakdown.checkin_count}
-          {" · "}🎯 {row.breakdown.catches_count}
-          {" · "}🚔 {row.breakdown.penalties_count}
-        </span>
+function AccordionContent({ id }: { id: LeaderboardTab }) {
+  const navigate = useNavigate();
+  const { data, isLoading, isError, error } = useLeaderboardClubs(id);
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2 border-t border-white/5 p-3">
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
       </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="border-t border-white/5 p-3">
+        <EmptyState
+          icon="⚠️"
+          title="Не удалось загрузить"
+          description={String(error)}
+        />
+      </div>
+    );
+  }
+
+  if (!data || data.clubs.length === 0) {
+    return (
+      <div className="border-t border-white/5 p-3">
+        <EmptyState
+          icon="🏪"
+          title="Нет клубов"
+          description="Вступи в любой клуб — здесь будет рейтинг."
+          action={
+            <Button
+              onClick={() => navigate("/marketplace")}
+              className="mt-3 px-4 py-2 text-sm"
+            >
+              Выбрать клуб
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+
+  return (
+    <ul className="border-t border-white/5">
+      {data.clubs.map((club) => (
+        <ClubListItem
+          key={club.habit_id}
+          club={club}
+          onClick={() => navigate(`/habits/${club.habit_id}/leaderboard`)}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function ClubListItem({
+  club,
+  onClick,
+}: {
+  club: LeaderboardClub;
+  onClick: () => void;
+}) {
+  return (
+    <li className="border-b border-white/5 last:border-b-0">
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-white/5"
+      >
+        <span className="flex-1 truncate text-sm text-text">〖{club.title}〗</span>
+        <span className="text-xs uppercase tracking-wide text-muted">
+          {club.members_count} УЧАСТНИКОВ
+        </span>
+      </button>
     </li>
   );
 }

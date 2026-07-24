@@ -140,6 +140,8 @@ export interface LeaderboardResponse {
   total: number | null;
 }
 
+export type LeaderboardTabId = "streak" | "catches" | "shame";
+
 export interface OverviewClub {
   habit_id: string;
   title: string;
@@ -147,8 +149,21 @@ export interface OverviewClub {
   top: LeaderboardEntry[];
 }
 
+/** Клуб в списке для глобального рейтинга (Pravki §7 v3.2). */
+export interface LeaderboardClub {
+  habit_id: string;
+  title: string;
+  members_count: number;
+}
+
+export interface LeaderboardClubsResponse {
+  tab: LeaderboardTabId;
+  metric_label: string;
+  clubs: LeaderboardClub[];
+}
+
 export interface LeaderboardOverviewResponse {
-  tab: "streak" | "catches" | "shame";
+  tab: LeaderboardTabId;
   metric_label: string;
   clubs: OverviewClub[];
 }

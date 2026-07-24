@@ -6,6 +6,7 @@ import {
   marketplaceApi,
   membersApi,
 } from "@/shared/api";
+import type { LeaderboardTabId } from "@/shared/types";
 
 export function useMarketplace() {
   return useQuery({
@@ -87,7 +88,7 @@ export function useTopUpDeposit() {
   });
 }
 
-export type LeaderboardTab = "streak" | "catches" | "shame";
+export type LeaderboardTab = LeaderboardTabId;
 
 export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab) {
   const fn =
@@ -124,6 +125,14 @@ export function useLeaderboardOverview(tab: LeaderboardTab) {
   return useQuery({
     queryKey: ["leaderboard-overview", tab],
     queryFn: () => leaderboardApi.overview(tab),
+    staleTime: 30_000,
+  });
+}
+
+export function useLeaderboardClubs(tab: LeaderboardTab) {
+  return useQuery({
+    queryKey: ["leaderboard-clubs", tab],
+    queryFn: () => leaderboardApi.clubs(tab),
     staleTime: 30_000,
   });
 }

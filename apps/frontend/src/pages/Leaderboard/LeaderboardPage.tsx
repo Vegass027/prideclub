@@ -9,10 +9,11 @@ import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { Tabs } from "@/shared/ui/Tabs";
 
+// Pravki §7 v3.2: единые лейблы со страницей "Рейтинг" (Серии/Охотники/Лентяи).
 const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "streak", label: "Серии", emoji: "🔥" },
-  { id: "catches", label: "Ловцы", emoji: "🎯" },
-  { id: "shame", label: "Позор", emoji: "💀" },
+  { id: "catches", label: "Охотники", emoji: "🎯" },
+  { id: "shame", label: "Лентяи", emoji: "😴" },
 ];
 
 export function LeaderboardPage() {
