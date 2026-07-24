@@ -108,7 +108,7 @@
 
 ### 7.1 Backend: фото участников в лидерборде — M ✅ ВЫПОЛНЕНО (v3, подход D)
 
-**Подход D (диск-кеш + nginx try_files, заменён 2026-07-24):**
+**Подход D (диск-кеш + nginx alias + proxy_pass fallback, заменён 2026-07-24):**
 
 История: подходы A→B→C' развивались, но **307 redirect на Telegram CDN не работает в `<img>`**:
 - Telegram CDN отдаёт `Content-Type: application/octet-stream` + `Content-Disposition: attachment`.
@@ -120,7 +120,7 @@
 - Backend `AvatarService.get_or_fetch_local_path` — cache hit (file + file_id match) → мгновенный Path, без HTTP. Cache miss → скачивает с Telegram + сохраняет.
 - Redis кеш `user_photo_file_id:{user_id}` (6h TTL) для инвалидации при смене фото.
 - Endpoint `/api/v1/users/{id}/photo` → `FileResponse(image/jpeg)` с `Cache-Control: private, max-age=21600`.
-- **Nginx try_files** на хосте: `location /api/v1/users/N/photo$` сначала проксирует на `habit_frontend /avatars/N.jpg` (внутренний путь), где frontend nginx отдаёт файл из volume напрямую. На 404 (file miss) — fallback `@avatar_backend_fallback` на `habit_backend` (cold cache: backend скачает с TG, сохранит, frontend будет hit).
+- **Nginx alias + error_page fallback** на хосте: `location /api/v1/users/N/photo$` (regex, объявлен **до** `location /api/`) проксирует на `habit_frontend /avatars/N.jpg` (внутренний путь). Frontend nginx отдаёт файл напрямую через `alias /usr/share/nginx/html/static/avatars/$1.jpg;` (volume `club_uploads`). На 404 от frontend (`proxy_intercept_errors on` + `error_page 404 = @avatar_backend_fallback`) → backend (cold cache: backend скачает с TG, сохранит на volume, frontend будет hit на следующий запрос). БЕЗ `try_files` в alias location — конфликтует.
 - Frontend nginx location `/avatars/(\d+).jpg` — `alias /usr/share/nginx/html/static/avatars/$1.jpg;` (volume `club_uploads:/usr/share/nginx/html/static`).
 - После первого hit — backend не участвует для этого юзера (на горячих юзеров = 0 backend запросов).
 
@@ -145,7 +145,7 @@
 - `apps/worker/worker/tasks/update_user_photos.py` — скачивает JPEG + сохраняет на volume
 - `infra/docker-compose.yml` — worker: volume `club_uploads:/app/static`, env `STATIC_DIR=/app/static`
 - `infra/nginx/frontend.nginx.conf` — location `/avatars/N.jpg` отдаёт файл из volume
-- `infra/nginx/nginx.prideclub.conf` — location `/api/v1/users/N/photo$` с try_files на frontend, fallback на backend
+- `infra/nginx/nginx.prideclub.conf` (ref) — location `/api/v1/users/N/photo$` с `proxy_intercept_errors + error_page 404 = @avatar_backend_fallback`. На **продовом сервере** конфиг `nginx.prideclub.conf` отличается от репо (другие server{} блоки для каждого домена, `app.prideclub.fun` имеет `location /api/`). Avatar location добавлен через `infra/insert_avatar_loc.py` (см. infra/README). Файл в репо — референс.
 - `apps/backend/alembic/versions/013_user_photo.py` — миграция (без изменений с прошлого раза)
 - `apps/backend/app/models/user.py` — `photo_file_id` + `photo_fetched_at` (без изменений)
 - `apps/backend/app/api/v1/leaderboard.py` — `LeaderboardEntry.photo_url` = `/api/v1/users/{id}/photo` (relative)
