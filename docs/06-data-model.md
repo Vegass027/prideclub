@@ -25,6 +25,8 @@
 | accepted_offer_at | TIMESTAMPTZ | Согласие с офертой (последней версии) |
 | deleted_at | TIMESTAMPTZ | Право на удаление по ФЗ-152 |
 | data_anonymized | BOOLEAN | Признак анонимизации |
+| photo_file_id | VARCHAR(128) | Telegram file_id аватарки (Pravki.md §7.1, миграция 013). NULL = нет аватарки или worker `update_user_photos` ещё не подтянул. Endpoint `/api/v1/users/{id}/photo` → 404 если NULL |
+| photo_fetched_at | TIMESTAMPTZ | Когда `update_user_photos` cron последний раз обновлял `photo_file_id` |
 | created_at | TIMESTAMPTZ | |
 
 ### habits (клубы привычек)
@@ -202,7 +204,7 @@ PRIMARY KEY (user_id, offer_version_id)
 
 ## 3. Полный набор миграций
 
-> На проде применена голова `012_proof_types` (см.
+> На проде применена голова `013_user_photo` (см.
 > [09-prod-readiness.md](09-prod-readiness.md) §1.1). Файлы миграций лежат в
 > `apps/backend/alembic/versions/`. Для upgrade/downgrade используется
 > `make migrate` / `make migrate-test`.
@@ -222,6 +224,7 @@ PRIMARY KEY (user_id, offer_version_id)
 | `010_habit_topics` | `010_habit_topics.py` | `habits.checkin_topic_thread_id` и `habits.notifications_topic_thread_id` (BIGINT NULL) + partial btree-индексы. Включает топик-фильтр чек-инов. |
 | `011_habit_chat_topic` | `011_habit_chat_topic.py` | `habits.chat_topic_thread_id` (BIGINT NULL) + partial btree-индекс. Третий топик для общего чата участников клуба. |
 | `012_proof_types` | `012_proof_types.py` | `habits.proof_types JSONB NOT NULL DEFAULT '["video_note"]'` + CHECK (длина 1..3) + GIN-индекс. Бэкфилл: `UPDATE habits SET proof_types = jsonb_build_array(proof_type::text)`. `habits.proof_type` остаётся как алиас первого элемента массива для обратной совместимости. |
+| `013_user_photo` | `013_user_photo.py` | `users.photo_file_id VARCHAR(128) NULL` + `users.photo_fetched_at TIMESTAMPTZ NULL` + partial index (`photo_file_id IS NOT NULL`). Для Pravki.md §7.1: подход C' — backend делает 307 redirect на Telegram CDN через endpoint `/api/v1/users/{id}/photo`. file_id постоянный (см. telegram FAQ), `bot.getFile` результат кэшируется в Redis 6ч. |
 
 > SQL-блоки 000–004 в старой версии этого документа устарели (не отражают 005–009).
 > Реальный код — в `apps/backend/alembic/versions/`.
