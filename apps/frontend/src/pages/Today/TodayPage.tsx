@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useToday } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { BottomNav } from "@/shared/ui/BottomNav";
@@ -62,7 +64,18 @@ function Stat({
 
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
+  const queryClient = useQueryClient();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
+
+  // Юзер делает чек-ин в Telegram-боте (вне Mini App), потом возвращается
+  // сюда. На mount ВСЕГДА invalidates кэш "today" — даже если staleTime
+  // (30s) не истёк. Без этого backend показывает stale "pending" пока
+  // worker не обновит Redis-кэш для всех.
+  useEffect(() => {
+    if (habitId) {
+      queryClient.invalidateQueries({ queryKey: ["today", habitId] });
+    }
+  }, [habitId, queryClient]);
 
   const handleOpenChat = () => {
     if (!data) return;

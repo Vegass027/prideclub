@@ -16,6 +16,32 @@ const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "shame", label: "Лентяи", emoji: "😴" },
 ];
 
+// Pravki §7 v3.3: описание категории под табами. Помогает юзеру понять
+// смысл каждой метрики без отдельного тура.
+const TAB_DESCRIPTIONS: Record<LeaderboardTab, string> = {
+  streak: "Сколько дней подряд участник отмечается без пропусков.",
+  catches: "Сколько раз участник поймал нарушителей в этом клубе.",
+  shame: "Сколько дней подряд участник пропустил чек-ин.",
+};
+
+const EMPTY_STATES: Record<LeaderboardTab, { icon: string; title: string; description: string }> = {
+  streak: {
+    icon: "📊",
+    title: "Пока никто не отметился",
+    description: "Будь первым — открой клуб и сделай чек-ин.",
+  },
+  catches: {
+    icon: "🎯",
+    title: "Пока никто никого не поймал",
+    description: "Будь первым — поймай нарушителя, пока он не отметился.",
+  },
+  shame: {
+    icon: "😴",
+    title: "Пока все молодцы",
+    description: "Пропусти чек-ин — и ты автоматически попадёшь сюда.",
+  },
+};
+
 const VALID_TABS = new Set<LeaderboardTab>(["streak", "catches", "shame"]);
 
 // Склонение для "поимок" (1 раз, 2 раза, 5 раз). Применяется ТОЛЬКО
@@ -56,6 +82,8 @@ export function LeaderboardPage() {
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
+      <p className="text-center text-xs text-muted">{TAB_DESCRIPTIONS[tab]}</p>
+
       {isLoading && <Skeleton className="h-14 w-full" rows={5} />}
 
       {isError && (
@@ -64,9 +92,9 @@ export function LeaderboardPage() {
 
       {!isLoading && !isError && (data?.items.length ?? 0) === 0 && (
         <EmptyState
-          icon="📊"
-          title="Пока никто не отметился"
-          description="Будь первым — открой клуб и сделай чек-ин."
+          icon={EMPTY_STATES[tab].icon}
+          title={EMPTY_STATES[tab].title}
+          description={EMPTY_STATES[tab].description}
         />
       )}
 
@@ -105,15 +133,16 @@ function LeaderboardRow({
     ? new URL(row.photo_url, window.location.origin).toString()
     : null;
   return (
-    <article className="flex items-center gap-2 rounded-card border border-white/10 bg-surface/60 px-2 py-2 sm:gap-3 sm:px-3 sm:py-2.5">
+    <article className="flex items-center gap-3 rounded-card border border-white/10 bg-surface/60 px-2 py-2 sm:gap-4 sm:px-3 sm:py-2.5">
       <Avatar
         src={photoSrc}
         fallback={row.first_name}
         size="xs"
         loading="eager"
         ring
+        className="mr-2 sm:mr-3"
       />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-text sm:text-sm">
+      <span className="min-w-0 truncate text-xs font-medium text-text sm:text-sm">
         {row.first_name}
       </span>
       <span className="border-l border-white/10 pl-2 text-xs font-bold tabular-nums text-primary sm:pl-3 sm:text-sm whitespace-nowrap">

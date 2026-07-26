@@ -17,8 +17,8 @@ const SECTIONS: { id: LeaderboardTab; label: string; emoji: string }[] = [
 ];
 
 export function GlobalLeaderboardPage() {
-  // "Серии" открыта по умолчанию.
-  const [openTab, setOpenTab] = useState<LeaderboardTab | null>("streak");
+  // Все аккордеоны закрыты по умолчанию. Юзер кликает чтобы открыть.
+  const [openTab, setOpenTab] = useState<LeaderboardTab | null>(null);
 
   return (
     <ScreenLayout>
