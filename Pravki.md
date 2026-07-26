@@ -204,6 +204,77 @@
 
 **Оценка:** ~20 минут.
 
+### 7.6 Frontend: ребрендинг «Рейтинг» + tab-передача + row в одну строку — M ✅ ВЫПОЛНЕНО (v3.2)
+
+**Задача (по жалобе юзера):**
+- На `/leaderboards` — огромные карточки с top-3 для каждого клуба, сложно скроллить, нечитаемо.
+- Табы «Ловцы» / «Позор» — англицизмы, неочевидно для русскоязычного юзера.
+- В строке юзера на `/habits/{id}/leaderboard` имя и метрики в две строки, а не в одну.
+- На mobile (узкий экран) ничего не влезает.
+- При переходе из аккордеона в лидеры клуба — всегда открыт таб «Серии», хотя юзер только что смотрел «Лентяи».
+
+**Backend (Pravki §7 v3.2):**
+
+- `GET /leaderboard/{tab}/clubs` — новый endpoint. Возвращает список клубов юзера (active member) с `habit_id`, `title`, `members_count`. Без top-3 (UI страница лидеров клуба делает отдельный запрос).
+- `metric_label` локализован server-side: `streak → "Серии"`, `catches → "Охотники"`, `shame → "Лентяи"`.
+- `LeaderboardClub`, `LeaderboardClubsResponse` — Pydantic-модели.
+- `LeaderboardTabId` — `"streak" | "catches" | "shame"` (новый тип, единый для клиента и сервера).
+- Старый `/leaderboard/{tab}/overview` оставлен для обратной совместимости (больше не используется в UI).
+
+**Frontend (полный rewrite `GlobalLeaderboardPage`):**
+
+- Заголовок «Рейтинг» (убран подзаголовок).
+- 3 аккордеона вместо табов: 🔥 **Серии** / 🎯 **Охотники** / 😴 **Лентяи**.
+- «Серии» открыта по умолчанию (как на «Лидерах клуба»).
+- Клик на аккордеон → запрос `useLeaderboardClubs(tab)`, список клубов с белой обводкой (`border-white/10`).
+- Empty state: «Нет клубов» + кнопка «Выбрать клуб» → `/marketplace`.
+- Клик на клуб → `navigate(\`/habits/${club.habit_id}/leaderboard?tab=${id}\`)` — передаём активный tab в URL.
+
+**LeaderboardPage (страница лидеров клуба):**
+
+- `useSearchParams` → читаем `?tab=`, если валиден (`streak|catches|shame`) → `setTab` initial. Иначе default `streak`.
+- Табы переименованы: **Серии / Охотники / Лентяи** (единые лейблы с `/leaderboards`).
+- Row — горизонтальный flex (`inline-flex`):
+  ```
+  [avatar] Имя | 1 дн. | 📅 1 · 🔥 0 · 🎯 0 · 😴 0
+  ```
+- Avatar: новый size `xs` = `h-7 w-7 text-[10px]` (mobile) → `sm:h-9 sm:w-9 sm:text-sm` (desktop).
+- `metricLabel(value)` — функция склонения:
+  - `streak` → `{value} дн.`
+  - `catches` → `{value} {раз|раза}` через `pluralRaz()` (1 раз / 2 раза / 5 раз).
+  - `shame` → `{value} штрафов`.
+- `border-l border-white/10` — вертикальные разделители между блоками.
+- `truncate min-w-0 flex-1` для имени — 「Дмитрий Иванов」обрезается до 「Дмитрий…」.
+- `text-[10px] sm:text-xs` для breakdown — мелче на mobile.
+- `whitespace-nowrap` — breakdown не переносится.
+- 🚔 (полиция) → **😴** (лентяй) в breakdown.
+
+**Реализованные файлы:**
+- `apps/backend/app/api/v1/leaderboard.py` — endpoint `GET /leaderboard/{tab}/clubs`, Pydantic-модели.
+- `apps/frontend/src/shared/types/index.ts` — `LeaderboardClub`, `LeaderboardClubsResponse`, `LeaderboardTabId`.
+- `apps/frontend/src/shared/api/index.ts` — `leaderboardApi.clubs(tab)`.
+- `apps/frontend/src/shared/hooks/index.ts` — `useLeaderboardClubs(tab)`, re-export `LeaderboardTab` из `@/shared/types`.
+- `apps/frontend/src/shared/ui/Avatar.tsx` — size `xs` (responsive).
+- `apps/frontend/src/pages/GlobalLeaderboard/GlobalLeaderboardPage.tsx` — полный rewrite.
+- `apps/frontend/src/pages/Leaderboard/LeaderboardPage.tsx` — tab через `?tab=`, row в одну строку, `pluralRaz`, 😴.
+
+**Тесты:** 209 backend passed, tsc/eslint clean, ручная проверка на проде (3 таба: `Серии`/`Охотники`/`Лентяи`, 3 клуба в каждом, переход `?tab=shame` открывает таб Лентяи).
+
+**Деплой:** backend + frontend, без миграций. Юзер перезагрузил Telegram Mini App — увидел новый UI.
+
+### 7.7 Bot: подтверждение ловли с предпросмотром нарушителя — S — TODO
+
+**Цель:** когда юзер нажимает «Спалить» в Mini App, бот подтверждает в Telegram: «Точно спалить [@name]? У него X чек-инов, Y штрафов.» с кнопками `Да` / `Нет`. Сейчас бот только «Принято», без подтверждения.
+
+**План:** перенести логику catch из Mini App в Telegram (long-poll webhook callback на inline-кнопках).
+| Шаг | Файл | Что |
+|---|---|---|
+| Bot | `apps/bot/bot/handlers/catch.py` | Inline-кнопки `callback_data="catch:yes:{membership_id}"` |
+| Bot | `apps/bot/bot/handlers/catch.py` | Подтверждение `confirm_catch`, вызов `/internal/penalties/catch` |
+| Frontend | `apps/frontend/src/pages/Members/MembersPage.tsx` | Убрать кнопку «Спалить», заменить на deep-link в Telegram с предзаполненным habit_id |
+
+**Оценка:** ~2 часа.
+
 ## 8. Готовые коммиты (сессия 2026-07-23)
 
 | SHA | Сообщение |
@@ -220,10 +291,16 @@
 | `9b0eb4a` | test(worker): populate proof_types in add_habit fixture (migration 012 regression) |
 | `02b949f` | fix(worker): skip new members in close_catch_window (PR №7.3) |
 | `3a40b31` | feat(frontend+backend): mock deposit topup (PR №7.2) |
-| `8f389e1` | feat(backend+worker+frontend): user photos in leaderboard (PR №7.1, approach C') |
-| `7a9eefd` | feat(backend+worker+nginx): avatars via disk cache + nginx try_files (PR №7.1 v3, approach D) |
+| `8f389e1` | feat(backend+worker+frontend): user photos in leaderboard (PR §7.1, approach C') |
+| `7a9eefd` | feat(backend+worker+nginx): avatars via disk cache + nginx try_files (PR §7.1 v3, approach D) |
+| `b682163` | fix(nginx): avatars — убрать try_files в alias location |
+| `06bbdb4` | docs(Pravki)+infra: утилита вставки avatar location + уточнение подхода D |
+| `62d01d7` | perf(avatars): server-side resize 640→160, public cache, decoding=async (PR §7.1 v3.1) |
+| `6a87fc2` | feat(frontend+backend): photos in Members, drop rank numbers, white border in leaderboard |
+| `fb55d91` | feat(backend+frontend): ребрендинг страницы 'Рейтинг' + единые лейблы табов (PR §7 v3.2) |
+| `ecadc2b` | feat(frontend): tab через ?tab=, row в одну строку, mobile avatar меньше, 😴 для Лентяев (PR §7 v3.2) |
 
-**Push:** все 13 коммитов запушены в `origin/feature/topic-scoped-checkin` (2026-07-24 10:30 UTC).
+**Push:** все коммиты запушены в `origin/feature/topic-scoped-checkin` (push 2026-07-26, сессия: ✅ подход D для аватарок + ребрендинг).
 
 ## 9. Решения пользователя
 
@@ -264,6 +341,8 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin feature/top
 | **7.5** Pre-validate кружка <3 сек (S) | ✅ | `de87272` |
 | **7.3** Guard «joined_at >= club_date» (M) | ✅ | `02b949f` |
 | **7.2** `/api/v1/payments/topup` (M) | ✅ | `3a40b31` |
-| **7.1** Фото участников в лидерборде (M) | ✅ | `8f389e1`, `7a9eefd` |
+| **7.1** Фото участников в лидерборде (M) | ✅ | `8f389e1`, `7a9eefd`, `b682163`, `62d01d7`, `6a87fc2` |
+| **7.6** Ребрендинг «Рейтинг» + row в одну строку (M, v3.2) | ✅ | `fb55d91`, `ecadc2b` |
+| **7.7** Подтверждение ловли с inline-кнопками (S) | 🔴 TODO | — |
 
-Все 5 задач закрыты. Проект готов к soft-launch по функционалу.
+Все задачи кроме 7.7 закрыты.

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
 from PIL import Image
 
 from worker.tasks.update_user_photos import AVATAR_SIZE_PX, _resize_jpeg
