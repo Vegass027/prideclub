@@ -1,7 +1,7 @@
 interface AvatarProps {
   src?: string | null;
   fallback: string;
-  size?: "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "lg";
   className?: string;
   glow?: boolean;
   /**
@@ -20,6 +20,10 @@ interface AvatarProps {
 }
 
 const SIZES: Record<NonNullable<AvatarProps["size"]>, string> = {
+  // xs: 28x28 на mobile, 36x36 на desktop (sm+). Используется в плотных
+  // списках (LeaderboardPage row) — чтобы вся инфа юзера влезла в одну
+  // строку на узких экранах.
+  xs: "h-7 w-7 text-[10px] sm:h-9 sm:w-9 sm:text-sm",
   sm: "h-9 w-9 text-sm",
   md: "h-12 w-12 text-base",
   lg: "h-14 w-14 text-2xl",

@@ -132,7 +132,9 @@ function AccordionContent({ id }: { id: LeaderboardTab }) {
         <ClubListItem
           key={club.habit_id}
           club={club}
-          onClick={() => navigate(`/habits/${club.habit_id}/leaderboard`)}
+          onClick={() =>
+            navigate(`/habits/${club.habit_id}/leaderboard?tab=${id}`)
+          }
         />
       ))}
     </ul>
