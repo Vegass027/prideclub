@@ -19,8 +19,10 @@ class Settings(BaseSettings):
     bot_token: str = Field(default="")
     webhook_secret: str = Field(default="")
     service_secret: str = Field(default="")
+    sse_token_secret: str = Field(default="")
     init_data_max_age_seconds: int = 86400
     service_token_ttl_seconds: int = 60
+    sse_token_ttl_seconds: int = 60
     cors_allowed_origins: str = "https://web.telegram.org"
 
     database_url: str

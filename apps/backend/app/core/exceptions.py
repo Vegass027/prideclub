@@ -52,6 +52,29 @@ class MembershipNotActiveError(DomainError):
     code = "membership_not_active"
 
 
+class SseStreamForbiddenError(DomainError):
+    """403 при выдаче SSE-токена для не-члена клуба.
+
+    Отдельное исключение вместо MembershipNotActiveError (который 400) —
+    семантика другая: не "плохой запрос", а "не имеешь права на этот ресурс".
+    code = "membership_not_active" оставлен для совместимости клиентской логики.
+    """
+
+    status_code = 403
+    code = "membership_not_active"
+
+
+class SseNotConfiguredError(DomainError):
+    """503: SSE_TOKEN_SECRET не задан в env на сервере.
+
+    Ops-проблема (мисконфиг), не баг юзера. Не 500, чтобы клиент не
+    делал бессмысленных retry — пусть покажет "обновите позже".
+    """
+
+    status_code = 503
+    code = "sse_not_configured"
+
+
 class HabitNotFoundError(DomainError):
     status_code = 404
     code = "habit_not_found"
