@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
-from typing import Iterable
+from collections.abc import Iterable
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -10,11 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import SeasonStatus, TransactionType
 from app.core.logging import get_logger
-from app.models.auxiliary import SeasonPrizeRule
 from app.models.habit import Habit
 from app.models.season import Season, SeasonStats
 from app.models.transaction import Transaction
-
 
 # Basis points: 10000 = 100.00%. Допускает доли процента до 0.01%.
 # Все money-арифметики с процентами — только int, никакого float (см. AGENTS.md).
@@ -78,7 +75,11 @@ class SeasonService:
         if season_obj.status != SeasonStatus.ACTIVE:
             return {"distributed": 0}
 
-        rules = season_obj.prize_rules_snapshot.get("rules", []) if season_obj.prize_rules_snapshot else []
+        rules = (
+            season_obj.prize_rules_snapshot.get("rules", [])
+            if season_obj.prize_rules_snapshot
+            else []
+        )
         validate_prize_rules(rules)
 
         distributed = 0

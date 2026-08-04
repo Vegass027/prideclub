@@ -22,11 +22,14 @@ export interface Habit {
   penalty_amount: number;
   price_month: number;
   proof_type: ProofType;
+  proof_types: ProofType[];
   prize_pool: number;
   members_count: number;
   is_active: boolean;
   photo_url: string | null;
   telegram_invite_link: string | null;
+  checkin_topic_thread_id: number | null;
+  chat_topic_thread_id: number | null;
 }
 
 export interface Membership {
@@ -42,7 +45,10 @@ export interface Membership {
 
 export interface CheckinStatusOut {
   status: CheckinStatus;
+  checkin_count: number;
   streak_days: number;
+  penalties_count: number;
+  penalties_total: number;
   deadline_at: string | null;
 }
 
@@ -58,8 +64,10 @@ export interface MemberRow {
   first_name: string;
   username: string | null;
   status: CheckinStatus;
-  streak_days: number;
+  checkin_count: number;
   can_catch: boolean;
+  /** Relative path /api/v1/users/{id}/photo (Pravki §7.1 v3.1). NULL = no avatar. */
+  photo_url: string | null;
 }
 
 export interface MembersResponse {
@@ -95,16 +103,44 @@ export interface BalanceResponse {
   history: Transaction[];
 }
 
+export interface TopupResponse {
+  ok: boolean;
+  transaction_id?: string;
+  new_deposit_balance?: number;
+  code?: string;
+}
+
+export interface LeaderboardBreakdown {
+  /** Total done чекинов за всё время (sortable в табе "Серии"). */
+  checkin_count: number;
+  /** Consecutive streak от today (0 если сегодня не отмечен). */
+  streak_days: number;
+  /** Сколько раз поймали как нарушителя (sortable в табе "Позор"). */
+  penalties_count: number;
+  /** Сколько раз сам поймал других (sortable в табе "Ловцы"). */
+  catches_count: number;
+}
+
 export interface LeaderboardEntry {
   rank: number;
   membership_id: string;
   first_name: string;
   metric_value: number;
+  breakdown: LeaderboardBreakdown;
+  // Относительный путь /api/v1/users/{id}/photo → backend делает 307 redirect
+  // на Telegram CDN. null = нет аватарки или cron не подтянул → инициалы.
+  photo_url: string | null;
 }
 
 export interface LeaderboardResponse {
   items: LeaderboardEntry[];
+  // Общее число юзеров с ненулевой метрикой до обрезки LEADERBOARD_LIMIT=100.
+  // None если обрезки не было (клуб < 100 или глобально < 100).
+  // UI: "Показаны топ-100 из N".
+  total: number | null;
 }
+
+export type LeaderboardTabId = "streak" | "catches" | "shame";
 
 export interface OverviewClub {
   habit_id: string;
@@ -113,8 +149,21 @@ export interface OverviewClub {
   top: LeaderboardEntry[];
 }
 
+/** Клуб в списке для глобального рейтинга (Pravki §7 v3.2). */
+export interface LeaderboardClub {
+  habit_id: string;
+  title: string;
+  members_count: number;
+}
+
+export interface LeaderboardClubsResponse {
+  tab: LeaderboardTabId;
+  metric_label: string;
+  clubs: LeaderboardClub[];
+}
+
 export interface LeaderboardOverviewResponse {
-  tab: "streak" | "catches" | "shame";
+  tab: LeaderboardTabId;
   metric_label: string;
   clubs: OverviewClub[];
 }

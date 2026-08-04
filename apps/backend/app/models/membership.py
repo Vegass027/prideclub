@@ -10,12 +10,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.constants import MembershipStatus
 from app.db.session import Base
 
-
 if TYPE_CHECKING:
-    from app.models.user import User
-    from app.models.habit import Habit
     from app.models.checkin import Checkin
+    from app.models.habit import Habit
     from app.models.penalty import Penalty
+    from app.models.user import User
 
 
 class Membership(Base):
@@ -35,7 +34,11 @@ class Membership(Base):
     )
 
     status: Mapped[MembershipStatus] = mapped_column(
-        Enum(MembershipStatus, name="membership_status", values_callable=lambda x: [e.value for e in x]),
+        Enum(
+            MembershipStatus,
+            name="membership_status",
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         default=MembershipStatus.ACTIVE,
         server_default=MembershipStatus.ACTIVE.value,
@@ -43,17 +46,19 @@ class Membership(Base):
 
     deposit_balance: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     bonus_points: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    auto_renew_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    auto_renew_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
     subscription_until: Mapped[date | None] = mapped_column(Date, nullable=True)
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    user: Mapped["User"] = relationship(back_populates="memberships")
-    habit: Mapped["Habit"] = relationship(back_populates="memberships")
-    checkins: Mapped[list["Checkin"]] = relationship(back_populates="membership")
-    penalties_received: Mapped[list["Penalty"]] = relationship(
+    user: Mapped[User] = relationship(back_populates="memberships")
+    habit: Mapped[Habit] = relationship(back_populates="memberships")
+    checkins: Mapped[list[Checkin]] = relationship(back_populates="membership")
+    penalties_received: Mapped[list[Penalty]] = relationship(
         back_populates="membership",
         foreign_keys="Penalty.membership_id",
     )

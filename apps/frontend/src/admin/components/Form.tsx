@@ -232,3 +232,71 @@ export function RadioGroup({ options, value, onChange, name }: RadioGroupProps) 
     </div>
   );
 }
+
+interface CheckboxGroupProps {
+  options: Option[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  name: string;
+  min?: number;
+  max?: number;
+}
+
+export function CheckboxGroup({
+  options,
+  value,
+  onChange,
+  name,
+  min = 1,
+  max = 3,
+}: CheckboxGroupProps) {
+  const selected = new Set(value);
+  const toggle = (optValue: string) => {
+    const next = new Set(selected);
+    if (next.has(optValue)) {
+      // Нельзя снять если это последний выбранный (минимум 1).
+      if (next.size <= min) return;
+      next.delete(optValue);
+    } else {
+      // Нельзя добавить если уже достигли максимума.
+      if (next.size >= max) return;
+      next.add(optValue);
+    }
+    onChange(Array.from(next));
+  };
+
+  return (
+    <div className="flex flex-wrap gap-2" role="group" aria-label={name}>
+      {options.map((opt) => {
+        const active = selected.has(opt.value);
+        const disabled =
+          (!active && selected.size >= max) || (active && selected.size <= min);
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="checkbox"
+            aria-checked={active}
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
+            onClick={() => toggle(opt.value)}
+            className={`min-h-[36px] rounded-card border px-3 py-1.5 text-sm font-medium transition ${
+              active
+                ? "border-primary bg-primary/15 text-primary"
+                : disabled
+                  ? "cursor-not-allowed border-white/5 bg-surface/50 text-muted/50"
+                  : "border-white/10 bg-surface text-muted hover:border-white/20 hover:text-text"
+            }`}
+          >
+            <span className="mr-1.5">{active ? "✓" : "○"}</span>
+            {opt.label}
+          </button>
+        );
+      })}
+      {/* Сериализуем выбранные значения для HTML form submit (если будут). */}
+      {value.map((v) => (
+        <input key={v} type="hidden" name={name} value={v} />
+      ))}
+    </div>
+  );
+}

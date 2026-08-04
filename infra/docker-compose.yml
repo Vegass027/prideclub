@@ -21,11 +21,12 @@ x-backend-env: &backend-env
 x-bot-env: &bot-env
   BOT_TOKEN: ${BOT_TOKEN}
   WEBHOOK_SECRET: ${WEBHOOK_SECRET}
-  WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL}
+  WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:?must be set in prod (https://api.prideclub.fun)}
   WEBHOOK_PATH: ${WEBHOOK_PATH:-/bot/webhook}
-  WEBAPP_URL: ${WEBAPP_URL}
+  WEBAPP_URL: ${WEBAPP_URL:?must be set in prod (https://app.prideclub.fun)}
   BACKEND_URL: http://backend:8000
   SERVICE_SECRET: ${SERVICE_SECRET}
+  ENVIRONMENT: ${ENVIRONMENT:-production}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
 x-worker-env: &worker-env
@@ -38,6 +39,7 @@ x-worker-env: &worker-env
   BOT_TOKEN: ${BOT_TOKEN}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   SENTRY_DSN: ${SENTRY_DSN:-}
+  STATIC_DIR: /app/static
 
 services:
   postgres:
@@ -135,6 +137,10 @@ services:
     cpus: 1.0
     environment:
       <<: *worker-env
+    volumes:
+      # Локальный кеш аватарок (Pravki.md §7.1 v3, подход D).
+      # Worker скачивает JPEG сюда, backend/nginx отдают.
+      - club_uploads:/app/static
     depends_on:
       postgres:
         condition: service_healthy

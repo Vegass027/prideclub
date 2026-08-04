@@ -9,7 +9,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
 
-
 if TYPE_CHECKING:
     from app.models.user import User
 
@@ -39,4 +38,4 @@ class Transaction(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    user: Mapped["User"] = relationship(back_populates="transactions")
+    user: Mapped[User] = relationship(back_populates="transactions")

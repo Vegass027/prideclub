@@ -11,8 +11,6 @@ import os
 
 import aiohttp
 
-from packages.shared.security import generate_service_token  # type: ignore[import-not-found]
-
 
 async def register() -> None:
     token = os.environ["BOT_TOKEN"]

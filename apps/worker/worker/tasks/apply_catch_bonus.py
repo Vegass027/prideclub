@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+
+from db.session import async_session_factory  # type: ignore[import-not-found]
 
 from app.core.logging import get_logger
 from app.repositories.bonus_rule_repository import BonusRuleRepository
@@ -13,7 +14,6 @@ from app.services.bonus_service import BonusService
 
 async def _process(payload: dict, *, session_factory=None) -> dict:
     log = get_logger("worker.bonus")
-    from db.session import async_session_factory  # type: ignore[import-not-found]
 
     factory = session_factory if session_factory is not None else async_session_factory
 

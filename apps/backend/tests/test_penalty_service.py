@@ -145,7 +145,7 @@ async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
         suspicious_repo=FakeSuspiciousPairsRepository(),
     )
 
-    with pytest.raises(PenaltyAlreadyProcessedError) as exc:
+    with pytest.raises(PenaltyAlreadyProcessedError):
         await service.apply_catch(
             catcher_user_id=2,
             violator_membership_id=str(violator.id),

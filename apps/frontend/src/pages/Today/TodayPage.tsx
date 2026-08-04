@@ -1,5 +1,5 @@
-import { useNavigate, useParams } from "react-router-dom";
-import { useMyHabits, useToday } from "@/shared/hooks";
+import { useParams } from "react-router-dom";
+import { useToday, useTodayStream } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
@@ -10,8 +10,12 @@ import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
+import { openCheckinTopic, openChatRoot } from "@/shared/telegram/topicLink";
+import type { ProofType } from "@/shared/types";
 
-const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string }> = {
+type ProofCfg = { emoji: string; title: string; hint: string };
+
+const PROOF_LABELS: Record<ProofType, ProofCfg> = {
   video_note: {
     emoji: "🎥",
     title: "Видео-кружочек",
@@ -29,13 +33,45 @@ const PROOF_LABELS: Record<string, { emoji: string; title: string; hint: string 
   },
 };
 
+function resolveProofTypes(habit: { proof_types: ProofType[]; proof_type: ProofType }): ProofType[] {
+  if (habit.proof_types.length > 0) return habit.proof_types;
+  return [habit.proof_type];
+}
+
+function Stat({
+  label,
+  value,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: number | string;
+  icon: string;
+  tone: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-lg" aria-hidden="true">{icon}</span>
+      <div className="flex flex-col leading-tight">
+        <span className={`text-base font-bold tabular-nums ${tone}`}>{value}</span>
+        <span className="text-xs text-muted">{label}</span>
+      </div>
+    </div>
+  );
+}
+
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
+
+  // Real-time: держим ["today", habitId] в кэше актуальным через SSE
+  // (Step 6, `feature/topic-scoped-checkin`). useToday даёт первый снимок
+  // при загрузке, useTodayStream — обновления по checkin.accepted/rejected
+  // без polling, без ручного refetch, без лишнего GET на каждый mount.
+  // React Query сам управляет stale-инвалидацией через staleTime: 30_000
+  // в useToday; mount-форс-инвалидейт был избыточным — на масштабе 1000+
+  // юзеров это конкретная лишняя нагрузка на backend.
+  useTodayStream(habitId);
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -50,12 +86,7 @@ export function TodayPage() {
   if (isLoading) {
     return (
       <ScreenLayout>
-        <PageHeader
-          title="Сегодня"
-          back
-          backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
-        />
+        <PageHeader title="Сегодня" back backTo="/profile" />
         <Skeleton className="h-24 w-full" />
         <div className="mt-4">
           <Skeleton className="h-40 w-full" />
@@ -68,12 +99,7 @@ export function TodayPage() {
   if (isError || !data) {
     return (
       <ScreenLayout>
-        <PageHeader
-          title="Сегодня"
-          back
-          backTo={backTo}
-          right={showSwitcher ? <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button> : undefined}
-        />
+        <PageHeader title="Сегодня" back backTo="/profile" />
         <EmptyState
           icon="⚠️"
           title="Не удалось загрузить статус"
@@ -86,29 +112,17 @@ export function TodayPage() {
   }
 
   const { habit, membership, checkin } = data;
-  const proofCfg = PROOF_LABELS[habit.proof_type] ?? PROOF_LABELS.text;
+  const allowedProofTypes = resolveProofTypes(habit);
+  const singleProof = allowedProofTypes.length === 1;
+  const primaryCfg: ProofCfg =
+    PROOF_LABELS[allowedProofTypes[0]] ?? PROOF_LABELS.text;
 
   return (
     <ScreenLayout>
       <PageHeader
-        title={habit.title}
-        subtitle={habit.timezone}
+        title={`〖${habit.title}〗`}
         back
-        backTo={backTo}
-        right={
-          <div className="flex items-center gap-2">
-            <StatusBadge status={checkin.status} />
-            {showSwitcher && (
-              <button
-                onClick={() => navigate("/my-habits")}
-                className="text-xs text-primary"
-                aria-label="Сменить клуб"
-              >
-                Сменить
-              </button>
-            )}
-          </div>
-        }
+        backTo="/profile"
       />
 
       {habit.description && (
@@ -118,40 +132,177 @@ export function TodayPage() {
       )}
 
       {habit.photo_url ? (
-        <img
-          src={habit.photo_url}
-          alt={habit.title}
-          className="mb-3 block w-full max-h-56 rounded-card border border-white/5 object-cover"
-          loading="lazy"
-        />
+        <div className="mb-3 flex items-center justify-center rounded-card border border-white/5 bg-canvas/60 p-2">
+          <img
+            src={habit.photo_url}
+            alt={habit.title}
+            className="block max-h-72 w-full object-contain"
+            loading="lazy"
+          />
+        </div>
       ) : null}
 
       <section className="rounded-card border border-white/5 bg-surface p-4 shadow-card">
-        <div className="mb-3 flex items-baseline justify-between">
-          <h2 className="text-2xl font-bold text-text">
-            {checkin.streak_days} <span className="text-base font-normal text-muted">дн. подряд</span>
-          </h2>
-          <span className="text-xs text-muted">
-            Депозит: <strong className="text-text">{formatKopecks(membership.deposit_balance)}</strong>
-          </span>
+        <div className="mb-3 grid grid-cols-2 gap-3">
+          <Stat
+            label="дн. всего"
+            value={checkin.checkin_count}
+            icon="📅"
+            tone="text-text"
+          />
+          <Stat
+            label="дн. подряд"
+            value={checkin.streak_days}
+            icon="🔥"
+            tone={checkin.streak_days > 0 ? "text-text" : "text-muted"}
+          />
+          <Stat
+            label="пойман"
+            value={checkin.penalties_count}
+            icon="🎯"
+            tone={checkin.penalties_count > 0 ? "text-red-400" : "text-muted"}
+          />
+          <Stat
+            label="потерял"
+            value={`${(checkin.penalties_total / 100).toFixed(0)} ₽`}
+            icon="💸"
+            tone={checkin.penalties_total > 0 ? "text-red-400" : "text-muted"}
+          />
         </div>
         <p className="text-sm text-muted">
-          Окно чек-ина: <strong className="text-text">{habit.checkin_window_start}–{habit.checkin_window_end}</strong>
+          Окно чек-ина: <strong className="text-text">{habit.checkin_window_start.slice(0, 5)}–{habit.checkin_window_end.slice(0, 5)}</strong>
         </p>
+        <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3">
+          <span className="text-sm text-muted">Ежедневное задание:</span>
+          <StatusBadge status={checkin.status} />
+        </div>
       </section>
 
       <section className="mt-4 rounded-card border-2 border-primary/30 bg-primary/5 p-4">
         <div className="mb-2 flex items-center gap-3">
           <span className="text-3xl" aria-hidden="true">
-            {proofCfg.emoji}
+            {singleProof ? primaryCfg.emoji : "🎯"}
           </span>
-          <h3 className="text-base font-semibold text-text">{proofCfg.title}</h3>
+          <h3 className="text-base font-semibold text-text">
+            {singleProof ? primaryCfg.title : "Чек-ин — любой из типов"}
+          </h3>
         </div>
-        <p className="mb-3 text-sm text-muted">{proofCfg.hint}</p>
-        <Button onClick={handleOpenChat} className="w-full">
-          Открыть чат клуба
-        </Button>
+        {singleProof ? (
+          <p className="mb-3 text-sm text-muted">{primaryCfg.hint}</p>
+        ) : (
+          <>
+            <p className="mb-3 text-sm text-muted">
+              Клуб принимает несколько типов подтверждений. Подходит любой:
+            </p>
+            <ul className="mb-3 space-y-2">
+              {allowedProofTypes.map((t) => {
+                const cfg = PROOF_LABELS[t] ?? PROOF_LABELS.text;
+                return (
+                  <li key={t} className="flex items-start gap-2 text-sm">
+                    <span className="text-base" aria-hidden="true">
+                      {cfg.emoji}
+                    </span>
+                    <span>
+                      <strong className="text-text">{cfg.title}</strong>
+                      <span className="block text-xs text-muted">{cfg.hint}</span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+        <div className="flex flex-col gap-2">
+          {habit.checkin_topic_thread_id !== null ? (
+            <Button
+              onClick={() => {
+                hapticImpact("medium");
+                openCheckinTopic(habit.chat_id, habit.checkin_topic_thread_id);
+              }}
+              className="w-full"
+            >
+              🎬 Сделать чек-ин
+            </Button>
+          ) : (
+            <Button onClick={handleOpenChat} className="w-full">
+              Открыть чат клуба
+            </Button>
+          )}
+          {habit.chat_topic_thread_id !== null && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                hapticImpact("light");
+                openCheckinTopic(habit.chat_id, habit.chat_topic_thread_id);
+              }}
+              className="w-full"
+            >
+              💬 Перейти в чат
+            </Button>
+          )}
+        </div>
       </section>
+
+      {(habit.telegram_invite_link || habit.chat_id !== 0) && (
+        <section className="mt-4 rounded-card border border-white/10 bg-surface p-4">
+          {membership.status === "active" ? (
+            <>
+              <h3 className="mb-2 text-sm font-semibold text-text">
+                Клуб в Telegram
+              </h3>
+              <Button
+                disabled
+                aria-disabled="true"
+                className="w-full"
+              >
+                ❤️ Вы состоите в клубе
+              </Button>
+              <p className="mt-2 text-xs text-muted">
+                {habit.telegram_invite_link
+                  ? "Нажмите на ссылку ниже, чтобы перейти в группу."
+                  : "Группа клуба привязана к вашему чату."}
+              </p>
+              {habit.telegram_invite_link && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    hapticImpact("light");
+                    openChatRoot(
+                      habit.chat_id,
+                      habit.telegram_invite_link ?? null,
+                    );
+                  }}
+                  className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2 text-sm font-medium text-text transition hover:border-white/20"
+                >
+                  💬 Открыть группу
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <h3 className="mb-2 text-sm font-semibold text-text">
+                Клуб в Telegram
+              </h3>
+              <p className="mb-3 text-xs text-muted">
+                Чтобы бот принимал твои чек-ины и участники могли тебя
+                «поймать», нужно вступить в группу клуба в Telegram.
+              </p>
+              <Button
+                onClick={() => {
+                  hapticImpact("medium");
+                  openChatRoot(
+                    habit.chat_id,
+                    habit.telegram_invite_link ?? null,
+                  );
+                }}
+                className="w-full"
+              >
+                👋 Присоединиться к клубу
+              </Button>
+            </>
+          )}
+        </section>
+      )}
 
       <section className="mt-4 rounded-card border border-white/5 bg-surface p-4 text-sm text-muted">
         <h3 className="mb-2 text-sm font-semibold text-text">Что дальше</h3>

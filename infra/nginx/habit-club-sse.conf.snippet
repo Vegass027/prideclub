@@ -1,0 +1,72 @@
+# SSE: real-time stream чек-инов (Step 5, 2026-08-04)
+# ============================================================
+# Сниппет для буквального копирования в /etc/nginx/sites-enabled/habit-club
+# на прод-сервере 169.58.52.78.
+#
+# КУДА ВСТАВЛЯТЬ:
+#   Внутри server-блока `server_name app.prideclub.fun` — ПЕРЕД строкой
+#     location /api/ {
+#   Exact-match `=` имеет наивысший приоритет среди location-блоков
+#   (поиск прерывается сразу), поэтому визуальное положение не критично,
+#   но явное "перед" облегчает чтение конфига.
+#
+#   Аналогично (опционально) — в server-блок `server_name api.prideclub.fun`
+#   перед `location / {`, если в будущем SSE-клиент будет ходить напрямую
+#   через api.prideclub.fun вместо app.prideclub.fun. Сейчас EventSource
+#   идёт через app.prideclub.fun (apiClient.baseURL = "/api/v1" relative),
+#   поэтому ЭТОТ блок для api.prideclub.fun НЕ нужен в текущей итерации.
+#
+# ЗАЧЕМ ОТДЕЛЬНЫЙ БЛОК (короткий ликбез):
+#   - proxy_buffering off / proxy_cache off: nginx по умолчанию буферизует
+#     проксируемые ответы — SSE будет копиться минутами и отдаваться
+#     одним куском. Без off ничего не работает.
+#   - proxy_read_timeout 3600s: дефолт 60s рвёт долгое соединение раньше
+#     первого heartbeat (XREAD BLOCK 30000 в backend).
+#   - access_log off: SSE JWT-токен живёт в query (?token=...), TTL 60s —
+#     логировать access-log с токеном нельзя. POST /events/stream/token
+#     остаётся под обычным логированием (он не exact-match, попадёт в
+#     /api/ блок).
+#   - proxy_http_version 1.1 + Connection "" — обязательно для chunked
+#     transfer encoding в SSE.
+#   - add_header X-Accel-Buffering no — идиоматическая защита от
+#     sub-фильтров.
+#
+# БЕЗОПАСНОСТЬ:
+#   - Бэкенд уже enforce'ит авторизацию через JWT-токен в query
+#     (SSE_TOKEN_SECRET, HS256, TTL 60с, scope="sse:today"). nginx
+#     только проксирует.
+#   - Membership-check делается на этапе выдачи токена (POST /events/stream/token),
+#     см. apps/backend/app/api/v1/events.py.
+#
+# ПРИМЕНЕНИЕ:
+#   1. ssh privichki-prod
+#   2. sudo cp /etc/nginx/sites-enabled/habit-club \
+#         /etc/nginx/sites-enabled/habit-club.bak.$(date +%Y%m%d)
+#   3. Открыть /etc/nginx/sites-enabled/habit-club в редакторе
+#   4. Вставить блок ниже в server { server_name app.prideclub.fun ... }
+#      перед существующим location /api/ { ... }
+#   5. nginx -t   # проверка синтаксиса — ОБЯЗАТЕЛЬНО перед reload
+#   6. nginx -s reload
+#   7. Проверить: curl -sI https://app.prideclub.fun/api/v1/events/stream
+#      → 401 (попадает под /api/ блок без токена — OK, проверяем именно
+#      что location вообще существует).
+#      Реальный тест SSE — из Telegram Mini App или
+#      curl -N "https://app.prideclub.fun/api/v1/events/stream?token=...&habit_id=..."
+# ============================================================
+
+location = /api/v1/events/stream {
+    proxy_pass http://habit_backend;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_connect_timeout 60s;
+    proxy_set_header Connection '';
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    add_header X-Accel-Buffering no;
+    access_log off;
+}

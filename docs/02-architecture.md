@@ -1,7 +1,10 @@
 # 02 — Архитектура
 
-> Snapshot от 2026-07-22. Описывает **реально работающую** систему. Концептуальные
-> разделы (принципы, потоки) сохранены — они не изменились, только уточнены детали.
+> Snapshot от 2026-07-22 (обновлено 2026-08-04 после Step 5 SSE nginx). Описывает
+> **реально работающую** систему. Концептуальные разделы (принципы, потоки)
+> сохранены — они не изменились, только уточнены детали. Раздел §9 «Известные
+> проблемы и долги» актуализирован: добавлена запись про SSE-step5-nginx
+> применён, но Steps 1-4 на проде не задеплоены.
 
 ## 1. Принципы
 
@@ -178,16 +181,21 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 
 ## 4. Поток обработки чек-ина
 
-1. Пользователь отправляет кружок в чат клуба.
+1. Пользователь отправляет кружок в чат клуба (или в топик форума, если
+   `checkin_topic_thread_id` задан — см. §10).
 2. Telegram отправляет webhook-событие на Bot Gateway
    (`https://api.prideclub.fun/bot/webhook`).
-3. Bot Gateway валидирует базовые параметры (chat_id, тип сообщения, membership
-   пользователя, попадание в `checkin_window`, медиа — `proof_validator.py`)
-   и **сам НЕ кладёт в Redis** — шлёт `POST /internal/checkins/process` на backend.
+3. Bot Gateway валидирует базовые параметры (chat_id, `message_thread_id`, тип
+   сообщения, membership пользователя, попадание в `checkin_window`, медиа —
+   `proof_validator.py`) и шлёт `POST /internal/checkins/process` на backend с
+   `message_thread_id` в payload.
 4. Backend (handler `internal_checkins.py`) кладёт задачу в Celery через
    `send_task("checkin", payload={...})` (`services/celery_producer.py`).
 5. Worker (`worker.tasks.process_checkin.run`) забирает задачу:
    - берёт `membership` под `SELECT ... FOR UPDATE`;
+   - **топик-фильтр**: если `habit.checkin_topic_thread_id` задан и
+     `message_thread_id != checkin_topic_thread_id`, бросает
+     `CheckinWrongTopicError` → HTTP 422, без побочных эффектов;
    - валидирует медиа (тип, длительность, **отклоняет forwarded**);
    - пишет строку в `checkins` со статусом `done` (уникальный индекс
      `(membership_id, date)` — один чек-ин в сутки);
@@ -279,7 +287,9 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | CI/CD | GitHub Actions (lint + test) + Dependabot | — |
 | Резервные копии | `backup_cron.sh` готов, **не развёрнут** (нет aws CLI, нет S3 env) | — |
 
-## 9. Известные проблемы и долги (snapshot 2026-07-22)
+## 9. Известные проблемы и долги (snapshot 2026-07-23)
+
+> Обновлено 2026-07-23 после закрытия задачи topic-scoped check-in.
 
 | Что | Где | Статус |
 |---|---|---|
@@ -287,9 +297,291 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | Контракт `chat_id` vs `habit_id` | `internal_payments.py` ↔ `bot/handlers/payments.py` | Сломано, требует фикса перед включением платежей |
 | `SENTRY_DSN` пуст | `.env` | Sentry no-op |
 | Бэкапы не развёрнуты | `infra/backup/`, `.env` | Сценарий в плане, не выполнен |
-| Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker |
-| Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет |
+| Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker (warning не блокирует) |
+| Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет деплой (см. §12 ниже) |
 | Server в Германии | `169.58.52.78` (Contabo) | ФЗ-152 под риском; миграция в Selectel — план |
-| `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов, сегодня) vs `SELECT count(*) FROM habits` | Clubs не созданы, POST /admin/v1/habits не отрабатывал — расследовать |
+| `habits` = 0 в БД при наличии аплоадов | `uploads/club_photos/` (9 файлов) vs `SELECT count(*) FROM habits` | **Исправлено** — клубы созданы через admin API; 2 клуба в проде (`Планка`, `Пробежка`) |
 | `SERVICE_TOKEN_TTL_SECONDS=60`, `INIT_DATA_MAX_AGE_SECONDS=86400` | `.env` | Стандартно, см. `core/constants.py` |
 | Admin Mini App `OWNER_TELEGRAM_ID=0` по умолчанию | `docker-compose.yml` | Без явного ID в env owner-gate пускает никого — правильно. |
+
+### 9.1. Закрытые проблемы (snapshot 2026-07-23)
+
+| Что | Где | Фикс |
+|---|---|---|
+| Bot webhook SSL error → pending_update_count растёт | `bot/main.py`, `infra/.env` | `WEBHOOK_BASE_URL=https://169.58.52.78` → `https://api.prideclub.fun`; fail-fast в проде через `_validate_webhook_url` |
+| Worker `NameError: CheckinWrongTopicError is not defined` → молчаливый retry-loop | `apps/worker/worker/tasks/process_checkin.py:99` | Добавлен импорт в `from app.core.exceptions import ...` |
+| Mini App `status=pending` не обновляется после кружка | топик-фильтр + worker | `forward_to_thread_id` корректно резолвится через `message_thread_id` от Telegram |
+| PATCH `/admin/v1/habits/{id}` не сохранял price_month | `apps/frontend/src/admin/pages/HabitEditForm.tsx` | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks`; типы `AdminHabitUpdatePayload` расширены |
+| Backend ForwardRef('Response') "class not fully defined" | `apps/backend/app/core/middleware.py` | Убран `from __future__ import annotations` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
+
+### 9.2. Закрытые проблемы (snapshot 2026-08-04 — post-mortem: «бот молчит, чек-ины не доходят»)
+
+| Что | Где | Фикс |
+|---|---|---|
+| `WEBHOOK_BASE_URL` и `WEBAPP_URL` указывали на сырой IP `169.58.52.78` в `/app/infra/.env` (а не на домен) → Telegram не мог доставить апдейты (SSL handshake fail) → `pending_update_count: 2` копилось бесконечно | `infra/docker-compose.yml` (через `${WEBHOOK_BASE_URL}` подстановку из `/app/infra/.env`) + `bot/main.py:111` | (1) Поправил `/app/infra/.env` на проде: `WEBHOOK_BASE_URL=https://api.prideclub.fun`, `WEBAPP_URL=https://app.prideclub.fun`; (2) Добавил `ENVIRONMENT: ${ENVIRONMENT:-production}` в `x-bot-env` anchor — теперь `bot/main.py:_validate_webhook_url` срабатывает на проде; (3) Использовал `${WEBHOOK_BASE_URL:?must be set in prod}` и `${WEBAPP_URL:?must be set in prod}` — пустое значение теперь роняет `docker compose up` ещё до старта контейнера; (4) После правки — `docker compose up -d bot`, Telegram доставил 2 зависших апдейта, чек-ины пошли |
+| Worker `CheckinService.__init__() missing 1 required positional argument: 'penalty_repo'` → молчаливый `ok=False, err=...` (Task succeeded per Celery, но в БД ничего) | `apps/worker/worker/tasks/process_checkin.py:62-68` | Добавлен `penalty_repo=PenaltyRepository(session)` (как в `apps/backend/app/api/v1/habits.py:42-49`). Причина бага: в `CheckinService.__init__` добавили `penalty_repo` для `get_today_status` (для `TodayStats.penalties_count/total`), но забыли обновить worker. **Скрытый анти-паттерн:** `process_checkin._process()` имеет `except Exception` catch-all, который глотает любую ошибку инстанцирования и возвращает `{"ok": False, "err": "..."}` — это маскирует баги в DI. Не блокирует (это вне scope этого фикса), но в backlog |
+
+**Урок для будущих агентов:**
+
+1. На сервере ДВА `.env`-файла, не один:
+   - `/app/.env` — монтируется в backend-контейнер (читается приложением).
+   - `/app/infra/.env` — читается `docker-compose` для `${VAR}` подстановки.
+   - **`WEBHOOK_BASE_URL`, `WEBAPP_URL`** — переменные для `docker-compose`, живут в `/app/infra/.env`. Правка `/app/.env` не помогает.
+2. После правки `WEBHOOK_BASE_URL`/`WEBAPP_URL` — перезапустить **только** `habit-bot`: `ssh privichki-prod 'cd /app/infra && docker compose up -d bot'`. **Не делать `docker compose down`** — это гасит весь стек.
+3. При добавлении новых обязательных параметров в DI-конструктор сервиса (`CheckinService`, `PenaltyService`, и т.д.) — синхронно обновить **все** call-сайты: backend API DI (`apps/backend/app/api/v1/*.py`), worker таски (`apps/worker/worker/tasks/*.py`), admin endpoint DI. Перед merge — `rg "ServiceName\\("` по всему проекту.
+4. Worker-таски имеют `except Exception` catch-all, который **маскирует баги DI** как `ok=False`. Если в логах видишь `worker_checkin_failed` с `err='CheckinService.__init__() ...'`, НЕ игнорируй — это серьёзный баг.
+
+### 9.3. SSE через Redis Streams — текущая ситуация (snapshot 2026-08-04)
+
+> Полный план — `sse+redis.md`. Шаги 1-4 (backend SSE endpoint, middleware bypass,
+> worker event_publisher, XREAD pipeline + async-Redis singleton) реализованы в
+> ветке `feature/topic-scoped-checkin` и **защищены 89 тестами** (67 backend + 22 worker).
+
+| Что | Где | Статус |
+|---|---|---|
+| **Step 5: nginx `location = /api/v1/events/stream`** | `infra/nginx/nginx.prideclub.conf:97-112`, `nginx.prod.conf:79-99`, `infra/nginx/habit-club-sse.conf.snippet` | ✅ Применено на проде `2026-08-04` (commit `900ef4f`). `nginx -t` ОК. Debug-тест с `return 418` подтвердил exact-match. Бэкап `/var/backups/nginx/habit-club.bak.20260804_1823`. |
+| **Steps 1-4 на проде** | `apps/backend/app/api/v1/events.py`, `core/middleware.py`, `worker/tasks/process_checkin.py` в контейнере `habit-backend` | ❌ **НЕ ЗАДЕПЛОЕНЫ**. Прод работает на `main` (`bd9fd76`). В контейнере `habit-backend` (образ `d2e8c35817ea93dece80377bbd3b6898d47cb01dbf934ec76f783557e8414c4b`) файл `apps/backend/app/api/v1/events.py` **отсутствует**, в `core/middleware.py` нет `SSE_AUTH_BYPASS_PATHS`, в env нет `SSE_TOKEN_SECRET`. Запрос `GET /api/v1/events/stream` через nginx → 401 `{"code":"missing_init_data"}` (initData-middleware отбивает, потому что bypass не сработал — его кода нет на проде). |
+| **Что нужно для работы SSE на проде** | `git` flow + деплой | 1) Merge `feature/topic-scoped-checkin` → `main` (явный "ок" пользователя, см. AGENT_BOOTSTRAP §6). 2) `git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit` + push. 3) Сгенерировать `SSE_TOKEN_SECRET`: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. 4) Добавить `SSE_TOKEN_SECRET` в `/app/.env` (НЕ в `/app/infra/.env` — он для compose, не для приложения). 5) rsync `apps/backend/` + `apps/worker/` → `/tmp/privichki_new/` → `/app/apps/{backend,worker}/` → `docker compose build backend worker --no-cache && docker compose up -d backend worker`. 6) Smoke-test через Mini App: открыть «Сегодня», отправить кружок в бота, убедиться что статус обновляется без ручного refetch. |
+| **nginx-блок при отсутствии backend-кода** | поведение для клиента | Идентично исходному: nginx проксирует → backend отвечает 401/404. Никаких регрессий. Блок становится активным автоматически после деплоя Steps 1-4 (без правок nginx). |
+| **Step 6: frontend `useTodayStream` + `TodayPage`** | `apps/frontend/src/shared/hooks/useTodayStream.ts`, `TodayPage.tsx` | ⏳ pending — после деплоя Steps 1-4. |
+
+---
+
+## 10. Topic-scoped чек-ины и уведомления (миграции 010, 011)
+
+> Реализовано 2026-07-23. Детальная схема — `docs/06-data-model.md` §6.
+
+### 10.1. Проблема
+
+Клубы живут в **супергруппах с включённым режимом форумов (топиков)**. Без
+фильтра участники могли отправлять кружки в любой топик, а бот принимал их все —
+это нарушает контракт «чек-ин только в одном месте». Также не было удобного
+места для публикации уведомлений о ловле — они шли в общий чат и смешивались
+с обсуждением.
+
+### 10.2. Решение
+
+Каждый клуб привязывается к **трём топикам** в одной супергруппе:
+
+1. **Топик чек-инов** (`habits.checkin_topic_thread_id`). Бот принимает только
+   сообщения из этого топика. Сообщения из General или других топиков → код
+   `not_checkin_topic` (HTTP 422), без записи в `checkins`.
+2. **Топик уведомлений** (`habits.notifications_topic_thread_id`). Сюда бот
+   публикует события ловли (`👨🏽‍🦰 X словил(а) 👨🏽‍🦰 Y, 💸 N ₽`) и штрафов за
+   пропуск (`⏰ Окно закрыто`). Топик обязателен для админа, но
+   технически может быть NULL (тогда уведомления идут в General).
+3. **Топик чата клуба** (`habits.chat_topic_thread_id`). Кнопка «💬 Перейти в чат»
+   в User Mini App открывает именно этот топик — отдельное место для переписки
+   участников, не пересекающееся с чек-инами и уведомлениями.
+
+### 10.3. Связь с антифродом
+
+Topic-scoped фильтр дополняет существующие антифрод-механизмы (`docs/06-data-model.md` §4):
+
+- Уникальный индекс `(membership_id, date)` по-прежнему гарантирует один чек-ин в день.
+- Forwarded-сообщения по-прежнему отклоняются (`proof_validator.py`).
+- Топик-фильтр не зависит от типа медиа — он работает по `message_thread_id`.
+
+### 10.4. Где меняется код
+
+| Слой | Файл | Что |
+|---|---|---|
+| Миграции | `apps/backend/alembic/versions/010_habit_topics.py`, `011_habit_chat_topic.py` | Колонки + partial btree |
+| Модель | `apps/backend/app/models/habit.py` | Поля `checkin_topic_thread_id`, `notifications_topic_thread_id`, `chat_topic_thread_id` |
+| Парсер | `apps/backend/app/core/telegram_links.py` | Нормализация `chat_id` из короткой формы ссылки в Bot API-форму |
+| Репозиторий | `apps/backend/app/repositories/habit_repository.py` | `get_by_chat_and_thread()` — для дедупликации топиков |
+| Сервис | `apps/backend/app/services/habit_service.py` | Валидация трёх топиков на create/update, `code=habit_topics_must_differ`, `code=habit_topic_duplicate` |
+| Сервис | `apps/backend/app/services/checkin_service.py` | Фильтр `message_thread_id`, `code=not_checkin_topic` |
+| Сервис | `apps/backend/app/services/notification_service.py` | Публикация в топик уведомлений через прямой Bot API |
+| Worker | `apps/worker/worker/tasks/process_checkin.py` | Прокидывает `message_thread_id` в сервис |
+| Worker | `apps/worker/worker/tasks/process_penalty.py` | После `commit()` шлёт `notification_service.notify_catch(...)` |
+| Worker | `apps/worker/worker/tasks/close_catch_window.py` | После `commit()` шлёт `notification_service.notify_window_closed(...)` |
+| Bot | `apps/bot/bot/handlers/checkin.py` | Прокидывает `message.message_thread_id` в payload |
+| Admin Mini App | `apps/frontend/src/admin/pages/HabitCreatePage.tsx`, `HabitEditForm.tsx` | Три поля для топик-ссылок + валидация |
+| User Mini App | `apps/frontend/src/shared/telegram/topicLink.ts` | `buildTopicLink(chat_id, thread_id)` отбрасывает `-100` префикс |
+| User Mini App | `apps/frontend/src/pages/MyHabits/MyHabitsPage.tsx` | Кнопки «Сделать чек-ин» / «Перейти в чат» на карточках |
+| User Mini App | `apps/frontend/src/pages/Today/TodayPage.tsx` | Кнопки + секция «Клуб в Telegram» |
+
+### 10.5. UX-инварианты
+
+- Доменная ссылка формируется как `https://t.me/c/<short_id>/<thread_id>`, не
+  `https://t.me/c/-100<short_id>/<thread_id>`. Telegram не принимает Bot API-форму
+  в URL, только короткую.
+- Кнопка «🎬 Сделать чек-ин» появляется только если `checkin_topic_thread_id` задан
+  и `chat_id != 0`. Иначе — fallback на «Открыть чат клуба».
+- Кнопка «💬 Перейти в чат» появляется только если `chat_topic_thread_id` задан.
+- Секция «Клуб в Telegram»: если `membership.status === "active"` — disabled-кнопка
+  «❤️ Вы состоите в клубе»; иначе — CTA «👋 Присоединиться к клубу».
+
+---
+
+## 11. Multi-proof_types — клуб принимает 1-3 типа чек-ина (миграция 012)
+
+> Реализовано 2026-07-23. Детальная схема — `docs/06-data-model.md` §3
+> (миграция 012) и §10 (anti-fraud rules).
+
+### 11.1. Проблема
+
+Раньше у клуба был ровно один `proof_type` (`video_note` | `photo` | `text`).
+Владелец не мог разрешить «кружок ИЛИ фото» — только одно из трёх.
+
+### 11.2. Решение
+
+- БД: `habits.proof_types JSONB NOT NULL` — массив из 1..3 строк ∈ enum.
+- `habits.proof_type` остаётся как **alias** `proof_types[0]` для обратной
+  совместимости со старыми клиентами.
+- Backend API `AdminHabitCreateRequest` / `AdminHabitUpdateRequest` принимают
+  `proof_types` (или устаревший `proof_type`, конвертируется в массив).
+- CheckinService проверяет `proof.proof_type.value in habit.proof_types`.
+- Admin Mini App: `CheckboxGroup` вместо `RadioGroup` (1..3 опции, минимум 1
+  обязателен).
+
+### 11.3. Обратная совместимость
+
+Миграция 012 бэкфиллит существующие строки:
+
+```sql
+UPDATE habits SET proof_types = jsonb_build_array(proof_type::text);
+```
+
+Существующие клубы (2 в проде) сохраняют `proof_types = ["video_note"]`.
+Чек-ины работают как раньше.
+
+### 11.4. Что НЕ менялось
+
+- Frontend User Mini App (PR плана №8 — отдельный коммит).
+- Bot pre-filter (PR плана №9 — отдельный коммит).
+- Миграция `012_proof_types.py` — append-only (правило §3.2
+  AGENT_BOOTSTRAP.md).
+
+---
+
+## 12. Force-update финансов (owner-only escape hatch)
+
+> Реализовано 2026-07-23. См. также `apps/backend/app/api/admin/v1/habits.py`
+> (`PATCH /admin/v1/habits/{id}/force-financials`) и `HabitService.force_update_financials`.
+
+### 12.1. Зачем
+
+По умолчанию `price_month` и `penalty_amount` были заморожены после первого
+вступления в клуб (финансовая целостность, ФЗ-152). Owner не мог поднять цену
+даже при объявлении участникам за неделю. Типичный use case — поднять цену с
+нового месяца.
+
+### 12.2. Решение
+
+Заморозка СНЯТА. Middleware `/admin/v1/*` уже гейтит доступ только owner'у —
+если вызов прошёл, это owner, доверяем.
+
+`PATCH /admin/v1/habits/{id}` теперь принимает `price_month` / `penalty_amount`
+без проверки `active_members_count`. Endpoint `/force-financials` оставлен
+для targeted-обновления только финансов (без пересохранения остальных полей).
+
+### 12.3. Семантика (важно для compliance)
+
+**Меняется**:
+- `habits.price_month` — применяется к новым подпискам.
+- `habits.penalty_amount` — применяется к будущим штрафам.
+
+**НЕ меняется** (никогда):
+- `users.deposit_balance` участников.
+- `memberships.subscription_until` (оплаченный период остаётся).
+- `memberships.auto_renew_enabled`.
+- `memberships.status` (никого не выгоняет).
+
+Уже оплаченные подписки продолжают действовать до конца оплаченного периода
+по старой цене. Новые подписки — по новой.
+
+### 12.4. Audit
+
+Каждое force-update логируется WARN с полным контекстом:
+`admin_id`, `habit_id`, `old_price_month`, `new_price_month`, etc.
+
+---
+
+## 13. Деплой фронтенда — двухслойный nginx
+
+> ⚠️ Усложнение для деплоя. Стандартный `docker compose build frontend`
+> не обновляет dist в nginx-контейнере (см. `infra/deploy.sh` step 4).
+>
+> **Решение для разработчика**: после rsync `apps/frontend/` в `/app/apps/frontend/`
+> на сервере:
+>
+> ```bash
+> docker run --rm -v /app/apps/frontend:/app -w /app node:20-alpine \
+>   sh -c "npm ci --silent && npm run build"
+> docker cp /app/apps/frontend/dist/. habit-frontend:/usr/share/nginx/html/
+> docker exec habit-frontend nginx -s reload
+> ```
+>
+> Хостовая `/usr/share/nginx/html/` и контейнерная — **разные папки**,
+> потому что nginx-образ сам по себе содержит HTML. Build в образе работает
+> только при изменении `Dockerfile`, не исходников.
+
+---
+
+## 14. Bot pre-filter по allowed_proof_types и дубликату (PR №9)
+
+### 14.1. Проблема
+
+Backend `POST /internal/checkins/process` сразу возвращает
+`{ok: True, task_id: ...}` после `send_task()` в Celery — не дожидаясь
+результата worker'а. Worker отвергает задачу асинхронно (например,
+`code: wrong_type` или `checkin_already_exists`), но **бот уже ответил
+юзеру «Принято, молодец»**. Юзер видит «✅ Принято» в топике, а в БД чек-ин
+не создан → UX-баг.
+
+### 14.2. Решение
+
+Бот **ПЕРЕД** отправкой в backend запрашивает
+`GET /internal/bot/habit_state?chat_id=...&user_id=...` (новый internal
+endpoint) и:
+- если `proof_types` не содержит тип сообщения → отвечает понятным
+  сообщением «в этом клубе принимается только X» и НЕ шлёт в backend;
+- если `already_checked_in=true` → отвечает «ты уже отметился сегодня» и
+  НЕ шлёт в backend;
+- если `state` недоступен (сеть/Redis) → fallback на старый путь;
+- если `habit` не найден → молча (как `habit_not_found`).
+
+### 14.3. Endpoint
+
+`GET /internal/bot/habit_state?chat_id=...&user_id=...`
+(`apps/backend/app/api/v1/internal_bot.py`):
+
+```python
+class HabitStateResponse(BaseModel):
+    found: bool
+    habit_id: str | None = None
+    proof_types: list[str] = []
+    checkin_topic_thread_id: int | None = None
+    already_checked_in: bool = False
+    checked_in_at: datetime | None = None
+```
+
+Auth: `X-Service-Token` (тот же JWT, что у остальных `/internal/*`).
+
+`already_checked_in` вычисляется по `habit.club_date(now_utc)` — клуб-local
+today, не UTC. Используется `CheckinRepository.get_for_date(membership_id,
+club_date)`.
+
+### 14.4. Где меняется код
+
+- `apps/backend/app/api/v1/internal_bot.py` — новый endpoint + Pydantic
+  модель.
+- `apps/backend/tests/test_internal_habit_state.py` — 7 unit-тестов.
+- `apps/bot/bot/services/api_client.py` — `get_habit_state(chat_id, user_id)`
+  + поддержка `params` в `get()`.
+- `apps/bot/bot/handlers/checkin.py` — новый `_prefilter()` +
+  `_detect_proof_type()`. Вызывается ДО `backend.post()`.
+- `apps/bot/bot/handlers/checkin_texts.py` — `reject_wrong_type_single()`,
+  `reject_wrong_type_multi()`, `REJECT_UNSUPPORTED_TYPE`,
+  `REJECT_ALREADY_CHECKED_IN`.
+- `apps/bot/tests/test_checkin_handler.py` — 6 новых pre-filter тестов.
+
+### 14.5. UX-инварианты
+
+- Если у юзера уже есть чек-ин за сегодня → **любое** следующее сообщение
+  в топик чек-инов получает «уже отметился» (не пытаемся отвечать про тип).
+- Если тип не поддерживается → сообщение с эмодзи и списком разрешённых.
+- Если сообщение пришло в чат, к которому бот не привязан → молчим.
+

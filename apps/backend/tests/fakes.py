@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -47,6 +48,14 @@ class FakeHabitRepo:
     async def get_by_chat_id(self, chat_id: int) -> Habit | None:
         for h in self._store.values():
             if h.chat_id == chat_id:
+                return h
+        return None
+
+    async def get_by_chat_and_thread(
+        self, chat_id: int, message_thread_id: int
+    ) -> Habit | None:
+        for h in self._store.values():
+            if h.chat_id == chat_id and h.checkin_topic_thread_id == message_thread_id:
                 return h
         return None
 
@@ -112,8 +121,12 @@ class FakeHabitRepo:
             "prize_pool": 0,
             "is_active": False,
             "proof_type": ProofType.VIDEO_NOTE,
+            "proof_types": [ProofType.VIDEO_NOTE.value],
         }
         merged = {**defaults, **fields}
+        # Синхронизируем proof_type с первым из proof_types если нужно.
+        if "proof_types" in merged and merged["proof_types"]:
+            merged["proof_type"] = ProofType(merged["proof_types"][0])
         habit = Habit(**merged)
         self._store[str(habit.id)] = habit
         return habit
@@ -177,8 +190,13 @@ class FakeSuspiciousPairsRepository:
 
 
 def make_habit(
-    *, id: str | None = None, chat_id: int = 100, proof: ProofType = ProofType.VIDEO_NOTE
+    *,
+    id: str | None = None,
+    chat_id: int = 100,
+    proof: ProofType = ProofType.VIDEO_NOTE,
+    proof_types: list[str] | None = None,
 ) -> Habit:
+    pts = proof_types if proof_types is not None else [proof.value]
     return Habit(
         id=id or str(uuid4()),
         title="Test Habit",
@@ -190,6 +208,7 @@ def make_habit(
         price_month=1000,
         prize_pool=0,
         proof_type=proof,
+        proof_types=pts,
     )
 
 
@@ -293,6 +312,21 @@ class FakeCheckinRepo:
         self._store[(membership_id, on_date)] = c
         return c, True
 
+    async def count_done_for_memberships(
+        self, membership_ids: list[str]
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {mid: 0 for mid in membership_ids}
+        for (m_id, _d), c in self._store.items():
+            if c.status != CheckinStatus.DONE:
+                continue
+            if m_id in counts:
+                counts[m_id] += 1
+        return counts
+
+    async def count_done_for_membership(self, membership_id: str) -> int:
+        result = await self.count_done_for_memberships([membership_id])
+        return result.get(membership_id, 0)
+
 
 class FakeCache:
     def __init__(self) -> None:
@@ -302,11 +336,39 @@ class FakeCache:
         self.invalidated.append((habit_id, membership_id))
 
 
+class FakeAvatarService:
+    """Замена AvatarService для unit-тестов.
+
+    По умолчанию get_or_fetch_local_path возвращает None (404).
+    Тест может подложить fake JPEG-файл через `set_local_path` или
+    переопределить `get_or_fetch_local_path` напрямую.
+    """
+
+    def __init__(self) -> None:
+        self._local_paths: dict[int, Path] = {}
+
+    def set_local_path(self, user_id: int, path: Path) -> None:
+        self._local_paths[user_id] = path
+
+    async def get_or_fetch_local_path(
+        self, user_id: int, file_id: str | None
+    ) -> Path | None:
+        if not file_id:
+            return None
+        return self._local_paths.get(user_id)
+
+    async def get_cdn_url(
+        self, user_id: int, file_id: str | None
+    ) -> str | None:
+        return None
+
+
 class FakePenaltyRepo:
     """Замена PenaltyRepository для unit-тестов.
 
     Тест наполняет через `add()`; lookup `get(penalty_id)` возвращает
-    объект Penalty или None.
+    объект Penalty или None. totals_for_membership* считает по self._store
+    (имитирует реальную агрегацию).
     """
 
     def __init__(self) -> None:
@@ -317,6 +379,37 @@ class FakePenaltyRepo:
 
     async def get(self, penalty_id: str) -> Penalty | None:
         return self._store.get(penalty_id)
+
+    async def totals_for_memberships(
+        self,
+        membership_ids: list[str],
+        *,
+        as_violator: bool = True,
+    ) -> dict[str, tuple[int, int]]:
+        result: dict[str, tuple[int, int]] = {}
+        for mid in membership_ids:
+            cnt = 0
+            total = 0
+            for p in self._store.values():
+                if as_violator and str(p.membership_id) == mid:
+                    cnt += 1
+                    total += int(p.amount)
+                elif not as_violator and str(p.catcher_membership_id) == mid:
+                    cnt += 1
+                    total += int(p.amount)
+            result[mid] = (cnt, total)
+        return result
+
+    async def totals_for_membership(
+        self,
+        membership_id: str,
+        *,
+        as_violator: bool = True,
+    ) -> tuple[int, int]:
+        result = await self.totals_for_memberships(
+            [membership_id], as_violator=as_violator
+        )
+        return result.get(membership_id, (0, 0))
 
 
 class FakeBonusRuleRepo:

@@ -2,11 +2,13 @@ import { apiClient } from "@/shared/api/client";
 import type {
   BalanceResponse,
   CatchResponse,
+  LeaderboardClubsResponse,
   LeaderboardOverviewResponse,
   LeaderboardResponse,
   MarketplaceResponse,
   MembersResponse,
   TodayResponse,
+  TopupResponse,
 } from "@/shared/types";
 
 export const marketplaceApi = {
@@ -36,6 +38,8 @@ export const membersApi = {
 
 export const balanceApi = {
   get: () => apiClient.get<BalanceResponse>("/balance").then((r) => r.data),
+  topup: (payload: { habit_id: string; amount_kopecks: number }) =>
+    apiClient.post<TopupResponse>("/payments/topup", payload).then((r) => r.data),
 };
 
 export const leaderboardApi = {
@@ -58,6 +62,10 @@ export const leaderboardApi = {
   overview: (tab: "streak" | "catches" | "shame") =>
     apiClient
       .get<LeaderboardOverviewResponse>(`/leaderboard/${tab}/overview`)
+      .then((r) => r.data),
+  clubs: (tab: "streak" | "catches" | "shame") =>
+    apiClient
+      .get<LeaderboardClubsResponse>(`/leaderboard/${tab}/clubs`)
       .then((r) => r.data),
 };
 

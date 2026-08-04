@@ -11,8 +11,9 @@ export interface AdminHabit {
   checkin_window_end: string;
   timezone: string;
   penalty_amount: number;
-  price_month: number;
+price_month: number;
   proof_type: AdminHabitProofType;
+  proof_types: AdminHabitProofType[];
   prize_pool: number;
   is_active: boolean;
   photo_url: string | null;
@@ -23,6 +24,12 @@ export interface AdminHabit {
   stat_loss_per_miss: number;
   member_limit: number | null;
   curator_id: number | null;
+  checkin_topic_thread_id: number | null;
+  notifications_topic_thread_id: number | null;
+  chat_topic_thread_id: number | null;
+  checkin_topic_link: string | null;
+  notifications_topic_link: string | null;
+  chat_topic_link: string | null;
   archived_at: string | null;
   created_at: string;
   active_members_count: number;
@@ -93,13 +100,16 @@ export interface AdminHabitCreatePayload {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: AdminHabitProofType;
+  proof_types: AdminHabitProofType[];
   price_month: number;
   penalty_amount: number;
   stat_gain_per_checkin: number;
   stat_loss_per_miss: number;
   member_limit: number | null;
   curator_id: number | null;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
+  chat_topic_link?: string | null;
 }
 
 export interface AdminHabitUpdatePayload {
@@ -112,11 +122,16 @@ export interface AdminHabitUpdatePayload {
   checkin_window_start?: string;
   checkin_window_end?: string;
   timezone?: string;
-  proof_type?: AdminHabitProofType;
+  proof_types?: AdminHabitProofType[];
+  price_month?: number;
+  penalty_amount?: number;
   stat_gain_per_checkin?: number;
   stat_loss_per_miss?: number;
   member_limit?: number | null;
   chat_id?: number | null;
+  checkin_topic_link?: string;
+  notifications_topic_link?: string;
+  chat_topic_link?: string;
 }
 
 export const adminHabitsApi = {

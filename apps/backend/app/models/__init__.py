@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from app.models.user import User
-from app.models.habit import Habit
-from app.models.membership import Membership
-from app.models.checkin import Checkin
-from app.models.penalty import Penalty
-from app.models.transaction import Transaction
-from app.models.season import Season, SeasonStats
 from app.models.auxiliary import (
-    DailyStreakSnapshot,
-    SuspiciousPair,
     BonusRule,
-    SeasonPrizeRule,
-    PricingRule,
+    DailyStreakSnapshot,
     OfferVersion,
+    PricingRule,
+    SeasonPrizeRule,
+    SuspiciousPair,
     UserConsent,
 )
+from app.models.checkin import Checkin
+from app.models.habit import Habit
+from app.models.membership import Membership
+from app.models.penalty import Penalty
+from app.models.season import Season, SeasonStats
+from app.models.transaction import Transaction
+from app.models.user import User
 
 __all__ = [
     "User",

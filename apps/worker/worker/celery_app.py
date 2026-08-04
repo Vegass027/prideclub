@@ -44,6 +44,7 @@ celery_app = Celery(
         "worker.tasks.expire_bonus_points",
         "worker.tasks.close_season",
         "worker.tasks.integrity_check_bonus_transactions",
+        "worker.tasks.update_user_photos",
     ],
 )
 
@@ -76,5 +77,13 @@ celery_app.conf.beat_schedule = {
     "close_season_daily": {
         "task": "worker.tasks.close_season.run",
         "schedule": crontab(hour=5, minute=0),
+    },
+    "update_user_photos_daily": {
+        # Раз в сутки подтягиваем file_id аватарок активных юзеров.
+        # На 1000 users = 2000 req к Bot API = 0.023 req/sec, в 1300 раз
+        # ниже лимита 30/sec. Время выбрано после close_season, чтобы
+        # не пересекаться с другими cron'ами (см. docs/02-architecture.md §2).
+        "task": "worker.tasks.update_user_photos.run",
+        "schedule": crontab(hour=6, minute=0),
     },
 }

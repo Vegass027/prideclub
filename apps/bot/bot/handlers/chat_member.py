@@ -20,11 +20,10 @@ import aiohttp
 from aiogram import Bot, Router
 from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER, ChatMemberUpdatedFilter
 from aiogram.types import ChatMemberUpdated
+from security import generate_service_token
 
 from bot.config import get_settings
 from bot.logging_setup import get_logger
-from security import generate_service_token
-
 
 router = Router(name="chat_member")
 log = get_logger("bot.chat_member")

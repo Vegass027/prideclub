@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useLeaderboard, useMyHabits, type LeaderboardTab } from "@/shared/hooks";
+import { useParams, useSearchParams } from "react-router-dom";
+import { useLeaderboard, type LeaderboardTab } from "@/shared/hooks";
+import { Avatar } from "@/shared/ui/Avatar";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -8,33 +9,80 @@ import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { Tabs } from "@/shared/ui/Tabs";
 
+// Pravki §7 v3.2: единые лейблы со страницей "Рейтинг" (Серии/Охотники/Лентяи).
 const TABS: { id: LeaderboardTab; label: string; emoji: string }[] = [
   { id: "streak", label: "Серии", emoji: "🔥" },
-  { id: "catches", label: "Ловцы", emoji: "🎯" },
-  { id: "shame", label: "Позор", emoji: "💀" },
+  { id: "catches", label: "Охотники", emoji: "🎯" },
+  { id: "shame", label: "Лентяи", emoji: "😴" },
 ];
+
+// Pravki §7 v3.3: описание категории под табами. Помогает юзеру понять
+// смысл каждой метрики без отдельного тура.
+const TAB_DESCRIPTIONS: Record<LeaderboardTab, string> = {
+  streak: "Сколько дней подряд участник отмечается без пропусков.",
+  catches: "Сколько раз участник поймал нарушителей в этом клубе.",
+  shame: "Сколько дней подряд участник пропустил чек-ин.",
+};
+
+const EMPTY_STATES: Record<LeaderboardTab, { icon: string; title: string; description: string }> = {
+  streak: {
+    icon: "📊",
+    title: "Пока никто не отметился",
+    description: "Будь первым — открой клуб и сделай чек-ин.",
+  },
+  catches: {
+    icon: "🎯",
+    title: "Пока никто никого не поймал",
+    description: "Будь первым — поймай нарушителя, пока он не отметился.",
+  },
+  shame: {
+    icon: "😴",
+    title: "Пока все молодцы",
+    description: "Пропусти чек-ин — и ты автоматически попадёшь сюда.",
+  },
+};
+
+const VALID_TABS = new Set<LeaderboardTab>(["streak", "catches", "shame"]);
+
+// Склонение для "поимок" (1 раз, 2 раза, 5 раз). Применяется ТОЛЬКО
+// для catches (label = "раз" — одинаково для 1/2/5, но 21-22 = специальное).
+// "дн." / "штрафов" — без склонения, статичные.
+function pluralRaz(n: number): "раз" | "раза" {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "раз";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "раза";
+  return "раз";
+}
 
 export function LeaderboardPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
-  const [tab, setTab] = useState<LeaderboardTab>("streak");
+  const [searchParams] = useSearchParams();
+  // Аккордеон на /leaderboards передаёт активный tab через ?tab=shame
+  // (или catches/streak). Если параметр невалиден — default streak.
+  const initialTab = (() => {
+    const raw = searchParams.get("tab");
+    if (raw && VALID_TABS.has(raw as LeaderboardTab)) {
+      return raw as LeaderboardTab;
+    }
+    return "streak" as LeaderboardTab;
+  })();
+  const [tab, setTab] = useState<LeaderboardTab>(initialTab);
   const { data, isLoading, isError, error } = useLeaderboard(habitId, tab);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
 
-  const metricLabel = (t: LeaderboardTab): string =>
-    t === "streak" ? "дн." : t === "catches" ? "поимок" : "штрафов";
-
-  const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
-  ) : undefined;
+  const metricLabel = (t: LeaderboardTab, value: number): string => {
+    if (t === "streak") return `${value} дн.`;
+    if (t === "catches") return `${value} ${pluralRaz(value)}`;
+    return `${value} штрафов`;
+  };
 
   return (
     <ScreenLayout>
-      <PageHeader title="Лидеры клуба" back backTo={backTo} right={headerRight} />
+      <PageHeader title="Лидеры клуба" back backTo="/leaderboards" />
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
+
+      <p className="text-center text-xs text-muted">{TAB_DESCRIPTIONS[tab]}</p>
 
       {isLoading && <Skeleton className="h-14 w-full" rows={5} />}
 
@@ -44,44 +92,68 @@ export function LeaderboardPage() {
 
       {!isLoading && !isError && (data?.items.length ?? 0) === 0 && (
         <EmptyState
-          icon="📊"
-          title="Пока никто не отметился"
-          description="Будь первым — открой клуб и сделай чек-ин."
+          icon={EMPTY_STATES[tab].icon}
+          title={EMPTY_STATES[tab].title}
+          description={EMPTY_STATES[tab].description}
         />
       )}
 
       {!isLoading && !isError && (data?.items.length ?? 0) > 0 && (
-        <ol className="space-y-1.5">
-          {data!.items.map((row) => (
-            <li key={row.membership_id}>
-              <article className="flex items-center gap-3 rounded-card bg-surface/60 px-3 py-2.5">
-                <div
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                    row.rank === 1
-                      ? "bg-yellow-500/20 text-yellow-300"
-                      : row.rank === 2
-                        ? "bg-gray-400/20 text-gray-200"
-                        : row.rank === 3
-                          ? "bg-orange-700/20 text-orange-300"
-                          : "bg-surface text-muted"
-                  }`}
-                  aria-label={`Место ${row.rank}`}
-                >
-                  {row.rank}
-                </div>
-                <span className="flex-1 truncate text-sm font-medium text-text">
-                  {row.first_name}
-                </span>
-                <span className="text-sm font-bold tabular-nums text-primary">
-                  {row.metric_value} {metricLabel(tab)}
-                </span>
-              </article>
-            </li>
-          ))}
-        </ol>
+        <>
+          {data?.total != null && (
+            <p className="text-center text-xs text-muted">
+              Показаны топ-100 из {data.total}
+            </p>
+          )}
+          <ol className="space-y-1.5">
+            {data!.items.map((row) => (
+              <li key={row.membership_id}>
+                <LeaderboardRow row={row} metricLabel={metricLabel(tab, row.metric_value)} />
+              </li>
+            ))}
+          </ol>
+        </>
       )}
 
       <HabitNav habitId={habitId!} />
     </ScreenLayout>
+  );
+}
+
+function LeaderboardRow({
+  row,
+  metricLabel,
+}: {
+  row: import("@/shared/types").LeaderboardEntry;
+  metricLabel: string;
+}) {
+  // photo_url приходит как "/api/v1/users/{id}/photo" — backend отдаёт
+  // FileResponse. Браузер сам рендерит <img> (не usePhotoBlob).
+  const photoSrc = row.photo_url
+    ? new URL(row.photo_url, window.location.origin).toString()
+    : null;
+  return (
+    <article className="flex items-center gap-3 rounded-card border border-white/10 bg-surface/60 px-2 py-2 sm:gap-4 sm:px-3 sm:py-2.5">
+      <Avatar
+        src={photoSrc}
+        fallback={row.first_name}
+        size="xs"
+        loading="eager"
+        ring
+        className="mr-2 sm:mr-3"
+      />
+      <span className="min-w-0 truncate text-xs font-medium text-text sm:text-sm">
+        {row.first_name}
+      </span>
+      <span className="border-l border-white/10 pl-2 text-xs font-bold tabular-nums text-primary sm:pl-3 sm:text-sm whitespace-nowrap">
+        {metricLabel}
+      </span>
+      <span className="border-l border-white/10 pl-2 text-[10px] tabular-nums text-muted sm:pl-3 sm:text-xs whitespace-nowrap">
+        📅 {row.breakdown.checkin_count}
+        {" · "}🔥 {row.breakdown.streak_days}
+        {" · "}🎯 {row.breakdown.catches_count}
+        {" · "}😴 {row.breakdown.penalties_count}
+      </span>
+    </article>
   );
 }

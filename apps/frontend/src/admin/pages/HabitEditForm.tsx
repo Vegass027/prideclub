@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { adminHabitsApi, type AdminHabit } from "../api";
 import {
+  CheckboxGroup,
   CustomSelect,
   FieldRow,
-  RadioGroup,
   TextArea,
   TextInput,
 } from "../components/Form";
@@ -52,12 +52,15 @@ interface FormState {
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
-  proof_type: ProofType;
+  proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
+  checkin_topic_link: string;
+  notifications_topic_link: string;
+  chat_topic_link: string;
 }
 
 const EMPTY: FormState = {
@@ -70,12 +73,15 @@ const EMPTY: FormState = {
   checkin_window_start: "09:00",
   checkin_window_end: "21:00",
   timezone: "Europe/Moscow",
-  proof_type: "video_note",
+  proof_types: ["video_note"],
   price_month_rub: "299",
   penalty_amount_rub: "100",
   stat_gain_per_checkin: "2",
   stat_loss_per_miss: "1",
   member_limit: "",
+  checkin_topic_link: "",
+  notifications_topic_link: "",
+  chat_topic_link: "",
 };
 
 const toIntOrNull = (raw: string): number | null => {
@@ -83,6 +89,13 @@ const toIntOrNull = (raw: string): number | null => {
   if (trimmed === "") return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+const rubToKopecks = (raw: string): number => {
+  const trimmed = raw.trim().replace(",", ".");
+  const asNumber = Number(trimmed);
+  if (!Number.isFinite(asNumber)) return 0;
+  return Math.round(asNumber * 100);
 };
 
 const kopToRubStr = (kop: number): string =>
@@ -99,12 +112,17 @@ function habitToForm(h: AdminHabit): FormState {
     checkin_window_start: h.checkin_window_start.slice(0, 5),
     checkin_window_end: h.checkin_window_end.slice(0, 5),
     timezone: h.timezone,
-    proof_type: h.proof_type as ProofType,
+    proof_types: (h.proof_types && h.proof_types.length > 0
+      ? h.proof_types
+      : [h.proof_type]) as ProofType[],
     price_month_rub: kopToRubStr(h.price_month),
     penalty_amount_rub: kopToRubStr(h.penalty_amount),
     stat_gain_per_checkin: String(h.stat_gain_per_checkin),
     stat_loss_per_miss: String(h.stat_loss_per_miss),
     member_limit: h.member_limit === null ? "" : String(h.member_limit),
+    checkin_topic_link: h.checkin_topic_link ?? "",
+    notifications_topic_link: h.notifications_topic_link ?? "",
+    chat_topic_link: h.chat_topic_link ?? "",
   };
 }
 
@@ -169,7 +187,6 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
 
   if (!habit) return null;
 
-  const financialsFrozen = habit.active_members_count > 0;
   const touchedFields = (key: keyof FormState) => {
     setTouched((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
   };
@@ -203,6 +220,36 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         errors.member_limit = "Целое > 0";
       }
     }
+    const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+    if (
+      state.checkin_topic_link.trim() &&
+      !topicLinkRe.test(state.checkin_topic_link.trim())
+    ) {
+      errors.checkin_topic_link = "Формат https://t.me/c/<chat_id>/<thread_id>";
+    }
+    if (
+      state.notifications_topic_link.trim() &&
+      !topicLinkRe.test(state.notifications_topic_link.trim())
+    ) {
+      errors.notifications_topic_link =
+        "Формат https://t.me/c/<chat_id>/<thread_id>";
+    }
+    if (
+      state.checkin_topic_link.trim() &&
+      state.notifications_topic_link.trim() &&
+      state.checkin_topic_link.trim() ===
+        state.notifications_topic_link.trim()
+    ) {
+      errors.notifications_topic_link =
+        "Топик уведомлений должен отличаться от топика чек-инов";
+    }
+    const chatLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+    if (
+      state.chat_topic_link.trim() &&
+      !chatLinkRe.test(state.chat_topic_link.trim())
+    ) {
+      errors.chat_topic_link = "Формат https://t.me/c/<chat_id>/<thread_id>";
+    }
     return errors;
   };
 
@@ -233,11 +280,17 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         checkin_window_start: form.checkin_window_start,
         checkin_window_end: form.checkin_window_end,
         timezone: form.timezone,
-        proof_type: form.proof_type,
+        proof_types: form.proof_types,
+        price_month: rubToKopecks(form.price_month_rub),
+        penalty_amount: rubToKopecks(form.penalty_amount_rub),
         stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
         chat_id: currentChatId,
+        checkin_topic_link: form.checkin_topic_link.trim() || undefined,
+        notifications_topic_link:
+          form.notifications_topic_link.trim() || undefined,
+        chat_topic_link: form.chat_topic_link.trim() || undefined,
       });
       navigate("/habits");
     } catch (err) {
@@ -268,25 +321,63 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
       </FieldRow>
 
+      <FieldRow
+        label="Telegram invite-ссылка"
+        error={
+          touched.telegram_invite_link
+            ? errors.telegram_invite_link
+            : undefined
+        }
+      >
+        <TextInput
+          value={form.telegram_invite_link}
+          onChange={(e) => set("telegram_invite_link", e.target.value)}
+          onBlur={() => touchedFields("telegram_invite_link")}
+          placeholder="https://t.me/+abc123"
+          inputMode="url"
+        />
+        <p className="mt-1 text-xs text-muted">
+          Ссылка-приглашение в группу клуба. Используется в кнопке
+          «Присоединиться к клубу».
+        </p>
+      </FieldRow>
+
       <FieldRow label="Фото клуба">
         <div className="flex flex-col gap-3">
           {form.photo_url ? (
-            <div className="relative w-full overflow-hidden rounded-card border border-white/10 bg-surface">
-              {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+            <label
+              className="group relative flex cursor-pointer items-center justify-center rounded-card border border-white/10 bg-canvas/60 p-2 transition hover:border-white/30"
+              aria-label="Нажмите, чтобы заменить фото"
+            >
               <img
                 src={form.photo_url}
-                alt="Превью фото клуба"
-                className="block w-full max-h-64 object-cover"
+                alt="Превью"
+                className="block max-h-80 w-full object-contain"
+                loading="lazy"
               />
-              <button
-                type="button"
-                onClick={() => set("photo_url", "")}
-                className="absolute right-2 top-2 min-h-[32px] rounded-card bg-black/60 px-3 py-1 text-xs font-medium text-white transition hover:bg-black/80"
-                aria-label="Удалить фото"
-              >
-                Удалить
-              </button>
-            </div>
+              <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-card bg-black/0 text-sm font-medium text-white opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100">
+                {uploadPhoto.isPending ? "Загружаю..." : "Заменить фото"}
+              </span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp"
+                className="sr-only"
+                disabled={uploadPhoto.isPending}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const res = await uploadPhoto.mutateAsync(file);
+                    set("photo_url", res.url);
+                  } catch (err) {
+                    // eslint-disable-next-line no-alert
+                    alert(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </label>
           ) : (
             <label
               className={`flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed transition ${
@@ -329,6 +420,15 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
                 ? uploadPhoto.error.message
                 : "Ошибка загрузки"}
             </p>
+          )}
+          {form.photo_url && (
+            <button
+              type="button"
+              onClick={() => set("photo_url", "")}
+              className="self-start min-h-[36px] rounded-card border border-white/10 bg-surface px-3 py-1.5 text-xs font-medium text-muted transition hover:border-danger/40 hover:text-danger"
+            >
+              Удалить фото
+            </button>
           )}
         </div>
       </FieldRow>
@@ -441,6 +541,49 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         )}
       </FieldRow>
 
+      <FieldRow
+        label="Ссылка на топик чек-инов"
+        error={touched.checkin_topic_link ? errors.checkin_topic_link : undefined}
+      >
+        <TextInput
+          value={form.checkin_topic_link}
+          onChange={(e) => set("checkin_topic_link", e.target.value)}
+          onBlur={() => touchedFields("checkin_topic_link")}
+          placeholder="Вставь ссылку на топик"
+          inputMode="url"
+        />
+      </FieldRow>
+
+      <FieldRow
+        label="Ссылка на топик уведомлений"
+        error={
+          touched.notifications_topic_link
+            ? errors.notifications_topic_link
+            : undefined
+        }
+      >
+        <TextInput
+          value={form.notifications_topic_link}
+          onChange={(e) => set("notifications_topic_link", e.target.value)}
+          onBlur={() => touchedFields("notifications_topic_link")}
+          placeholder="Вставь ссылку на топик"
+          inputMode="url"
+        />
+      </FieldRow>
+
+      <FieldRow
+        label="Ссылка на топик чата"
+        error={touched.chat_topic_link ? errors.chat_topic_link : undefined}
+      >
+        <TextInput
+          value={form.chat_topic_link}
+          onChange={(e) => set("chat_topic_link", e.target.value)}
+          onBlur={() => touchedFields("chat_topic_link")}
+          placeholder="Вставь ссылку на топик"
+          inputMode="url"
+        />
+      </FieldRow>
+
       <FieldRow label="Характеристика">
         <div className="grid grid-cols-2 gap-2">
           <TextInput
@@ -498,41 +641,38 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
       </FieldRow>
 
-      <FieldRow label="Тип подтверждения">
-        <RadioGroup
-          name="proof_type"
+      <FieldRow label="Типы подтверждения (можно выбрать несколько)">
+        <CheckboxGroup
+          name="proof_types"
           options={PROOF_OPTIONS}
-          value={form.proof_type}
-          onChange={(next) => set("proof_type", next as ProofType)}
+          value={form.proof_types}
+          onChange={(next) => set("proof_types", next as ProofType[])}
         />
       </FieldRow>
 
-      {!financialsFrozen && (
-        <>
-          <FieldRow label="Цена в месяц (₽)">
-            <TextInput
-              value={form.price_month_rub}
-              onChange={(e) => set("price_month_rub", e.target.value)}
-              inputMode="decimal"
-            />
-          </FieldRow>
+      <FieldRow label="Цена в месяц (₽)">
+        <TextInput
+          value={form.price_month_rub}
+          onChange={(e) => set("price_month_rub", e.target.value)}
+          inputMode="decimal"
+        />
+        <p className="mt-1 text-xs text-muted">
+          Изменения применяются к новым подпискам. Уже оплаченные
+          участники продолжают действовать до конца оплаченного периода
+          по старой цене.
+        </p>
+      </FieldRow>
 
-          <FieldRow label="Штраф за пропуск (₽)">
-            <TextInput
-              value={form.penalty_amount_rub}
-              onChange={(e) => set("penalty_amount_rub", e.target.value)}
-              inputMode="decimal"
-            />
-          </FieldRow>
-        </>
-      )}
-
-      {financialsFrozen && (
-        <div className="rounded-card border border-white/10 bg-surface/60 p-3 text-xs text-muted">
-          Цена и штраф заморожены — в клубе уже {habit.active_members_count}{" "}
-          участник{habit.active_members_count === 1 ? "" : "ов"}.
-        </div>
-      )}
+      <FieldRow label="Штраф за пропуск (₽)">
+        <TextInput
+          value={form.penalty_amount_rub}
+          onChange={(e) => set("penalty_amount_rub", e.target.value)}
+          inputMode="decimal"
+        />
+        <p className="mt-1 text-xs text-muted">
+          Применяется к будущим штрафам. Прошлые штрафы не пересчитываются.
+        </p>
+      </FieldRow>
 
       <FieldRow label="Прирост / убыль за чек-ин">
         <div className="grid grid-cols-2 gap-2">

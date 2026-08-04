@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -273,6 +274,7 @@ async def worker_db(monkeypatch):
             checkin_window_end_hour: int = 10,
             is_active: bool = True,
             proof_type=None,
+            checkin_topic_thread_id: int | None = None,
         ) -> Habit:
             from datetime import time
 
@@ -288,8 +290,14 @@ async def worker_db(monkeypatch):
                 penalty_amount=penalty_amount,
                 price_month=price_month,
                 proof_type=proof_type or ProofType.VIDEO_NOTE,
+                # proof_types (миграция 012): на проде заполняется
+                # server_default='["video_note"]'. На SQLite-тестах
+                # server_default не работает → заполняем явно, иначе
+                # CheckinService отвергает любой чек-ин с wrong_type.
+                proof_types=[(proof_type or ProofType.VIDEO_NOTE).value],
                 prize_pool=prize_pool,
                 is_active=is_active,
+                checkin_topic_thread_id=checkin_topic_thread_id,
             )
             session.add(h)
             await session.flush()
@@ -304,15 +312,26 @@ async def worker_db(monkeypatch):
             id: str | None = None,
             deposit_balance: int = 1000,
             status=None,
+            joined_at: datetime | None = None,
         ) -> Membership:
             from app.core.constants import MembershipStatus
 
+            # Default = 2026-01-01 UTC (давно вступивший) — имитирует
+            # server_default=func.now() на PostgreSQL, который не
+            # срабатывает на SQLite-тестах. Выбираем «давно» чтобы
+            # существующие тесты штрафовали членов (как в проде).
+            # Тесты PR №7.3 (joined_at=today) передают явно.
+            effective_joined_at = (
+                joined_at if joined_at is not None
+                else datetime(2026, 1, 1, tzinfo=ZoneInfo("UTC"))
+            )
             m = Membership(
                 id=id or str(uuid4()),
                 user_id=user_id,
                 habit_id=habit_id,
                 status=status or MembershipStatus.ACTIVE,
                 deposit_balance=deposit_balance,
+                joined_at=effective_joined_at,
             )
             session.add(m)
             await session.flush()

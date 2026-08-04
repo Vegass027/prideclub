@@ -29,10 +29,42 @@ declare global {
           impactOccurred: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
           notificationOccurred: (type: "error" | "success" | "warning") => void;
         };
+        setHeaderColor?: (color: string) => void;
+        setBackgroundColor?: (color: string) => void;
+        setBottomBarColor?: (color: string) => void;
         colorScheme?: "light" | "dark";
         themeParams?: Record<string, string>;
+        // Telegram WebApp API 6.0+. Callback-style (older SDK returned Promise).
+        showAlert?: (message: string, callback?: () => void) => void;
+        showConfirm?: (message: string, callback?: (ok: boolean) => void) => void;
       };
     };
+  }
+}
+
+// Прямой side-effect: фиксируем тёмный фон Mini App сразу при
+// загрузке модуля. Tree-shaking не уберёт это, потому что мы
+// пишем в window (site-effect очевиден для bundler'а).
+if (typeof window !== "undefined") {
+  const tg = (
+    window as unknown as {
+      Telegram?: { WebApp?: Record<string, unknown> };
+    }
+  ).Telegram?.WebApp;
+  if (tg) {
+    const tryCall = (key: string) => {
+      const fn = tg[key];
+      if (typeof fn === "function") {
+        try {
+          (fn as (c: string) => void)("#0F1115");
+        } catch {
+          // ignore — старые версии SDK
+        }
+      }
+    };
+    tryCall("setHeaderColor");
+    tryCall("setBackgroundColor");
+    tryCall("setBottomBarColor");
   }
 }
 
@@ -41,8 +73,19 @@ export async function initTelegram(): Promise<boolean> {
   if (typeof window === "undefined") return false;
   try {
     await init();
-    window.Telegram?.WebApp?.ready?.();
-    window.Telegram?.WebApp?.expand?.();
+    const webapp = window.Telegram?.WebApp;
+    webapp?.ready?.();
+    webapp?.expand?.();
+    // Фиксируем тёмный фон Mini App, чтобы до отрисовки React и
+    // на устройствах с белой темой Telegram фон не моргал белым.
+    // Telegram WebApp SDK >=6.0 поддерживает setBackgroundColor.
+    try {
+      webapp?.setHeaderColor?.("#0F1115");
+      webapp?.setBackgroundColor?.("#0F1115");
+      webapp?.setBottomBarColor?.("#0F1115");
+    } catch {
+      // ignore — старые версии SDK
+    }
     initialized = true;
     return true;
   } catch {
@@ -86,4 +129,21 @@ export function openTelegramLink(url: string): void {
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Native Telegram alert popup (Telegram WebApp API 6.0+, callback-style).
+ * Resolves when user dismisses the dialog.
+ * Fallback: in dev/tests outside TWA we log to console so callers don't crash.
+ */
+export function showAlert(message: string): Promise<void> {
+  const showAlertFn = window.Telegram?.WebApp?.showAlert;
+  if (typeof showAlertFn !== "function") {
+    // eslint-disable-next-line no-console
+    console.warn("[showAlert]", message);
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    showAlertFn(message, () => resolve());
+  });
 }

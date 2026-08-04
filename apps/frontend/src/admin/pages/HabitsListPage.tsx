@@ -14,17 +14,16 @@ import {
 } from "../hooks";
 import type { AdminHabit } from "../api";
 
-type Filter = "all" | "active" | "inactive" | "archived";
+type Filter = "active" | "inactive" | "archived";
 
 const FILTERS: { id: Filter; label: string; emoji: string }[] = [
-  { id: "all", label: "Все", emoji: "📋" },
   { id: "active", label: "Активные", emoji: "✅" },
   { id: "inactive", label: "Скрытые", emoji: "👁" },
   { id: "archived", label: "Архив", emoji: "🗂" },
 ];
 
 const isFilter = (raw: string | null): raw is Filter =>
-  raw === "all" || raw === "active" || raw === "inactive" || raw === "archived";
+  raw === "active" || raw === "inactive" || raw === "archived";
 
 function emptyTextFor(filter: Filter): {
   icon: string;
@@ -49,12 +48,6 @@ function emptyTextFor(filter: Filter): {
         icon: "👁",
         title: "Нет скрытых клубов",
         description: "Скрытые клубы появятся здесь.",
-      };
-    default:
-      return {
-        icon: "🌱",
-        title: "Клубов пока нет",
-        description: "Создайте первый через кнопку выше.",
       };
   }
 }
@@ -91,7 +84,6 @@ function FilteredHabits({
   isBusy,
 }: FilteredHabitsProps) {
   const items = useMemo(() => {
-    if (filter === "all") return data;
     if (filter === "archived") return data.filter((h) => h.archived_at !== null);
     if (filter === "active") return data.filter((h) => h.archived_at === null && h.is_active);
     return data.filter((h) => h.archived_at === null && !h.is_active);
@@ -129,7 +121,7 @@ function FilteredHabits({
 export function HabitsListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawFilter = searchParams.get("filter");
-  const filter: Filter = isFilter(rawFilter) ? rawFilter : "all";
+  const filter: Filter = isFilter(rawFilter) ? rawFilter : "active";
 
   const { data, isLoading, isError, error, refetch } = useAdminHabits();
   const activate = useActivateHabit();
@@ -139,8 +131,7 @@ export function HabitsListPage() {
 
   const handleFilterChange = (next: Filter) => {
     const params = new URLSearchParams(searchParams);
-    if (next === "all") params.delete("filter");
-    else params.set("filter", next);
+    params.set("filter", next);
     setSearchParams(params, { replace: true });
   };
 

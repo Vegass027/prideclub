@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
+import os
+from datetime import datetime, timezone
 
 from app.core.constants import MembershipStatus
 from app.core.logging import get_logger
 from app.models.habit import Habit
+from app.models.membership import Membership
+from app.models.user import User
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.services.penalty_service import PenaltyService
@@ -46,11 +48,18 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
     )
 
     penalized = 0
+    notifications: list[tuple[Membership, int]] = []
     async for membership in membership_repo.iter_for_habit(str(habit.id)):
         if membership.status != MembershipStatus.ACTIVE:
             continue
         existing = await checkin_repo.get_for_date(str(membership.id), club_date)
         if existing is not None:
+            continue
+        # 7.3: новый участник, вступивший в club_date, не считается
+        # пропавшим — пропуск начинается со следующего клуб-дня.
+        # joined_at NOT NULL в schema, default = now() — значит
+        # None здесь невозможен в проде; defensive check избыточен.
+        if membership.joined_at.date() >= club_date:
             continue
         penalty = await penalty_service.apply_window_expired(
             violator_membership_id=str(membership.id),
@@ -58,7 +67,51 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
         )
         if penalty is not None:
             penalized += 1
-    return {"habit_id": str(habit.id), "penalized": penalized}
+            notifications.append(
+                (membership, int(penalty.amount))
+            )
+            continue
+        penalty = await penalty_service.apply_window_expired(
+            violator_membership_id=str(membership.id),
+            club_date=club_date,
+        )
+        if penalty is not None:
+            penalized += 1
+            notifications.append(
+                (membership, int(penalty.amount))
+            )
+
+    return {
+        "habit_id": str(habit.id),
+        "penalized": penalized,
+        "notifications": notifications,
+    }
+
+
+async def _publish_window_closed_notifications(
+    *,
+    habit: Habit,
+    notifications: list[tuple[Membership, int]],
+    bot_token: str,
+) -> None:
+    if not bot_token or habit.chat_id == 0 or not notifications:
+        return
+    from app.services.notification_service import NotificationService
+
+    from db.session import async_session_factory  # type: ignore[import-not-found]
+
+    async with async_session_factory() as session:  # type: ignore[name-defined]
+        for violator_membership, amount in notifications:
+            violator_user = await session.get(
+                User, int(violator_membership.user_id)
+            )
+            service = NotificationService(bot_token=bot_token)
+            await service.notify_window_closed(
+                habit=habit,
+                violator_membership=violator_membership,
+                violator_user=violator_user,
+                penalty_amount_kopecks=amount,
+            )
 
 
 async def _process() -> dict:
@@ -66,6 +119,7 @@ async def _process() -> dict:
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
     summary: list[dict] = []
+    habits_for_notification: list[tuple[Habit, list[tuple[Membership, int]]]] = []
     async with async_session_factory() as session:  # type: ignore[name-defined]
         habit_repo = HabitRepository(session)
         now_utc = datetime.now(tz=timezone.utc)
@@ -73,8 +127,30 @@ async def _process() -> dict:
         # обработки, не загружая 100+ клубов целиком в память.
         async for habit in habit_repo.iter_active():
             result = await _close_for_habit(session, habit, now_utc)
+            notif_list = result.pop("notifications", [])
             summary.append(result)
+            if notif_list:
+                habits_for_notification.append((habit, notif_list))
         await session.commit()
+
+    bot_token = os.getenv("BOT_TOKEN", "")
+    if bot_token:
+        for habit, notifications in habits_for_notification:
+            try:
+                await _publish_window_closed_notifications(
+                    habit=habit,
+                    notifications=notifications,
+                    bot_token=bot_token,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "close_catch_window.notification_failed",
+                    extra={
+                        "habit_id": str(habit.id),
+                        "err": str(exc),
+                    },
+                )
+
     log.info("close_catch_window_done", extra={"summary": summary})
     return {"summary": summary}
 

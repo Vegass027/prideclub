@@ -4,7 +4,6 @@ from aiogram.types import Message
 
 from bot.config import get_settings
 
-
 router = Router(name="start")
 
 

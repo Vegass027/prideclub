@@ -75,11 +75,34 @@ class CheckinService:
 @router.post("/checkins")
 async def create_checkin(
     data: CheckinIn,
-    service: CheckinService = Depends(get_checkin_service),
+    service: CheckinServiceDep,  # Annotated[CheckinService, Depends(get_checkin_service)]
 ):
     checkin = await service.create_checkin(data.user_id, data.habit_id)
     return CheckinOut.model_validate(checkin)
 ```
+
+> **Зачем `Annotated[X, Depends(...)]` вместо `x: X = Depends(get_x)`?**
+>
+> С FastAPI 0.95+ рекомендован именно `Annotated`-синтаксис
+> ([fastapi.tiangolo.com/tutorial/sql-databases](https://fastapi.tiangolo.com/tutorial/sql-databases)).
+> Переиспользуемые alias'ы живут в `apps/backend/app/core/deps.py`:
+>
+> - `SessionDep = Annotated[AsyncSession, Depends(get_session)]`
+> - `RedisDep = Annotated[Redis, Depends(get_redis)]`
+>
+> Auth alias'ы (`TelegramUserDep`, `TelegramUserDbDep`, `ServiceCallerDep`) — в
+> `apps/backend/app/api/v1/users.py`, чтобы избежать циклического импорта с
+> `app.core.deps` (auth-helper'ы уже зависят от `app.core.security`).
+> Handler'ы импортируют их так:
+> ```python
+> from app.api.v1.users import TelegramUserDbDep
+> from app.core.deps import SessionDep
+> ```
+>
+> **Плюсы:** нет `B008` (function-call-in-default-argument), явная типизация
+> зависимости, лучший IDE-рефакторинг, шаринг сигнатуры между handler'ами.
+> ruff в `pyproject.toml` имеет `B008` в селекте без per-file-ignore — все
+> handler'ы должны использовать `Annotated`.
 
 **Плюсы:** `CheckinService` можно вызвать откуда угодно — из API, из бота, из Celery.
 Правило "время должно быть в окне" инкапсулировано в `habit.is_within_checkin_window()`.

@@ -17,24 +17,24 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.core.constants import PROOF_TYPE_VALUES, ProofType
 from app.core.exceptions import (
     HabitArchivedError,
     HabitNotFoundError,
+    HabitTopicDuplicateError,
+    HabitTopicMismatchError,
     HabitValidationError,
 )
 from app.core.logging import get_logger
+from app.core.telegram_links import parse_telegram_topic_link
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 
-
 _TELEGRAM_INVITE_RE = re.compile(r"^https://(t\.me|telegram\.me)/[A-Za-z0-9_+\-/]+$")
-
-
-_FROZEN_AFTER_FIRST_MEMBER_FIELDS = frozenset({"price_month", "penalty_amount"})
 
 
 class HabitService:
@@ -63,15 +63,29 @@ class HabitService:
         checkin_window_start: Any,
         checkin_window_end: Any,
         timezone_str: str,
-        proof_type: Any,
+        proof_types: list[str],
         price_month: int,
         penalty_amount: int,
         stat_gain_per_checkin: int,
         stat_loss_per_miss: int,
         member_limit: int | None,
         curator_id: int | None,
+        checkin_topic_link: str,
+        notifications_topic_link: str,
+        chat_topic_link: str | None = None,
     ) -> Any:
-        """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4)."""
+        """Создать клуб. Всегда с `is_active=False` (TZ §3.6.4).
+
+        Topic-scoped: обязательны ссылки на топики чек-инов и
+        уведомлений (https://t.me/c/<chat_id>/<thread_id>).
+        Опционально — топик общего чата клуба в той же группе.
+        Бот ничего не создаёт — топики делает владелец в Telegram.
+
+        Multi-proof (migration 012): `proof_types` — массив 1..3 строк
+        из {"video_note", "photo", "text"}. `proof_type` в БД
+        выставляется как `proof_types[0]` (для обратной совместимости
+        со старыми клиентами Bot API).
+        """
         _validate_title(title)
         _validate_stat_name(stat_name)
         if stat_icon is not None:
@@ -85,22 +99,81 @@ class HabitService:
             stat_loss_per_miss=stat_loss_per_miss,
         )
         _validate_member_limit(member_limit)
+        _validate_proof_types(proof_types)
 
-        existing = await self._habit_repo.get_by_chat_id(chat_id)
+        checkin_topic = parse_telegram_topic_link(checkin_topic_link)
+        notifications_topic = parse_telegram_topic_link(notifications_topic_link)
+
+        if chat_id != 0 and chat_id != checkin_topic.chat_id:
+            raise HabitTopicMismatchError(
+                "chat_id в ссылке на топик чек-инов не совпадает с chat_id клуба"
+            )
+        if chat_id != 0 and chat_id != notifications_topic.chat_id:
+            raise HabitTopicMismatchError(
+                "chat_id в ссылке на топик уведомлений не совпадает с chat_id клуба"
+            )
+        if checkin_topic.thread_id == notifications_topic.thread_id:
+            raise HabitValidationError(
+                "Топик чек-инов и топик уведомлений должны различаться",
+                code="habit_topics_must_differ",
+            )
+
+        chat_topic_thread_id: int | None = None
+        if chat_topic_link is not None and chat_topic_link.strip():
+            chat_topic = parse_telegram_topic_link(chat_topic_link)
+            if chat_topic.chat_id != checkin_topic.chat_id:
+                raise HabitTopicMismatchError(
+                    "Ссылка на топик чата указывает на группу, отличную от "
+                    "группы топиков чек-инов и уведомлений"
+                )
+            if chat_topic.thread_id in (
+                checkin_topic.thread_id,
+                notifications_topic.thread_id,
+            ):
+                raise HabitValidationError(
+                    "Топик чата должен отличаться от топика чек-инов "
+                    "и топика уведомлений",
+                    code="habit_topics_must_differ",
+                )
+            chat_topic_thread_id = chat_topic.thread_id
+
+        resolved_chat_id = (
+            chat_id if chat_id != 0 else checkin_topic.chat_id
+        )
+
+        existing = await self._habit_repo.get_by_chat_id(resolved_chat_id)
         if existing is not None:
             raise HabitValidationError(
-                f"Клуб с chat_id={chat_id} уже существует",
+                f"Клуб с chat_id={resolved_chat_id} уже существует",
                 code="habit_chat_id_duplicate",
+            )
+
+        duplicate = await self._habit_repo.get_by_chat_and_thread(
+            checkin_topic.chat_id, checkin_topic.thread_id
+        )
+        if duplicate is not None:
+            raise HabitTopicDuplicateError(
+                f"Топик {checkin_topic.thread_id} уже привязан к клубу "
+                f"«{duplicate.title}»"
+            )
+        duplicate_notif = await self._habit_repo.get_by_chat_and_thread(
+            notifications_topic.chat_id, notifications_topic.thread_id
+        )
+        if duplicate_notif is not None:
+            raise HabitTopicDuplicateError(
+                f"Топик уведомлений {notifications_topic.thread_id} "
+                f"уже привязан к клубу «{duplicate_notif.title}»"
             )
 
         fields: dict[str, Any] = {
             "title": title.strip(),
             "description": description,
-            "chat_id": chat_id,
+            "chat_id": resolved_chat_id,
             "checkin_window_start": checkin_window_start,
             "checkin_window_end": checkin_window_end,
             "timezone": timezone_str,
-            "proof_type": proof_type,
+            "proof_types": proof_types,
+            "proof_type": ProofType(proof_types[0]),
             "penalty_amount": penalty_amount,
             "price_month": price_month,
             "prize_pool": 0,
@@ -114,6 +187,9 @@ class HabitService:
             "member_limit": member_limit,
             "curator_id": curator_id,
             "archived_at": None,
+            "checkin_topic_thread_id": checkin_topic.thread_id,
+            "notifications_topic_thread_id": notifications_topic.thread_id,
+            "chat_topic_thread_id": chat_topic_thread_id,
         }
         habit = await self._habit_repo.create(fields=fields)
 
@@ -124,6 +200,9 @@ class HabitService:
                 "habit_id": habit.id,
                 "title": habit.title,
                 "chat_id": habit.chat_id,
+                "checkin_topic_thread_id": checkin_topic.thread_id,
+                "notifications_topic_thread_id": notifications_topic.thread_id,
+                "chat_topic_thread_id": chat_topic_thread_id,
             },
         )
         return habit
@@ -154,6 +233,11 @@ class HabitService:
             _validate_telegram_invite_link(fields["telegram_invite_link"])
         if "timezone" in fields:
             _validate_timezone(fields["timezone"])
+        if "proof_types" in fields:
+            _validate_proof_types(fields["proof_types"])
+            # Синхронизируем proof_type (первый элемент) для обратной
+            # совместимости со старыми клиентами.
+            fields["proof_type"] = ProofType(fields["proof_types"][0])
         if "checkin_window_start" in fields or "checkin_window_end" in fields:
             start = fields.get("checkin_window_start", habit.checkin_window_start)
             end = fields.get("checkin_window_end", habit.checkin_window_end)
@@ -179,20 +263,115 @@ class HabitService:
         if "member_limit" in fields:
             _validate_member_limit(fields["member_limit"])
 
-        protected_fields = _FROZEN_AFTER_FIRST_MEMBER_FIELDS & set(fields.keys())
-        if protected_fields:
-            active_members = await self._habit_repo.count_active_members(habit_id)
-            if active_members > 0:
-                raise HabitValidationError(
-                    (
-                        "Финансовые поля заморожены: в клубе уже есть активные "
-                        "участники. Создайте новый клуб и переведите участников."
-                    ),
-                    code="habit_financial_fields_frozen",
+        topic_link_changed = (
+            "checkin_topic_link" in fields
+            or "notifications_topic_link" in fields
+            or "chat_topic_link" in fields
+        )
+        if topic_link_changed:
+            new_checkin_link = fields.pop("checkin_topic_link", None)
+            new_notifications_link = fields.pop(
+                "notifications_topic_link", None
+            )
+            new_chat_topic_link = fields.pop("chat_topic_link", None)
+
+            existing_chat_id = habit.chat_id
+
+            if new_checkin_link is not None:
+                topic = parse_telegram_topic_link(new_checkin_link)
+                fields["checkin_topic_thread_id"] = topic.thread_id
+                if existing_chat_id == 0:
+                    fields["chat_id"] = topic.chat_id
+                    existing_chat_id = topic.chat_id
+                elif topic.chat_id != existing_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Топик чек-инов находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба). "
+                        "Укажи ссылку на топик внутри той же группы, "
+                        "что привязана к клубу."
+                    )
+            else:
+                fields["checkin_topic_thread_id"] = (
+                    habit.checkin_topic_thread_id
                 )
 
-        forbidden = _FROZEN_AFTER_FIRST_MEMBER_FIELDS - set(fields.keys())
-        update_fields = {k: v for k, v in fields.items() if k not in forbidden}
+            if new_notifications_link is not None:
+                topic = parse_telegram_topic_link(new_notifications_link)
+                fields["notifications_topic_thread_id"] = topic.thread_id
+                if existing_chat_id == 0:
+                    fields["chat_id"] = topic.chat_id
+                    existing_chat_id = topic.chat_id
+                elif topic.chat_id != existing_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Топик уведомлений находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба). "
+                        "Укажи ссылку на топик внутри той же группы, "
+                        "что привязана к клубу."
+                    )
+            else:
+                fields["notifications_topic_thread_id"] = (
+                    habit.notifications_topic_thread_id
+                )
+
+            if new_chat_topic_link is not None and new_chat_topic_link.strip():
+                chat_topic = parse_telegram_topic_link(new_chat_topic_link)
+                if existing_chat_id == 0:
+                    fields["chat_id"] = chat_topic.chat_id
+                    existing_chat_id = chat_topic.chat_id
+                elif chat_topic.chat_id != existing_chat_id:
+                    raise HabitTopicMismatchError(
+                        "Топик чата находится в другой группе "
+                        "(chat_id в ссылке не совпадает с чатом клуба)."
+                    )
+                fields["chat_topic_thread_id"] = chat_topic.thread_id
+            elif "chat_topic_link" in fields:
+                fields["chat_topic_thread_id"] = None
+            else:
+                fields["chat_topic_thread_id"] = habit.chat_topic_thread_id
+
+            resolved_chat_id = fields.get("chat_id", existing_chat_id)
+
+            if (
+                fields["checkin_topic_thread_id"]
+                == fields["notifications_topic_thread_id"]
+            ):
+                raise HabitValidationError(
+                    "Топик чек-инов и топик уведомлений должны различаться",
+                    code="habit_topics_must_differ",
+                )
+
+            chat_topic_tid = fields.get("chat_topic_thread_id")
+            if chat_topic_tid is not None and chat_topic_tid in (
+                fields["checkin_topic_thread_id"],
+                fields["notifications_topic_thread_id"],
+            ):
+                raise HabitValidationError(
+                    "Топик чата должен отличаться от топика чек-инов "
+                    "и топика уведомлений",
+                    code="habit_topics_must_differ",
+                )
+
+            for thread_id in (
+                fields["checkin_topic_thread_id"],
+                fields["notifications_topic_thread_id"],
+                fields.get("chat_topic_thread_id"),
+            ):
+                if thread_id is None:
+                    continue
+                dup = await self._habit_repo.get_by_chat_and_thread(
+                    resolved_chat_id, thread_id
+                )
+                if dup is not None and str(dup.id) != habit_id:
+                    raise HabitTopicDuplicateError(
+                        f"Топик {thread_id} уже привязан к клубу «{dup.title}»"
+                    )
+
+        # Заморозка price_month/penalty_amount после первого участника СНЯТА.
+        # Middleware /admin/v1/* уже гейтит доступ только owner'у —
+        # владелец может менять цену когда угодно (типичный use case:
+        # поднять цену с нового месяца, см. force_update_financials для
+        # targeted-обновления только финансов).
+        update_fields = dict(fields)
 
         updated = await self._habit_repo.update(habit, fields=update_fields)
         self._logger.info(
@@ -212,7 +391,7 @@ class HabitService:
             raise HabitNotFoundError()
         if habit.archived_at is not None:
             return habit
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await self._habit_repo.archive(habit, archived_at=now)
         self._logger.info(
             "habit_archived",
@@ -304,6 +483,99 @@ class HabitService:
             },
         )
         return habit
+
+    async def force_update_financials(
+        self,
+        *,
+        admin_id: int,
+        habit_id: str,
+        price_month: int | None,
+        penalty_amount: int | None,
+        confirm: bool,
+    ) -> dict[str, Any]:
+        """Force-update price_month / penalty_amount вне заморозки.
+
+        Доступно только owner (см. middleware /admin/v1/*).
+
+        Что меняет: только habits.price_month и/или habits.penalty_amount.
+        Что НЕ меняет: users.deposit_balance, memberships.subscription_until,
+        memberships.auto_renew_enabled, memberships.status. Уже оплаченные
+        подписки участников продолжают действовать по старой цене до конца
+        оплаченного периода.
+
+        Возвращает dict со старыми/новыми значениями для UI-подтверждения.
+        """
+        if not confirm:
+            raise HabitValidationError(
+                "Требуется подтверждение (confirm=true) — это защита "
+                "от случайного изменения финансов клуба",
+                code="habit_force_financials_confirm_required",
+            )
+        if price_month is None and penalty_amount is None:
+            raise HabitValidationError(
+                "Укажи хотя бы одно поле: price_month или penalty_amount",
+                code="habit_force_financials_no_fields",
+            )
+        if price_month is not None and price_month <= 0:
+            raise HabitValidationError(
+                "price_month должен быть положительным INTEGER (копейки)",
+                code="habit_price_invalid",
+            )
+        if penalty_amount is not None and penalty_amount <= 0:
+            raise HabitValidationError(
+                "penalty_amount должен быть положительным INTEGER (копейки)",
+                code="habit_penalty_invalid",
+            )
+
+        habit = await self._habit_repo.get(habit_id)
+        if habit is None:
+            raise HabitNotFoundError()
+        if habit.archived_at is not None:
+            raise HabitArchivedError()
+
+        old_price_month = int(habit.price_month)
+        old_penalty_amount = int(habit.penalty_amount)
+
+        update_fields: dict[str, Any] = {}
+        if price_month is not None and price_month != old_price_month:
+            update_fields["price_month"] = price_month
+        if penalty_amount is not None and penalty_amount != old_penalty_amount:
+            update_fields["penalty_amount"] = penalty_amount
+
+        if not update_fields:
+            return {
+                "habit": habit,
+                "old_price_month": old_price_month,
+                "new_price_month": old_price_month,
+                "old_penalty_amount": old_penalty_amount,
+                "new_penalty_amount": old_penalty_amount,
+            }
+
+        updated = await self._habit_repo.update(habit, fields=update_fields)
+
+        # Audit log: фиксируем все force-update финансов клуба.
+        # ВАЖНО: audit обязателен — это операция с деньгами.
+        self._logger.warning(
+            "habit_force_financials_updated",
+            extra={
+                "admin_id": admin_id,
+                "habit_id": habit_id,
+                "title": habit.title,
+                "chat_id": habit.chat_id,
+                "old_price_month": old_price_month,
+                "new_price_month": int(updated.price_month),
+                "old_penalty_amount": old_penalty_amount,
+                "new_penalty_amount": int(updated.penalty_amount),
+            },
+        )
+
+        return {
+            "habit": updated,
+            "old_price_month": old_price_month,
+            "new_price_month": int(updated.price_month),
+            "old_penalty_amount": old_penalty_amount,
+            "new_penalty_amount": int(updated.penalty_amount),
+        }
 
 
 def _validate_title(title: str | None) -> None:
@@ -430,3 +702,29 @@ def _validate_member_limit(limit: int | None) -> None:
             "member_limit должен быть NULL или положительным INTEGER",
             code="habit_member_limit_invalid",
         )
+
+
+def _validate_proof_types(proof_types: list[str]) -> None:
+    """Массив 1..3 уникальных значений ∈ PROOF_TYPE_VALUES."""
+    if not isinstance(proof_types, list):
+        raise HabitValidationError(
+            "proof_types должен быть массивом",
+            code="habit_proof_types_type",
+        )
+    if len(proof_types) < 1 or len(proof_types) > 3:
+        raise HabitValidationError(
+            "proof_types должен содержать от 1 до 3 значений",
+            code="habit_proof_types_count",
+        )
+    if len(set(proof_types)) != len(proof_types):
+        raise HabitValidationError(
+            "proof_types не должны содержать дубликатов",
+            code="habit_proof_types_duplicates",
+        )
+    for pt in proof_types:
+        if not isinstance(pt, str) or pt not in PROOF_TYPE_VALUES:
+            raise HabitValidationError(
+                f"proof_types содержит недопустимое значение: {pt!r}. "
+                f"Допустимо: {PROOF_TYPE_VALUES}",
+                code="habit_proof_types_invalid",
+            )

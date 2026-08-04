@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,7 +13,7 @@ def _msg(**kw) -> ProofMessage:
         "proof_type": ProofType.VIDEO_NOTE,
         "video_note_duration": 5,
         "photo_sizes": 0,
-        "message_date": datetime.now(tz=timezone.utc),
+        "message_date": datetime.now(tz=UTC),
     }
     base.update(kw)
     return ProofMessage(**base)
@@ -39,14 +39,14 @@ def test_text_empty() -> None:
 
 def test_forwarded_rejected() -> None:
     with pytest.raises(ProofValidationError) as exc:
-        validate_proof_media(_msg(forward_date=datetime.now(tz=timezone.utc)))
+        validate_proof_media(_msg(forward_date=datetime.now(tz=UTC)))
     assert exc.value.code == "forwarded"
 
 
 def test_stale_message_rejected() -> None:
     from datetime import timedelta
 
-    old = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    old = datetime.now(tz=UTC) - timedelta(hours=1)
     with pytest.raises(ProofValidationError) as exc:
         validate_proof_media(_msg(message_date=old))
     assert exc.value.code == "stale_message"

@@ -122,15 +122,17 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
   return (
     <article className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
       {habit.photo_url ? (
-        <img
-          src={habit.photo_url}
-          alt={habit.title}
-          className="block h-32 w-full object-cover"
-          loading="lazy"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.display = "none";
-          }}
-        />
+        <div className="flex w-full items-center justify-center bg-canvas/60">
+          <img
+            src={habit.photo_url}
+            alt={habit.title}
+            className="block max-h-72 w-full object-contain"
+            loading="lazy"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        </div>
       ) : (
         <div
           className="flex h-32 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-4xl"
@@ -141,12 +143,12 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
       )}
       <div className="p-4">
         <header className="mb-2 flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-text">{habit.title}</h2>
-            {habit.description && (
-              <p className="mt-0.5 line-clamp-2 text-xs text-muted">{habit.description}</p>
-            )}
-          </div>
+        <div className="min-w-0">
+          <h2 className="truncate text-base font-semibold text-text">〖{habit.title}〗</h2>
+          {habit.description && (
+            <p className="mt-0.5 line-clamp-2 text-xs text-muted">{habit.description}</p>
+          )}
+        </div>
           <span className="shrink-0 rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary">
             {habit.members_count} 👤
           </span>
@@ -154,7 +156,7 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
       <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
         <Stat label="Штраф" value={formatKopecks(habit.penalty_amount)} danger />
         <Stat label="Подписка" value={`${formatKopecks(habit.price_month)}/мес`} />
-        <Stat label="Окно" value={`${habit.checkin_window_start}–${habit.checkin_window_end}`} />
+        <Stat label="Окно" value={`${habit.checkin_window_start.slice(0, 5)}–${habit.checkin_window_end.slice(0, 5)}`} />
         <Stat label="Призовой фонд" value={formatKopecks(habit.prize_pool)} success />
       </dl>
       {isJoined ? (

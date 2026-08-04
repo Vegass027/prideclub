@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.users import current_user_internal
+from app.api.v1.users import ServiceCallerDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
-from app.db.session import get_session
 from app.repositories.habit_repository import HabitRepository
 from app.services.celery_producer import send_task
-
 
 router = APIRouter()
 
@@ -32,8 +30,8 @@ class PaymentConfirmResponse(BaseModel):
 @router.post("/payments/confirm", response_model=PaymentConfirmResponse)
 async def enqueue_payment_confirm(
     payload: PaymentConfirmRequest,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
+    session: SessionDep,
+    _: ServiceCallerDep,
 ) -> PaymentConfirmResponse:
     """Internal endpoint: Telegram Payments webhook → backend → Celery worker.
 

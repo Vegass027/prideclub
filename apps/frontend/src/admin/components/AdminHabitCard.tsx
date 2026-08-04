@@ -46,45 +46,66 @@ export function AdminHabitCard({
   };
 
   return (
-    <article className="rounded-card border border-white/5 bg-surface p-4">
-      <header className="mb-2 flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate text-base font-semibold text-text">
-            〖{habit.title}〗
-          </h3>
-          <p className="mt-0.5 truncate text-xs text-muted">
-            {stat} · окно {window} · {habit.timezone}
-          </p>
+    <article className="overflow-hidden rounded-card border border-white/5 bg-surface">
+      {habit.photo_url ? (
+        <div className="flex w-full items-center justify-center bg-canvas/60">
+          <img
+            src={habit.photo_url}
+            alt={habit.title}
+            className="block max-h-48 w-full object-contain"
+            loading="lazy"
+          />
         </div>
-        <span
-          className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${
-            isArchived
-              ? "border-danger/30 bg-danger/10 text-danger"
-              : habit.is_active
-                ? "border-success/30 bg-success/10 text-success"
-                : "border-muted/30 bg-muted/10 text-muted"
-          }`}
+      ) : (
+        <div
+          className="flex h-24 w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-3xl"
+          aria-hidden="true"
         >
-          {isArchived ? "В архиве" : habit.is_active ? "Активен" : "Скрыт"}
-        </span>
-      </header>
+          🎯
+        </div>
+      )}
 
-      <dl className="grid grid-cols-3 gap-2 text-xs">
-        <div>
-          <dt className="text-muted">Цена/мес</dt>
-          <dd className="text-text">{formatRub(habit.price_month)}</dd>
-        </div>
-        <div>
-          <dt className="text-muted">Штраф</dt>
-          <dd className="text-text">{formatRub(habit.penalty_amount)}</dd>
-        </div>
-        <div>
-          <dt className="text-muted">Участников</dt>
-          <dd className="text-text">{habit.active_members_count}</dd>
-        </div>
-      </dl>
+      <div className="p-4">
+        <header className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-base font-semibold text-text">
+              〖{habit.title}〗
+            </h3>
+            {habit.description && (
+              <p className="mt-0.5 line-clamp-2 text-xs text-muted">{habit.description}</p>
+            )}
+          </div>
+          <span
+            className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${
+              isArchived
+                ? "border-danger/30 bg-danger/10 text-danger"
+                : habit.is_active
+                  ? "border-success/30 bg-success/10 text-success"
+                  : "border-muted/30 bg-muted/10 text-muted"
+            }`}
+          >
+            {isArchived ? "В архиве" : habit.is_active ? "Активен" : "Скрыт"}
+          </span>
+        </header>
 
-      <div className="mt-3 flex items-stretch gap-2">
+        <ul className="mb-3 space-y-1 text-xs">
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Характеристика:</span> <strong className="text-text">{stat}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Окно чек-ина:</span> <strong className="text-text">{window}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Часовой пояс:</span> <strong className="text-text">{habit.timezone}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Доказательство:</span> <strong className="text-text">{habit.proof_types.map((t) => t === "video_note" ? "видео-кружок" : t === "photo" ? "фото" : "текст").join(" или ")}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Цена в месяц:</span> <strong className="text-text">{formatRub(habit.price_month)}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Штраф за пропуск:</span> <strong className="text-text">{formatRub(habit.penalty_amount)}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Призовой фонд:</span> <strong className="text-text">{formatRub(habit.prize_pool)}</strong></li>
+          <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Участников:</span> <strong className="text-text">{habit.active_members_count}</strong>{habit.member_limit !== null && (<span className="text-muted"> / {habit.member_limit}</span>)}</li>
+          {habit.stat_gain_per_checkin > 0 && (
+            <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">+{habit.stat_gain_per_checkin} {stat} за чек-ин</span></li>
+          )}
+          {habit.stat_loss_per_miss > 0 && (
+            <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">−{habit.stat_loss_per_miss} {stat} за пропуск</span></li>
+          )}
+        </ul>
+
+        <div className="mt-3 flex items-stretch gap-2">
         <Link
           to={`/habits/${habit.id}/edit`}
           aria-label={`Изменить ${habit.title}`}
@@ -132,18 +153,19 @@ export function AdminHabitCard({
         )}
 
         {isArchived && (
-          <button
+<button
             type="button"
             onClick={handlePermanent}
             disabled={busy}
             aria-busy={busy}
             aria-label={`Удалить клуб ${habit.title} навсегда`}
             title="Удалить навсегда"
-            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-card border border-danger/40 bg-danger/20 px-3 py-2 text-danger transition hover:bg-danger/30 disabled:opacity-50"
+            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-2 rounded-card border border-danger/40 bg-danger/20 px-3 py-2 text-danger transition hover:bg-danger/30 disabled:opacity-50"
           >
             <FireIcon />
           </button>
         )}
+      </div>
       </div>
     </article>
   );

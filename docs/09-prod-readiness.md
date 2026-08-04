@@ -1,6 +1,6 @@
 # Habit Club — Статус бэкенда и план до прода
 
-> Дата среза: 2026-07-22 (обновлено после T1–T7 hardening, до начала Фазы B)
+> Дата среза: 2026-07-23 (обновлено после lint-zero итерации: commits `7a39fc1`, `de57457`)
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
 > Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
 > `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
@@ -18,6 +18,11 @@
 - ✅ **Hardening итерация T1–T7** (см. `TZ_kharakteristiki_personazha.md` §8.1) —
   рефакторинг сервисов/репозиториев, без функциональных изменений.
   Все сервисы перезапущены на проде, `/health=ok`.
+- ✅ **Lint-zero итерация** (commits `7a39fc1` + `de57457`, 2026-07-23): ruff
+  теперь чистый во всех трёх сервисах (backend/bot/worker) без per-file-ignore
+  для B008. Все 86 handler-сигнатур переведены на `Annotated[X, Depends(get_x)]`
+  per FastAPI docs. Без функциональных изменений, все контейнеры healthy после
+  деплоя.
 
 ### 1.1 Что полностью работает (есть на проде, проверено E2E)
 
@@ -31,7 +36,7 @@
 | 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
-| 9 | **PostgreSQL** (9 миграций, расширения) | ✅ Работает | `000_extensions` → `009_chat_id_partial_unique` |
+| 9 | **PostgreSQL** (12 миграций, расширения) | ✅ Работает | `000_extensions` → `012_proof_types` (миграции 010/011 — topic-scoped чек-ины и третий топик; 012 — `proof_types JSONB` для multi-proof_types в админке) |
 | 10 | **Redis** (catch rate-limit Lua, today cache) | ✅ Работает | `catch_rate_limiter.py`, `today_cache.py`. T1: `parse_rate_limit_spec` в `core/utils.py`. |
 | 11 | **Antifraud** (suspicious_pairs, proof validation) | ✅ Работает | `suspicious_pairs_service.py` + T2 `SuspiciousPairsRepository.lookup_flagged` |
 | 12 | **Season prize distribution** | ✅ Работает | `close_season` через worker |
@@ -39,6 +44,7 @@
 | 14 | **HTTP rate-limit** (60/min api, 120/min internal) | ✅ Live проверен | 130 req → 120 пропущено + 10×429 |
 | 15 | **HTTPS + Nginx + Let's Encrypt** | ✅ Live работает | `app.prideclub.fun/health` → 200 |
 | 16 | **Telegram bot webhook** | ✅ Live работает | POST `/bot/webhook` → 200 |
+| 16a | **Bot pre-filter** по `proof_types` и дубликату | ✅ Работает с 2026-07-23 | PR №9: `GET /internal/bot/habit_state` → бот проверяет тип и дубликат ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» / «уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. |
 | 17 | **CI в GitHub Actions** | ✅ Конфиг исправлен | `backend-ci.yml`, `frontend-ci.yml` |
 | 18 | **Admin Mini App** (управление клубами: CRUD + activate/archive/restore) | ✅ На проде с `2026-07-21` (commit `ad0267b`) | `apps/frontend/src/admin/`, `admin.prideclub.fun`. Owner-gate в `core/middleware.py`. |
 
@@ -72,6 +78,14 @@
 | 3 | Worker логировал обычным текстом | Добавлен `worker/logging_setup.py` с structlog |
 | 4 | Не было общего HTTP rate-limit | `services/http_rate_limiter.py` + `RateLimitMiddleware` |
 | 5 | Не было домена / HTTPS | Куплен `prideclub.fun`, настроен nginx + Let's Encrypt, Mini App доступен |
+| 6 | Bot webhook SSL error → `pending_update_count` растёт | `WEBHOOK_BASE_URL=https://169.58.52.78` → `https://api.prideclub.fun`; fail-fast в проде через `_validate_webhook_url` |
+| 7 | Worker `NameError: CheckinWrongTopicError` в retry-loop | Добавлен импорт в `apps/worker/worker/tasks/process_checkin.py:7-12` |
+| 8 | Mini App `status=pending` не обновляется | Топик-фильтр пропускает кружки после правильной настройки `checkin_topic_thread_id` (id топика = `12` в проде) |
+| 9 | PATCH `/admin/v1/habits/{id}` не сохранял price_month | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks` в `HabitEditForm.tsx`; `AdminHabitUpdatePayload` расширен |
+| 10 | Backend `ForwardRef('Response') not fully defined` | Убран `from __future__ import annotations` в `core/middleware.py` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
+| 11 | Финансы (`price_month`, `penalty_amount`) были заморожены после первого участника | Заморозка снята в `HabitService.update`; middleware `/admin/v1/*` уже гейтит доступ только owner'у. Endpoint `PATCH /admin/v1/habits/{id}/force-financials` оставлен для targeted-обновления. См. `02-architecture.md` §12. |
+| 12 | Бот отвечал «Принято, молодец» даже когда worker асинхронно отвергал чек-ин (`code: wrong_type`) | Backend возвращает `{ok: True, task_id: ...}` сразу после `send_task()`. Worker отвергает задачу позже — бот не узнаёт. Решено pre-filter'ом в боте: новый `GET /internal/bot/habit_state?chat_id=...&user_id=...` проверяет `allowed_proof_types` и `already_checked_in` ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» или «ты уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. Проверено юзером в Telegram: после деплоя бот корректно отвечает. |
+| 13 | ruff падал с 368 ошибками в CI (368 — реальное число, не «49+» как ошибочно считалось) | Двухкоммитный фикс: `7a39fc1` — auto-fix 200 ошибок + 86 B008→Annotated; `de57457` — фикс импорта `TelegramUserDbDep` (забыл обновить 3 файла после выноса alias'а в `users.py`, ImportError блокировал backend старт, починено на сервере и проверено `/health, /ready, /metrics`). |
 
 ---
 
@@ -157,6 +171,8 @@ _Обновлено после T1–T7 (22.07.2026). Полная таблица
 | `_remap_postgres_types_for_sqlite` мутирует типы колонок | `apps/worker/tests/conftest.py:98-145` + `apps/backend/tests/conftest.py` | Перенесено в Фазу B (T6/T8): добавлять новые модели (`UserStats`, `UserStatus`) в whitelist при коммите миграции 009. |
 | Legacy `Any` без импорта в `PenaltyService.__init__` | `penalty_service.py:48` | Перенесено в T11 (deferred до после Фазы B). Частично закрыто через T2 — `_suspicious_service: Any` ушёл, остался в одном сигнатуре. |
 | Admin Mini App интеграция — пустые/default-value на UI | `apps/frontend/src/admin/pages/*` | Сделано (commit `ad0267b`), но UI минимум — после Фазы B будет polish. |
+| ~~Topic-scoped чек-ины~~ | — | ✅ Закрыто 2026-07-23: миграции 010 (`checkin_topic_thread_id`, `notifications_topic_thread_id`) и 011 (`chat_topic_thread_id`) применены на проде. Бот фильтрует по `message_thread_id`, штрафы публикуются в топик уведомлений, кнопки «🎬 Сделать чек-ин» и «💬 Перейти в чат» открывают нужные топики. |
+| ~~ruff: 368 ошибок в backend+bot+worker~~ | — | ✅ Закрыто 2026-07-23 (commits `7a39fc1`, `de57457`): `Annotated[X, Depends(get_x)]` per FastAPI docs во всех 86 handler-сигнатурах, удалены дубликаты (`get_membership_service`, `membership_service.leave`), устранены F821 (Response, pytest, _drop_stale_records), длинные строки перенесены, `asyncio.to_thread` для sync I/O в `uploads.py`. ruff чистый во всех сервисах без per-file-ignore для B008. Подробности и паттерн — `docs/04-code-standards.md` §1. |
 
 ---
 

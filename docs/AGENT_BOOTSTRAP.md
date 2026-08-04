@@ -2,16 +2,19 @@
 
 > Этот документ — **главная точка входа**. Прочти его первым делом при старте
 > нового чата. Он говорит, **что прочитать дальше**, **как подключаться к серверу**,
-> **как коммитить и деплоить**, и — самое важное — **как поддерживать доки в
-> актуальном состоянии после каждой задачи**.
+> **как коммитить и деплоить**, и — самое важное — **как поддерживать доки в актуальном состоянии после каждой задачи**.
 >
-> Snapshot от 2026-07-22.
+> Snapshot от 2026-08-04. Изменён после post-mortem «бот молчит, чек-ины не доходят»
+> (см. §3 «ДВА .env файла» ниже — прочти перед любым изменением webhook URL или env).
+> актуальном состоянии после каждой задачи**.
 
 ## 0. Если нужны серверные операции (SSH)
 
-Пароль, IP, способ подключения — в локальном файле
-**`~/.config/kilo/privichki-bootstrap.md`** (НЕ в репозитории). Прочти его перед
-любыми `ssh`/`rsync`/`docker exec` командами. В этом файле — только указатель.
+Алиас SSH, IP, fingerprint ключа, recovery через Contabo rescue-mode —
+в локальном файле **`~/.config/kilo/privichki-bootstrap.md`** (НЕ в репозитории).
+Прочти его перед любыми `ssh`/`rsync`/`docker exec` командами. Пароль root там
+больше не хранится — вход по ed25519 ключу `~/.ssh/id_ed25519_privichki`
+через алиас `ssh privichki-prod`.
 
 ## 1. Что это за проект (10 секунд)
 
@@ -35,7 +38,7 @@
 | 1 | `docs/02-architecture.md` | 🟢 | Главный файл: стек, контейнеры, домены, схема, потоки. Прочти **полностью**. |
 | 2 | `docs/04-code-standards.md` | 🟡 | Правила кода. Примеры могут отставать от реального кода — за реальным стилем иди в `apps/backend/app/services/`. |
 | 3 | `docs/06-data-model.md` | 🟡 | Схема таблиц + антифрод + идемпотентность. **Список миграций в §3 — актуальный 000..009** (не 000..004 как в старой версии). |
-| 4 | `docs/10-deploy.md` | 🟢 | Runbook: rsync → build → up. Пароль в §1 убран (см. `~/.config/kilo/privichki-bootstrap.md`). |
+| 4 | `docs/10-deploy.md` | 🟢 | Runbook: rsync → build → up. Подключение через `ssh privichki-prod` (ed25519 ключ). |
 | 5 | `docs/09-prod-readiness.md` | 🟡 | Snapshot бэкенда на 2026-07-22. Перед использованием проверь `git log docs/09-prod-readiness.md` — мог обновиться. |
 | 6 | `AGENTS.md` (корень) | 🟢 | Правила поведения агента: layered architecture, DI, деньги в `int`, PII не логировать. |
 | 7 | `docs/01-concept.md` | 🟢 | Продуктовая концепция (стабильна с initial commit). Только если задача про продукт/экономику. |
@@ -86,7 +89,8 @@ AGENTS.md                     # правила для AI-агентов
 ├── apps/{backend,bot,frontend,worker}/ ← те же файлы, что локально
 ├── packages/shared/security.py
 ├── infra/                              ← docker-compose.yml + Dockerfile'ы
-├── .env                                ← PROD-секреты (chmod 600)
+├── .env                                ← PROD-секреты (chmod 600, монтируется в backend)
+├── infra/.env                          ← для docker-compose ${VAR} подстановки (см. ⚠️ ниже)
 
 Docker volumes:
   habit-club_pgdata         ← данные PostgreSQL 16
@@ -108,6 +112,58 @@ Docker контейнеры (7):
 Host nginx:
   /etc/nginx/sites-enabled/habit-club   ← reverse proxy 80/443 → 127.0.0.1:{5173,8000,8080,8081}
   /etc/letsencrypt/                      ← TLS по домену
+```
+
+### ⚠️ На сервере ДВА `.env` файла — НЕ путай
+
+> **Snapshot 2026-08-04:** главный урок post-mortem «бот молчит, чек-ины не доходят». Запомни это
+> перед любым изменением webhook / webapp URL, токенов или env-переменных, которые читает
+> `docker-compose`.
+
+| Файл | Кто читает | Что внутри |
+|---|---|---|
+| `/app/.env` | Backend-контейнер (монтируется как `/app/.env`) + Pydantic Settings в `app/core/config.py` | Секреты для backend: `DATABASE_URL`, `SERVICE_SECRET`, `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, и т.д. |
+| `/app/infra/.env` | **Только** `docker-compose` для `${VAR}` интерполяции в `infra/docker-compose.yml` | Переменные, пробрасываемые в контейнеры через `x-backend-env` / `x-bot-env` / `x-worker-env` YAML anchors. **Включает `WEBHOOK_BASE_URL`, `WEBAPP_URL`, `WEBHOOK_SECRET`, `BOT_TOKEN`, `SERVICE_SECRET`, `ENVIRONMENT`** |
+
+**Типичная ошибка нового агента** (snapshot 2026-08-04):
+
+```bash
+# ❌ Неправильно — поправил /app/.env, перезапустил бота, ничего не помогло
+ssh privichki-prod 'sed -i ... /app/.env && docker compose up -d bot'
+
+# ✅ Правильно — править /app/infra/.env (это читает docker-compose)
+ssh privichki-prod 'sed -i ... /app/infra/.env && cd /app/infra && docker compose up -d bot'
+```
+
+**Почему так:** `docker-compose` ищет `.env` рядом с `docker-compose.yml` (т.е. в `/app/infra/`)
+и подставляет значения `${VAR}` в `environment:` блоках сервисов **на старте compose**.
+`/app/.env` — это уже файл **внутри** backend-контейнера (или volume-mounted), его читает только
+сам backend, не compose.
+
+**Какие переменные живут ГДЕ (на 2026-08-04):**
+
+| Переменная | Файл | Почему |
+|---|---|---|
+| `WEBHOOK_BASE_URL` | `/app/infra/.env` | Нужна в `x-bot-env` через `${...}` подстановку compose |
+| `WEBAPP_URL` | `/app/infra/.env` | Аналогично |
+| `WEBHOOK_SECRET`, `BOT_TOKEN`, `SERVICE_SECRET` | `/app/infra/.env` + `/app/.env` (дубликат) | Compose читает одну, backend читает другую |
+| `ENVIRONMENT` | `/app/infra/.env` (читается compose) + backend читает свою копию | Если в compose не пробросить — будет `development` и fail-fast валидация не сработает |
+| `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL` | `/app/infra/.env` (compose) + `/app/.env` (backend) | Аналогично |
+| `OWNER_TELEGRAM_ID`, `ADMIN_TELEGRAM_CHAT_ID`, `SENTRY_DSN` | `/app/infra/.env` (compose) + `/app/.env` (backend) | Аналогично |
+
+**Защита от регрессии (snapshot 2026-08-04):** в `infra/docker-compose.yml` для обязательных
+URL-переменных бота используется синтаксис `${VAR:?must be set in prod ...}` — пустое значение
+рвёт `docker compose up` ДО старта контейнера (см. `x-bot-env` anchor, строки `WEBHOOK_BASE_URL`,
+`WEBAPP_URL`). Теперь нельзя случайно задеплоить с пустым или битым URL.
+
+**После правки переменных в `/app/infra/.env` — перезапустить ТОЛЬКО соответствующий контейнер:**
+
+```bash
+ssh privichki-prod 'cd /app/infra && docker compose up -d bot'      # только бот
+ssh privichki-prod 'cd /app/infra && docker compose up -d backend'   # только бэк
+ssh privichki-prod 'cd /app/infra && docker compose up -d worker'    # только воркер
+# НИКОГДА: docker compose down (гасит весь стек)
+# НИКОГДА: docker compose up -d --force-recreate (пересоздаёт ВСЁ)
 ```
 
 ## 4. Активные контейнеры (что для чего)
@@ -144,9 +200,38 @@ Host nginx:
   ```
   Без этих флагов коммит уйдёт от `Dim41g / ivanov1331d@gmail.com` (твой
   локальный `~/.gitconfig`) — ломается история авторства.
-- **HEAD коммиты:** `c7f8d87 feat(admin): archive→permanent-delete + admin Mini App hardening` (2026-07-22).
-- **`git push origin main`** — после явного "ок" пользователя. Не пушить самовольно.
-- **SSH-пароль НИКОГДА не коммитить**, даже в `docs/`. Только в `~/.config/kilo/privichki-bootstrap.md` (вне репо).
+- **HEAD коммиты (snapshot 2026-08-04):**
+  - `main` — `bd9fd76 docs(tz): v3.1 — синхронизация с HEAD bdfd9c9` (НЕ двигается без явного «мерджи в main»)
+  - `feature/topic-scoped-checkin` — `a0e8577 docs(ssh): switch from sshpass to ed25519 key` (**51 коммит впереди main**, содержит весь прогресс с 2026-07-22: topic-scoped чек-ины + multi-proof_types + bot pre-filter + lint-zero + SSH-docs итерация)
+- **`git push origin main`** — только после явного «ок» пользователя. Не пушить самовольно.
+- **Push в `feature/*`** — нормальный рабочий процесс, можно без ОК.
+- **SSH-доступ к серверу** — алиас `ssh privichki-prod` (ed25519 ключ `~/.ssh/id_ed25519_privichki`). Детали в §0 и в `~/.config/kilo/privichki-bootstrap.md` (вне репо).
+- **GitHub-доступ к репо** — split remote: `git fetch` через `git@github-prideclub:` (SSH-ключ `~/.ssh/id_ed25519_github_privichki`, deploy key в репо, read-only), `git push` через `https://github.com/Vegass027/prideclub.git` (PAT в macOS Keychain). Конфиг — `~/.ssh/config` блок `github-prideclub`.
+
+> ⚠️ **Про «расхождение веток» — нормальный git-flow, не баг.**
+>
+> `feature/topic-scoped-checkin` живёт как рабочая ветка и **уходит вперёд main**
+> на ~десятки коммитов по мере итераций (topic-scoped чек-ины, multi-proof_types,
+> bot pre-filter, lint-zero, и т.д.). Это **намеренно**: каждая итерация —
+> отдельная фича, отдельная ветка, отдельный push в `origin/feature/*`. В `main`
+> ничего не попадает, пока юзер явно не скажет «мерджи в main».
+>
+> Если ты (новый агент) видишь «X коммитов впереди main» — это не ошибка,
+> не «потерянный код», не «незапушенное состояние». Это **нормальное состояние
+> рабочей feature-ветки**. Не пытайся «починить» — не мерджи и не пуши в main
+> без явного ок юзера. Просто продолжай работу в feature-ветке.
+>
+> **Как проверить синхронность** трёх точек (локально / origin / сервер) перед
+> любой серьёзной задачей:
+> ```bash
+> # Все три должны давать один хэш:
+> git rev-parse HEAD
+> git rev-parse origin/feature/topic-scoped-checkin
+> ssh root@169.58.52.78 "cd /app/apps/backend && find . -name '*.py' -exec sha256sum {} \;" | sort > /tmp/server.txt
+> find apps/backend -name '*.py' -exec sha256sum {} \; | sort > /tmp/local.txt
+> diff /tmp/local.txt /tmp/server.txt
+> ```
+> Если `diff` пустой — всё идентично, можно работать.
 
 ## 7. Локальная разработка (команды)
 
@@ -184,19 +269,24 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "..."
 git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin main
 
 # Только после явного "ок" на деплой:
-# 1. Синхронизация через sshpass на хост в стэйджинг
-sshpass -p "$PASSWORD" rsync -az --delete apps/backend/ root@169.58.52.78:/tmp/privichki_new/backend/
-sshpass -p "$PASSWORD" rsync -az --delete apps/worker/  root@169.58.52.78:/tmp/privichki_new/worker/
+# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг
+rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
+rsync -az --delete apps/worker/  privichki-prod:/tmp/privichki_new/worker/
 
 # 2. Применение в /app
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
+ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
 
 # 3. Пересборка + рестарт контейнеров
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
+ssh privichki-prod 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
 
 # 4. Проверка
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
+ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
 ```
+
+`ssh privichki-prod` — алиас из `~/.ssh/config`, указывает на `root@169.58.52.78`
+через ed25519 ключ `~/.ssh/id_ed25519_privichki` (прописан в `/root/.ssh/authorized_keys`
+на сервере). Пароль не используется. Recovery через Contabo rescue-mode
+описан в `~/.config/kilo/privichki-bootstrap.md`.
 
 `infra/deploy.sh` обёртка вокруг этой процедуры — можно использовать его.
 
@@ -207,7 +297,7 @@ sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{
 - ❌ `rm -rf /app/**`, `docker system prune`, изменения `.env` без ок
 - ❌ `docker cp` для правки кода (пропадёт при recreate)
 
-## 9. Что не работает на проде (snapshot 2026-07-22)
+## 9. Что не работает на проде (snapshot 2026-07-23)
 
 - ❌ **Платежи = мок.** `PaymentModal.setTimeout(1200)`, `TopUpModal.alert()`.
   Бот не вызывает `bot.send_invoice`, в `.env` нет `PROVIDER_TOKEN`,
@@ -223,6 +313,14 @@ sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{
 - 🟡 **Контракт `chat_id` vs `habit_id`** в `apps/backend/app/api/v1/internal_payments.py`
   ожидает `chat_id: int`, бот шлёт `habit_id: str`. 422 без починки.
 - 🟡 **Bot логирует plain text**, не structlog-JSON как backend/worker.
+- ✅ **Webhook SSL error (закрыто 2026-08-04)** — `WEBHOOK_BASE_URL` указывал на сырой IP
+  в `/app/infra/.env`, Telegram не доставлял апдейты (2 шт в `pending_update_count`).
+  Пофикшено: правка `/app/infra/.env` + `docker compose up -d bot`. Детали — §3 «ДВА
+  .env файла» + `docs/02-architecture.md` §9.2.
+- ✅ **Worker `CheckinService` DI-bug (закрыто 2026-08-04)** — worker не передавал
+  `penalty_repo` в конструктор `CheckinService`, чек-ины возвращали `ok=False` без записи.
+  Пофикшено: добавлен `penalty_repo=PenaltyRepository(session)` в
+  `apps/worker/worker/tasks/process_checkin.py`.
 
 Подробнее — `docs/09-prod-readiness.md` §1.1 и `docs/02-architecture.md` §9.
 
@@ -319,6 +417,8 @@ sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{
 ## 13. Чего НЕ делать
 
 - ❌ Не коммитить секреты, пароли, `.env`, IP с кредами.
+- ❌ Не коммитить **приватные SSH-ключи** (`id_ed25519_*` без `.pub`, `*.pem`,
+  сертификаты). Публичные ключи (`.pub`) безопасны для документов.
 - ❌ Не править `/app` на сервере напрямую.
 - ❌ Не использовать `docker compose down` без ок.
 - ❌ Не коммитить от `Dim41g / ivanov1331d@gmail.com` (твой локальный git, **не** репо-автор).

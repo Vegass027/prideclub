@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
-from app.core.constants import MembershipStatus, TransactionType
+from app.core.constants import MembershipStatus
 from app.models.membership import Membership
 from app.models.transaction import Transaction
 from app.services.payment_service import PaymentService

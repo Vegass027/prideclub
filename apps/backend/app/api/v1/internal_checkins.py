@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter
+from pydantic import BaseModel
 
-from app.api.v1.users import current_user_internal
+from app.api.v1.users import ServiceCallerDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
-from app.db.session import get_session
 from app.repositories.habit_repository import HabitRepository
 from app.services.celery_producer import send_task
-
 
 router = APIRouter()
 
@@ -19,6 +17,7 @@ router = APIRouter()
 class CheckinEnqueueRequest(BaseModel):
     user_id: int
     chat_id: int
+    message_thread_id: int | None = None
     proof_type: str
     message_id: int
     message_sent_at: datetime
@@ -35,8 +34,8 @@ class CheckinEnqueueResponse(BaseModel):
 @router.post("/checkins/process", response_model=CheckinEnqueueResponse)
 async def enqueue_checkin(
     payload: CheckinEnqueueRequest,
-    session: AsyncSession = Depends(get_session),
-    _: str = Depends(current_user_internal),
+    session: SessionDep,
+    _: ServiceCallerDep,
 ) -> CheckinEnqueueResponse:
     """Internal endpoint: бот → backend → Celery worker.
 
@@ -60,6 +59,7 @@ async def enqueue_checkin(
             "user_id": payload.user_id,
             "habit_id": str(habit.id),
             "chat_id": payload.chat_id,
+            "message_thread_id": payload.message_thread_id,
             "proof_type": payload.proof_type,
             "message_id": payload.message_id,
             "message_sent_at": payload.message_sent_at.isoformat(),

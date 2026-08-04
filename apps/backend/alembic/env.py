@@ -4,13 +4,13 @@ import asyncio
 import os
 from logging.config import fileConfig
 
-from alembic import context
+# Загружаем .env
+from dotenv import load_dotenv
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# Загружаем .env
-from dotenv import load_dotenv
+from alembic import context
 
 load_dotenv()
 

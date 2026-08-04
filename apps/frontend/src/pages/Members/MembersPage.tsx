@@ -29,11 +29,11 @@ export function MembersPage() {
   const catchMutation = useCatch(habitId);
   const { data: myHabits } = useMyHabits();
   const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/my-habits" : "/profile";
+  const backTo = showSwitcher ? "/profile" : "/profile";
   const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/my-habits")} className="text-xs text-primary">Сменить клуб</button>
+    <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button>
   ) : undefined;
 
   const handleCatch = (m: MemberRow) => {
@@ -147,9 +147,20 @@ interface MemberRowItemProps {
 }
 
 function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
+  // photo_url приходит как "/api/v1/users/{id}/photo" — оборачиваем в
+  // absolute URL для нашего backend (Pravki §7.1 v3.1, nginx try_files).
+  const photoSrc = row.photo_url
+    ? new URL(row.photo_url, window.location.origin).toString()
+    : null;
   return (
-    <article className="flex items-center gap-3 rounded-card border border-white/5 bg-surface p-3">
-      <Avatar src={null} fallback={row.first_name} size="md" />
+    <article className="flex items-center gap-3 rounded-card border border-white/10 bg-surface p-3">
+      <Avatar
+        src={photoSrc}
+        fallback={row.first_name}
+        size="md"
+        loading="eager"
+        ring
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-semibold text-text">{row.first_name}</span>
@@ -157,8 +168,8 @@ function MemberRowItem({ row, busy, onCatch }: MemberRowItemProps) {
         </div>
         <div className="mt-0.5 flex items-center gap-2">
           <StatusBadge status={row.status} />
-          {row.streak_days > 0 && (
-            <span className="text-xs text-muted">🔥 {row.streak_days}</span>
+          {row.checkin_count > 0 && (
+            <span className="text-xs text-muted">📅 {row.checkin_count} чек</span>
           )}
         </div>
       </div>

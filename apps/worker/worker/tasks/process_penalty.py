@@ -36,6 +36,63 @@ async def _pause_violator(payload: dict, *, factory) -> None:
             await session.commit()
 
 
+async def _send_catch_notification(
+    *,
+    payload: dict,
+    bot_token: str,
+    session_factory,
+) -> None:
+    """Best-effort публикация события поимки в топик уведомлений.
+
+    Вызывается ПОСЛЕ успешного коммита основной транзакции. Не бросает
+    наружу — уведомление не должно ломать worker-таску, штраф уже в БД.
+    Открывает короткую сессию только для чтения habit/membership/user и
+    публикации в Telegram через NotificationService.
+    """
+    from app.models.habit import Habit
+    from app.models.user import User
+    from app.services.notification_service import NotificationService
+
+    violator_membership_id = payload["violator_membership_id"]
+    catcher_membership_id = payload.get("catcher_membership_id")
+    catcher_user_id = payload.get("catcher_user_id")
+    amount = int(payload.get("amount") or 0)
+
+    factory = (
+        session_factory if session_factory is not None else async_session_factory
+    )
+
+    async with factory() as session:
+        violator = await session.get(Membership, violator_membership_id)
+        if violator is None:
+            return
+        habit = await session.get(Habit, str(violator.habit_id))
+        if habit is None:
+            return
+        violator_user = await session.get(User, int(violator.user_id))
+        catcher_membership = None
+        catcher_user = None
+        if catcher_membership_id:
+            catcher_membership = await session.get(
+                Membership, catcher_membership_id
+            )
+        if catcher_user_id:
+            catcher_user = await session.get(User, int(catcher_user_id))
+
+    service = NotificationService(
+        bot_token=bot_token,
+        user_lookup=None,
+    )
+    await service.notify_catch(
+        habit=habit,
+        catcher_membership=catcher_membership,
+        catcher_user=catcher_user,
+        violator_membership=violator,
+        violator_user=violator_user,
+        penalty_amount_kopecks=amount,
+    )
+
+
 class RedisPort(Protocol):
     """Тот же протокол, что в PenaltyService — единый контракт."""
 
@@ -91,15 +148,35 @@ async def _process(
                 club_date=date.fromisoformat(payload["club_date"]),
                 catcher_membership_id=payload.get("catcher_membership_id"),
             )
+            penalty_amount = int(penalty.amount)
             await session.commit()
             log.info(
                 "worker_penalty_ok",
                 extra={
                     "penalty_id": str(penalty.id),
                     "violator_membership_id": payload["violator_membership_id"],
-                    "amount": penalty.amount,
+                    "amount": penalty_amount,
                 },
             )
+
+            bot_token = os.getenv("BOT_TOKEN", "")
+            if bot_token:
+                notif_payload = {
+                    **payload,
+                    "amount": penalty_amount,
+                }
+                try:
+                    await _send_catch_notification(
+                        payload=notif_payload,
+                        bot_token=bot_token,
+                        session_factory=factory,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "worker_penalty_notification_failed",
+                        extra={"err": str(exc)},
+                    )
+
             return {"ok": True, "penalty_id": str(penalty.id)}
         except PenaltyAlreadyProcessedError as exc:
             await session.rollback()

@@ -17,7 +17,9 @@ export function MemberCard({ member, onCatch, busy }: MemberCardProps) {
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{member.first_name}</div>
           <div className="text-xs text-muted">
-            {member.streak_days > 0 ? `🔥 ${member.streak_days} дн` : "стрик не начат"}
+            {member.checkin_count > 0
+              ? `📅 ${member.checkin_count} чек`
+              : "ещё не отмечался"}
           </div>
         </div>
       </div>

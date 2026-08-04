@@ -17,19 +17,20 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
+from typing import Annotated
 
 import aiohttp
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.internal_bot import AVAILABLE_CHATS_KEY, _record_available_chat
-from app.api.v1.users import current_user
-from app.core.constants import ProofType
+from app.api.v1.internal_bot import (
+    AVAILABLE_CHATS_KEY,
+    _drop_stale_records,
+    _record_available_chat,
+)
+from app.api.v1.users import TelegramUserDep
+from app.core.deps import SessionDep
 from app.core.logging import get_logger
-from app.core.security import TelegramUser
 from app.db.redis import get_redis
-from app.db.session import get_session
 from app.models.habit import Habit
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -39,6 +40,8 @@ from app.schemas import (
     AdminHabitAvailableChatsResponse,
     AdminHabitChatStatusResponse,
     AdminHabitCreateRequest,
+    AdminHabitForceFinancialsRequest,
+    AdminHabitForceFinancialsResponse,
     AdminHabitOut,
     AdminHabitPreviewChatRequest,
     AdminHabitPreviewChatResponse,
@@ -48,7 +51,6 @@ from app.schemas import (
     AdminHabitUpdateRequest,
 )
 from app.services.habit_service import HabitService
-
 
 logger = get_logger("admin.preview_chat")
 
@@ -60,7 +62,7 @@ router = APIRouter()
 
 
 def _get_habit_service(
-    session: AsyncSession = Depends(get_session),
+    session: SessionDep,
 ) -> HabitService:
     return HabitService(
         session=session,
@@ -69,7 +71,30 @@ def _get_habit_service(
     )
 
 
+HabitServiceDep = Annotated[HabitService, Depends(_get_habit_service)]
+
+
 def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
+    from app.core.telegram_links import make_topic_link
+
+    checkin_topic_link = (
+        make_topic_link(habit.chat_id, habit.checkin_topic_thread_id)
+        if habit.checkin_topic_thread_id is not None
+        and habit.chat_id != 0
+        else None
+    )
+    notifications_topic_link = (
+        make_topic_link(habit.chat_id, habit.notifications_topic_thread_id)
+        if habit.notifications_topic_thread_id is not None
+        and habit.chat_id != 0
+        else None
+    )
+    chat_topic_link = (
+        make_topic_link(habit.chat_id, habit.chat_topic_thread_id)
+        if habit.chat_topic_thread_id is not None
+        and habit.chat_id != 0
+        else None
+    )
     return AdminHabitOut(
         id=str(habit.id),
         title=habit.title,
@@ -81,6 +106,7 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         penalty_amount=habit.penalty_amount,
         price_month=habit.price_month,
         proof_type=habit.proof_type.value,
+        proof_types=list(habit.proof_types or []),
         prize_pool=habit.prize_pool,
         is_active=habit.is_active,
         photo_url=habit.photo_url,
@@ -91,6 +117,12 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         stat_loss_per_miss=habit.stat_loss_per_miss,
         member_limit=habit.member_limit,
         curator_id=habit.curator_id,
+        checkin_topic_thread_id=habit.checkin_topic_thread_id,
+        notifications_topic_thread_id=habit.notifications_topic_thread_id,
+        chat_topic_thread_id=habit.chat_topic_thread_id,
+        checkin_topic_link=checkin_topic_link,
+        notifications_topic_link=notifications_topic_link,
+        chat_topic_link=chat_topic_link,
         archived_at=habit.archived_at,
         created_at=habit.created_at,
         active_members_count=active_members_count,
@@ -104,8 +136,8 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
 )
 async def create_habit(
     payload: AdminHabitCreateRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Создать клуб. Всегда is_active=false (TZ §3.6.4)."""
     habit = await service.create(
@@ -120,13 +152,16 @@ async def create_habit(
         checkin_window_start=payload.checkin_window_start,
         checkin_window_end=payload.checkin_window_end,
         timezone_str=payload.timezone,
-        proof_type=ProofType(payload.proof_type),
+        proof_types=payload.proof_types or [],
         price_month=payload.price_month,
         penalty_amount=payload.penalty_amount,
         stat_gain_per_checkin=payload.stat_gain_per_checkin,
         stat_loss_per_miss=payload.stat_loss_per_miss,
         member_limit=payload.member_limit,
         curator_id=payload.curator_id,
+        checkin_topic_link=payload.checkin_topic_link,
+        notifications_topic_link=payload.notifications_topic_link,
+        chat_topic_link=payload.chat_topic_link,
     )
     await service._session.commit()  # noqa: SLF001 — admin endpoint, commit разрешён
     return _habit_to_out(habit)
@@ -134,8 +169,8 @@ async def create_habit(
 
 @router.get("/habits", response_model=AdminHabitsListResponse)
 async def list_habits(
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitsListResponse:
     """Все клубы (включая архивированные)."""
     repo = service._habit_repo  # noqa: SLF001
@@ -174,7 +209,7 @@ async def _get_bot_id(bot_token: str) -> int | None:
             bot_id = int(data["result"]["id"])
             await redis.set(_BOT_ID_CACHE_KEY, str(bot_id), ex=86400)
             return bot_id
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         pass
     return None
 
@@ -205,7 +240,7 @@ async def _verify_chats_via_telegram(
                     params={"chat_id": chat_id, "user_id": bot_user_id},
                 ) as resp:
                     payload = await resp.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (TimeoutError, aiohttp.ClientError) as exc:
             return chat_id, {"_error": str(exc)}
 
         if not payload.get("ok"):
@@ -249,8 +284,8 @@ async def _verify_chats_via_telegram(
     response_model=AdminHabitAvailableChatsResponse,
 )
 async def list_available_chats(
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitAvailableChatsResponse:
     """Список Telegram-чатов, куда @join_prideclub_bot добавлен.
 
@@ -267,8 +302,8 @@ async def list_available_chats(
     ОБЪЯВЛЕН ДО /habits/{habit_id} — иначе FastAPI ловит
     'available_chats' как habit_id и пытается загрузить из БД.
     """
-    from app.core.config import get_settings
     from app.api.v1.internal_bot import _record_available_chat
+    from app.core.config import get_settings
 
     settings = get_settings()
     bot_token = settings.bot_token
@@ -431,7 +466,7 @@ async def list_available_chats(
 )
 async def refresh_chat(
     chat_id: int,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUserDep,
 ) -> AdminHabitRefreshChatResponse:
     """Принудительно обновить название/тип чата из Telegram.
 
@@ -463,7 +498,7 @@ async def refresh_chat(
         ) as session:
             async with session.get(api_url, params={"chat_id": chat_id}) as resp:
                 data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, aiohttp.ClientError) as exc:
         logger.warning("refresh_chat.http_failed", extra={"err": str(exc)})
         return AdminHabitRefreshChatResponse(
             ok=False,
@@ -529,7 +564,7 @@ def _drop_chat_from_redis(chat_id: int) -> int:
 @router.post("/habits/dismiss_chat/{chat_id}")
 async def dismiss_chat(
     chat_id: int,
-    user: TelegramUser = Depends(current_user),
+    user: TelegramUserDep,
 ) -> dict:
     """Вручную убрать чат из списка доступных групп.
 
@@ -551,8 +586,8 @@ async def dismiss_chat(
 @router.get("/habits/{habit_id}", response_model=AdminHabitOut)
 async def get_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Детали клуба (включая архив)."""
     habit = await service._habit_repo.get(habit_id)  # noqa: SLF001
@@ -568,17 +603,15 @@ async def get_habit(
 async def update_habit(
     habit_id: str,
     payload: AdminHabitUpdateRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitOut:
     """Частичное обновление полей клуба (TZ §3.6.7 — финансовые заморожены)."""
     fields = payload.model_dump(exclude_unset=True)
-    if (
-        "proof_type" in fields
-        and fields["proof_type"] is not None
-        and isinstance(fields["proof_type"], str)
-    ):
-        fields["proof_type"] = ProofType(fields["proof_type"])
+    # proof_type синхронизируется в HabitService.update на основе proof_types
+    # (миграция 012). Если клиент передал только proof_type — Pydantic
+    # validator в AdminHabitUpdateRequest уже сконвертировал в [proof_type].
+    fields.pop("proof_type", None)
     habit = await service.update(
         admin_id=user.id,
         habit_id=habit_id,
@@ -589,12 +622,57 @@ async def update_habit(
     return _habit_to_out(habit, active_members_count=active_count)
 
 
+@router.patch(
+    "/habits/{habit_id}/force-financials",
+    response_model=AdminHabitForceFinancialsResponse,
+)
+async def force_financials(
+    habit_id: str,
+    payload: AdminHabitForceFinancialsRequest,
+    user: TelegramUserDep,
+    service: HabitServiceDep,
+) -> AdminHabitForceFinancialsResponse:
+    """Force-update price_month / penalty_amount после первого участника.
+
+    Доступно только owner'у — middleware /admin/v1/* уже гейтит доступ.
+    Подтверждение (`confirm=true`) обязательно — защита от случайного клика.
+
+    Семантика:
+    - Меняет ТОЛЬКО habits.price_month и/или habits.penalty_amount.
+    - НЕ трогает: users.deposit_balance, memberships.subscription_until,
+      memberships.auto_renew_enabled, memberships.status.
+    - Уже оплаченные подписки участников продолжают действовать до
+      subscription_until по старой цене. Никто не выгоняется.
+
+    Все force-update логируются как WARN с полным контекстом (audit).
+    """
+    from datetime import UTC, datetime
+
+    result = await service.force_update_financials(
+        admin_id=user.id,
+        habit_id=habit_id,
+        price_month=payload.price_month,
+        penalty_amount=payload.penalty_amount,
+        confirm=payload.confirm,
+    )
+    await service._session.commit()  # noqa: SLF001
+    return AdminHabitForceFinancialsResponse(
+        ok=True,
+        habit_id=habit_id,
+        old_price_month=result["old_price_month"],
+        new_price_month=result["new_price_month"],
+        old_penalty_amount=result["old_penalty_amount"],
+        new_penalty_amount=result["new_penalty_amount"],
+        updated_at=datetime.now(UTC),
+    )
+
+
 @router.post("/habits/{habit_id}/activate", response_model=AdminHabitActionResponse)
 async def activate_habit(
     habit_id: str,
     payload: AdminHabitToggleRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.set_active(
         admin_id=user.id,
@@ -613,8 +691,8 @@ async def activate_habit(
 @router.post("/habits/{habit_id}/archive", response_model=AdminHabitActionResponse)
 async def archive_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.archive(admin_id=user.id, habit_id=habit_id)
     await service._session.commit()  # noqa: SLF001
@@ -629,8 +707,8 @@ async def archive_habit(
 @router.delete("/habits/{habit_id}", response_model=AdminHabitActionResponse)
 async def delete_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     """Алиас на archive: семантически «удалить в корзину».
 
@@ -655,8 +733,8 @@ async def delete_habit(
 @router.delete("/habits/{habit_id}/permanent")
 async def permanent_delete_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> dict:
     """Hard delete клуба из БД.
 
@@ -671,8 +749,6 @@ async def permanent_delete_habit(
 
     # Чистим Redis: любая запись с этим chat_id пропадает из выдачи.
     try:
-        from app.api.v1.internal_bot import _drop_stale_records
-
         redis = get_redis()
         chat_id = int(result.get("chat_id") or 0)
         if chat_id:
@@ -687,8 +763,8 @@ async def permanent_delete_habit(
 @router.post("/habits/{habit_id}/restore", response_model=AdminHabitActionResponse)
 async def restore_habit(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitActionResponse:
     habit = await service.restore(admin_id=user.id, habit_id=habit_id)
     await service._session.commit()  # noqa: SLF001
@@ -706,8 +782,8 @@ async def restore_habit(
 )
 async def get_habit_chat_status(
     habit_id: str,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitChatStatusResponse:
     """Текущее состояние chat_id клуба.
 
@@ -752,8 +828,8 @@ def _extract_invite_target(invite_link: str) -> str | None:
 )
 async def preview_chat_by_invite(
     payload: AdminHabitPreviewChatRequest,
-    user: TelegramUser = Depends(current_user),
-    service: HabitService = Depends(_get_habit_service),
+    user: TelegramUserDep,
+    service: HabitServiceDep,
 ) -> AdminHabitPreviewChatResponse:
     """Резолв Telegram-чата по инвайт-ссылке через Bot API.
 
@@ -792,7 +868,7 @@ async def preview_chat_by_invite(
         ) as session:
             async with session.get(api_url, params={"chat_id": target}) as resp:
                 data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, aiohttp.ClientError) as exc:
         logger.warning("preview_chat.http_failed", extra={"error": str(exc)})
         return AdminHabitPreviewChatResponse(
             ok=False,

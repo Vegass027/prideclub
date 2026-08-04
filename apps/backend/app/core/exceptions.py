@@ -52,6 +52,40 @@ class MembershipNotActiveError(DomainError):
     code = "membership_not_active"
 
 
+class SseStreamForbiddenError(DomainError):
+    """403 при выдаче SSE-токена для не-члена клуба.
+
+    Отдельное исключение вместо MembershipNotActiveError (который 400) —
+    семантика другая: не "плохой запрос", а "не имеешь права на этот ресурс".
+    code = "membership_not_active" оставлен для совместимости клиентской логики.
+    """
+
+    status_code = 403
+    code = "membership_not_active"
+
+
+class SseNotConfiguredError(DomainError):
+    """503: SSE_TOKEN_SECRET не задан в env на сервере.
+
+    Ops-проблема (мисконфиг), не баг юзера. Не 500, чтобы клиент не
+    делал бессмысленных retry — пусть покажет "обновите позже".
+    """
+
+    status_code = 503
+    code = "sse_not_configured"
+
+
+class TooManySseConnectionsError(DomainError):
+    """429: юзер превысил лимит одновременных SSE-соединений.
+
+    Защита от DoS через replayable SSE-токены (TTL 60с, не одноразовые).
+    Лимит и стратегия — см. app.services.sse.connection_limiter.
+    """
+
+    status_code = 429
+    code = "too_many_sse_connections"
+
+
 class HabitNotFoundError(DomainError):
     status_code = 404
     code = "habit_not_found"
@@ -120,3 +154,37 @@ class HabitArchivedError(DomainError):
 class HabitMemberLimitReachedError(DomainError):
     status_code = 409
     code = "habit_member_limit_reached"
+
+
+class InvalidTopicLinkError(DomainError):
+    status_code = 422
+    code = "invalid_topic_link"
+
+
+class HabitTopicDuplicateError(DomainError):
+    status_code = 409
+    code = "habit_topic_duplicate"
+
+
+class HabitTopicMismatchError(DomainError):
+    status_code = 400
+    code = "habit_topic_chat_mismatch"
+
+
+class CheckinWrongTopicError(DomainError):
+    """Сообщение пришло не из того топика, что привязан к клубу."""
+
+    status_code = 422
+    code = "not_checkin_topic"
+
+
+class PhotoUnavailableError(DomainError):
+    """Юзер не имеет photo_file_id (нет аватарки в Telegram или worker не подтянул)."""
+    status_code = 404
+    code = "photo_unavailable"
+
+
+class TelegramUnavailableError(DomainError):
+    """Telegram Bot API недоступен (timeout / 5xx / невалидный file_id)."""
+    status_code = 502
+    code = "telegram_unavailable"

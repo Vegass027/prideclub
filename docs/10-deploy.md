@@ -5,15 +5,18 @@
 
 ## 1. Подключение
 
-**Пароль SSH не хранится в этом документе** — он в локальном файле
-`~/.config/kilo/privichki-bootstrap.md` (вне репозитория). Пример команды:
+**SSH-доступ — по ed25519 ключу через алиас `privichki-prod`** (настроен в
+`~/.ssh/config` на маке, ключ `~/.ssh/id_ed25519_privichki` прописан в
+`/root/.ssh/authorized_keys` на сервере). Пароль не требуется и не используется.
 
 ```bash
-# Из локальной машины (пароль подставляется sshpass из локального файла):
-sshpass -p "$(cat ~/.config/kilo/privichki-bootstrap.md | grep '^Password:' | cut -d' ' -f2)" \
-  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  root@169.58.52.78 'echo OK'
+ssh privichki-prod                                # shell
+ssh privichki-prod 'docker ps'                    # удалённая команда
+rsync -az apps/backend/ privichki-prod:/tmp/new/  # rsync через ssh-config alias
 ```
+
+Пароль (если задан на сервере через `passwd root`) нужен ТОЛЬКО для аварийного
+recovery в Contabo rescue-mode — см. `~/.config/kilo/privichki-bootstrap.md`.
 
 ## 2. Структура на сервере
 
@@ -54,21 +57,19 @@ git push origin main
 ### 3.2 На сервере: rsync + пересобрать контейнеры
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 mkdir -p /tmp/privichki_new
 '  # стэйджинг чистится при рестарте контейнера
 
 # Локально (быстрее — отправляем только изменённые файлы)
-rsync -az -e "sshpass -p Gq8293dsaD ssh -o StrictHostKeyChecking=no" \
-  apps/backend/app/services/http_rate_limiter.py \
-  root@169.58.52.78:/tmp/privichki_new/backend/app/services/
+rsync -az apps/backend/app/services/http_rate_limiter.py \
+  privichki-prod:/tmp/privichki_new/backend/app/services/
 
 # ИЛИ полный sync (медленно но надёжно)
-rsync -az --delete -e "sshpass -p Gq8293dsaD ssh -o StrictHostKeyChecking=no" \
-  apps/backend/ root@169.58.52.78:/tmp/privichki_new/backend/
+rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
 
 # Применяем rsync в /app
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/
 rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/
 '
@@ -78,7 +79,7 @@ rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/
 
 **Изменения только в backend-коде (services, api, schemas):**
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/infra
 docker compose build backend --no-cache
 docker compose up -d backend
@@ -87,7 +88,7 @@ docker compose up -d backend
 
 **Изменения в worker/celery_app.py или импортах backend:**
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/infra
 docker compose build worker --no-cache
 docker compose up -d worker
@@ -99,7 +100,7 @@ docker compose up -d worker
 
 **Изменения в requirements.txt:**
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/infra
 docker compose build --no-cache          # пересобрать ВСЕ контейнеры
 docker compose up -d
@@ -109,7 +110,7 @@ docker compose up -d
 ### 3.4 Проверка после деплоя
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 docker ps --format "table {{.Names}}\t{{.Status}}"
 curl -s -m 5 http://127.0.0.1:8000/health     # {"status":"ok"}
 curl -s -m 5 http://127.0.0.1:8000/ready      # {"status":"ready"}
@@ -123,7 +124,7 @@ docker logs habit-worker --tail 5
 ### 4.1 Backend не стартует
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 docker logs habit-backend --tail 50
 '  # обычно: ImportError (не скопирован новый модуль) → повторить rsync + rebuild
 ```
@@ -131,7 +132,7 @@ docker logs habit-backend --tail 50
 ### 4.2 Worker перестал обрабатывать задачи
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 docker logs habit-worker --tail 30
 docker exec habit-redis redis-cli LLEN celery  # длина очереди
 '  # если очередь растёт — worker упал, рестарт: docker compose restart worker
@@ -140,7 +141,7 @@ docker exec habit-redis redis-cli LLEN celery  # длина очереди
 ### 4.3 Postgres connection full
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 docker exec habit-postgres psql -U habits -d habits \
   -c "SELECT count(*) FROM pg_stat_activity;"
 docker exec habit-postgres psql -U habits -d habits \
@@ -151,7 +152,7 @@ docker exec habit-postgres psql -U habits -d habits \
 ### 4.4 Откат к предыдущему коммиту
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/apps/backend
 git log --oneline -5          # посмотреть
 git checkout <prev_commit>    # откатить код
@@ -202,7 +203,7 @@ PYTHONPATH=/Users/dmitriy/Downloads/Privichki/apps/backend:$PYTHONPATH \
 ### 6.2 На сервере
 
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/apps/backend
 DATABASE_URL=postgresql+asyncpg://habits:habits@postgres:5432/habits \
 REDIS_URL=redis://redis:6379/0 \
@@ -217,7 +218,7 @@ REDIS_URL=redis://redis:6379/0 \
 
 Или проще (без docker run):
 ```bash
-sshpass -p 'Gq8293dsaD' ssh -o StrictHostKeyChecking=no root@169.58.52.78 '
+ssh privichki-prod '
 cd /app/apps/backend
 find . -type d -name __pycache__ -exec rm -rf {} +
 DATABASE_URL=postgresql+asyncpg://habits:habits@127.0.0.1:5432/habits \
