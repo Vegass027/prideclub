@@ -92,6 +92,69 @@ class TestSseMiddlewareBypass:
                 f"missing_init_data: {body}"
             )
 
+    def test_similar_path_under_events_is_not_bypassed(self, app_no_db: Any) -> None:
+        """Exact-match (не префикс) — /api/v1/events/history и подобные пути
+        ДОЛЖНЫ оставаться под initData-проверкой.
+
+        Если бы middleware использовал startswith('/api/v1/events/'),
+        будущий эндпоинт /api/v1/events/history (или любой другой под
+        /api/v1/events/*) неожиданно оказался бы без initData-проверки —
+        серьёзная дыра в безопасности (SSE_AUTH_BYPASS_PATHS по дизайну
+        сдерживает blast-radius до ОДНОГО пути).
+        """
+        # Проверяем /api/v1/events/history — должен требовать initData
+        # (вернёт 401 missing_init_data, не invalid_service_token).
+        with TestClient(app_no_db) as client:
+            r = client.get("/api/v1/events/history")
+        assert r.status_code == 401, f"body: {r.text}"
+        assert r.json()["code"] == "missing_init_data", (
+            f"/api/v1/events/history должен требовать initData, "
+            f"не быть в bypass. Got: {r.json()}"
+        )
+
+        # Аналогично /api/v1/events/anything-else — тоже не bypass.
+        with TestClient(app_no_db) as client:
+            r = client.get("/api/v1/events/foo")
+        assert r.status_code == 401
+        assert r.json()["code"] == "missing_init_data"
+
+    def test_last_event_id_query_param_accepted_in_signature(self, app_no_db: Any) -> None:
+        """last_event_id как опциональный query-параметр зафиксирован в
+        сигнатуре эндпоинта с Step 2 (контракт).
+
+        Проверяем через FastAPI dependant.query_params, что параметр
+        `last_event_id` действительно присутствует в определении роута и
+        опционален (default None). Это гарантирует, что фронт (Step 6) может
+        слать параметр уже сейчас, а Step 4 (XREAD) не будет менять
+        сигнатуру хендлера.
+        """
+        from app.api.v1.events import router as events_router
+
+        # Найти роут /events/stream в роутере
+        stream_route = None
+        for route in events_router.routes:
+            if getattr(route, "path", None) == "/events/stream":
+                stream_route = route
+                break
+        assert stream_route is not None, "Route /events/stream не найден"
+
+        # Параметры query через FastAPI dependant (type hints из сигнатуры)
+        dependant = stream_route.dependant
+        query_param_names = {
+            f.name for f in dependant.query_params
+        }
+        assert "last_event_id" in query_param_names, (
+            f"last_event_id должен быть в query_params роута, "
+            f"найдено: {query_param_names}"
+        )
+
+        # Должен быть опциональным (required=False)
+        last_event_field = next(f for f in dependant.query_params if f.name == "last_event_id")
+        assert last_event_field.required is False, (
+            f"last_event_id должен быть опциональным, "
+            f"got required={last_event_field.required}"
+        )
+
 
 # --- token validation ------------------------------------------------------
 

@@ -112,11 +112,18 @@ async def issue_sse_stream_token(
 SSE_HEARTBEAT_INTERVAL_SECONDS = 30
 
 
-async def _sse_heartbeat_generator(request: Request, user_id: int, habit_id: str):
+async def _sse_heartbeat_generator(
+    request: Request,
+    user_id: int,
+    habit_id: str,
+    last_event_id: str | None = None,
+):
     """Heartbeat-only SSE generator.
 
     Шаг 2: пустой стрим, только heartbeat. Шаг 4 заменит `await asyncio.sleep`
-    на `XREAD BLOCK` (Redis Streams, см. sse+redis.md §2.4).
+    на `XREAD BLOCK` (Redis Streams, см. sse+redis.md §2.4). `last_event_id`
+    принимается уже сейчас (контракт эндпоинта) — в Step 4 используется
+    как начальный ID для XREAD вместо `$`.
 
     При disconnect клиента Starlette отменяет генератор → asyncio.CancelledError.
     Ловим, делаем cleanup (для Step 4 — cancel XREAD task + close Redis client),
@@ -140,6 +147,16 @@ async def stream_sse_events(
     request: Request,
     habit_id: str = Query(..., min_length=1),
     token: str = Query(..., min_length=1),
+    last_event_id: str | None = Query(
+        None,
+        description=(
+            "Опциональный Redis Streams ID для resume позиции. "
+            "Нативный EventSource шлёт Last-Event-ID только в рамках одной "
+            "инстанции; для ручного reconnect'а с новым токеном фронт "
+            "передаёт last_event_id через query (см. sse+redis.md §2.4). "
+            "Step 2 принимает параметр, Step 4 использует в XREAD."
+        ),
+    ),
 ) -> StreamingResponse:
     """SSE-стрим событий по клубу.
 
@@ -147,10 +164,13 @@ async def stream_sse_events(
     НЕ валидирует initData для этого пути (exact-path исключение в
     SSE_AUTH_BYPASS_PATHS), иначе EventSource не сможет передать токен.
 
-    На этом этапе (Step 2) — heartbeat-only skeleton. Реальный XREAD
-    появится в Step 4.
+    Параметр `last_event_id` принимается уже сейчас (Step 2), чтобы
+    фронт (Step 6) мог слать его с первого дня, и чтобы сигнатура
+    эндпоинта не менялась при подключении реального XREAD в Step 4.
+    На этом этапе он никак не используется (Step 4 начнёт читать из
+    Redis Streams начиная с этого ID).
 
-    Возвращает text/event-stream с периодическими `: heartbeat\n\n`
+    Возвращает text/event-stream с периодическими `: heartbeat\\n\\n`
     комментариями (SSE-комментарии не считаются событиями у клиента,
     нужны только для keep-alive и пробуждения proxy).
     """
@@ -171,7 +191,7 @@ async def stream_sse_events(
     user_id = int(payload["sub"])
 
     return StreamingResponse(
-        _sse_heartbeat_generator(request, user_id, habit_id),
+        _sse_heartbeat_generator(request, user_id, habit_id, last_event_id),
         media_type="text/event-stream",
         headers={
             # nginx-specific hint: "не буферизируй". Дополняет
