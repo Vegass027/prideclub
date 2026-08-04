@@ -88,15 +88,34 @@ build_images() {
     ok "Образы собраны"
 }
 
-# -- 4. Миграции -----------------------------------------------------------
+# -- 4. Чистка старого build cache и dangling образов -----------------------
+#
+# Без этого шага build cache накапливается до десятков GB после каждого
+# --no-cache rebuild (Pravki.md §10 — пост-мортем от 2026-08-04).
+# - docker image prune -f: dangling (без тегов). На нашем флоу 0, но
+#   подчищаем на всякий случай после свежего build.
+# - docker builder prune -f --filter "until=72h": build cache старше 72ч.
+#   Активные слои текущих 9 образов (4 наших + 5 базовых) НЕ удаляются —
+#   они нужны для следующего rebuild.
+# Пропускная способность: 5–30 сек на типичном VDS.
+
+prune_images() {
+    log "Чищу dangling образы и build cache старше 72ч"
+    REMOTE_CMD 'docker image prune -f' || true
+    REMOTE_CMD 'docker builder prune -f --filter "until=72h"' || true
+    REMOTE_CMD 'df -h / --output=used,avail,pcent'
+    ok "Образы и cache почищены"
+}
+
+# -- 5. Миграции -----------------------------------------------------------
 
 run_migrations() {
     log "Применяю миграции БД"
     REMOTE_CMD 'cd /app && docker compose run --rm backend alembic upgrade head'
-    ok "Миграции применены"
+    ok "Миграции примены"
 }
 
-# -- 5. Поднять стек -------------------------------------------------------
+# -- 6. Поднять стек -------------------------------------------------------
 
 up_stack() {
     log "Поднимаю стек"
@@ -104,7 +123,7 @@ up_stack() {
     ok "Стек работает"
 }
 
-# -- 6. Ждать готовности ----------------------------------------------------
+# -- 7. Ждать готовности ----------------------------------------------------
 
 wait_ready() {
     log "Жду 60с прогрева (backend стартует ~20с + apply)"
@@ -119,7 +138,7 @@ wait_ready() {
     fi
 }
 
-# -- 7. Регистрация webhook Telegram бота ----------------------------------
+# -- 8. Регистрация webhook Telegram бота ----------------------------------
 
 register_webhook() {
     log "Регистрирую webhook бота в Telegram"
@@ -134,6 +153,7 @@ main() {
     check_remote
     sync_code
     build_images
+    prune_images
     run_migrations
     up_stack
     wait_ready

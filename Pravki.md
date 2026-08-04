@@ -342,6 +342,41 @@ rsync compose → правка `.env` → `docker compose up -d bot`. Вериф
    спала. **Добавлено `ENVIRONMENT: ${ENVIRONMENT:-production}`** — теперь на проде fail-fast
    работает, на dev — отключается через явный `ENVIRONMENT=development`.
 
+### 7.9 Infra: автоматическая чистка Docker — S ✅ ВЫПОЛНЕНО (2026-08-04)
+
+**Симптом:** после 2 недель активных `docker compose build X --no-cache` ребилдов диск
+`/` заполнился до 91% (`8.7 GB` свободно из `96 GB`). `docker system df` показывал
+`Images: 206, Reclaimable: 61 GB` и `Build Cache: 1012, 78 GB` — на вид огромный мусор.
+
+**Реальная причина:** `docker images` показал всего **9 образов** (4 наших + 5 базовых),
+0 dangling. Всё "106" в Images и "61 GB reclaimable" — это **build cache** (счётчики BuildKit),
+а не реальные образы. После `docker builder prune -af` (фоном, ~5 минут):
+```
+Before: Images 7 (2.1 GB), Build Cache 1012 (78 GB), / 91%
+After:  Images 7 (2.1 GB), Build Cache 24 (1.8 GB), / 9%
+```
+
+**Реализованные файлы:**
+- `infra/deploy.sh` — новая функция `prune_images()`, вызывается между `build_images()`
+  и `run_migrations()`. Делает `docker image prune -f` + `docker builder prune -f
+  --filter "until=72h"`. Время выполнения: 5–30 секунд.
+- Cron на хосте (`/var/spool/cron/crontabs/root`):
+  ```
+  0 4 * * 0 docker image prune -a -f --filter "until=168h" && \
+            docker builder prune -f --filter "until=168h"
+  ```
+  Воскресенье 04:00 UTC — 7 дней порог для дополнительной страховки.
+- `Pravki.md` §10.1 — задокументирован workflow.
+
+**Уроки (анти-паттерны):**
+1. `docker system df` врёт про images — показывает build cache слои как "reclaimable images".
+   Реальное число смотри через `docker images --format "{{.Repository}}:{{.Tag}}"` — там будет
+   только то что действительно нужно.
+2. `docker builder prune -af` (без фильтра) единственный способ вычистить накопившийся cache.
+   С `--filter "until=72h"` слишком консервативен если cache старше 72ч массово.
+3. Prune занимает **минуты** (5–10 на 1000+ entries), а не секунды. Запускать в фоне через
+   `nohup ... &`, не блокировать deploy-script.
+
 ## 8. Готовые коммиты (сессия 2026-07-23)
 
 | SHA | Сообщение |
@@ -400,6 +435,41 @@ curl -s https://app.prideclub.fun/health
 git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin feature/topic-scoped-checkin
 ```
 
+### 10.1. Автоматическая чистка Docker (snapshot 2026-08-04)
+
+**Проблема:** `docker compose build X --no-cache` оставляет старые build cache слои в
+`/var/lib/docker/overlay2` (`Build Cache: 1012 entries, 78.56 GB`). Через 2 недели работы
+диск `/` заполняется до 91% (8.7 GB свободно из 96 GB).
+
+**Решение — два уровня:**
+
+1. **`infra/deploy.sh` — шаг `prune_images`** сразу после `build_images`:
+   ```bash
+   docker image prune -f                              # dangling (после build их обычно 0)
+   docker builder prune -f --filter "until=72h"      # build cache старше 72ч
+   ```
+   Активные образы (4 наших + 5 базовых = 9 штук, ~2.2 GB) **не трогаются** — они нужны
+   следующему rebuild. Удаляются только слои, старше 3 дней, которые неактивны.
+
+2. **Еженедельный cron на хосте** (страховка, если деплой идёт мимо `deploy.sh`):
+   ```
+   0 4 * * 0 /usr/bin/docker image prune -a -f --filter "until=168h" \
+     && /usr/bin/docker builder prune -f --filter "until=168h" \
+     >> /var/log/docker-prune.log 2>&1
+   ```
+   Воскресенье 04:00 UTC — 7 дней порог.
+
+**Результат после фикса (snapshot 2026-08-04):**
+```
+Before:  88G used, 8.7G free (91%) — Images 206, Build Cache 78 GB
+After:   8.5G used, 88G free (9%)  — Images 7, Build Cache 1.8 GB
+```
+
+**Чего НЕ делаем:**
+- ❌ `docker system prune -a` без фильтра — может удалить base image, который нужен
+- ❌ `docker volume prune` — volumes = данные (даже 85 MB, не трогаю)
+- ❌ Прямое удаление в `/var/lib/docker/...` — опасно, делается только через `docker` CLI
+
 ## 11. Все задачи из §7 выполнены
 
 | # | Задача | Статус | Коммит |
@@ -411,6 +481,7 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin feature/top
 | **7.1** Фото участников в лидерборде (M) | ✅ | `8f389e1`, `7a9eefd`, `b682163`, `62d01d7`, `6a87fc2` |
 | **7.6** Ребрендинг «Рейтинг» + row в одну строку (M, v3.2) | ✅ | `fb55d91`, `ecadc2b` |
 | **7.8** Бот молчит: webhook SSL + worker DI-bug (M) | ✅ | `TBD` (этот коммит, см. §7.8) |
+| **7.9** Автоматическая чистка Docker (S) | ✅ | `TBD` (этот коммит, см. §7.9) |
 | **7.7** Подтверждение ловли с inline-кнопками (S) | 🔴 TODO | — |
 
 Все задачи кроме 7.7 закрыты.
