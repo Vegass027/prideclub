@@ -15,6 +15,7 @@ from app.core.logging import get_logger
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage, ProofValidationError
 from db.session import async_session_factory  # type: ignore[import-not-found]
@@ -64,6 +65,7 @@ async def _process(
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),
                 checkin_repo=CheckinRepository(session),
+                penalty_repo=PenaltyRepository(session),
                 cache=cache,
             )
             checkin, created = await service.process_checkin(

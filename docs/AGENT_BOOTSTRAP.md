@@ -2,10 +2,11 @@
 
 > Этот документ — **главная точка входа**. Прочти его первым делом при старте
 > нового чата. Он говорит, **что прочитать дальше**, **как подключаться к серверу**,
-> **как коммитить и деплоить**, и — самое важное — **как поддерживать доки в
-> актуальном состоянии после каждой задачи**.
+> **как коммитить и деплоить**, и — самое важное — **как поддерживать доки в актуальном состоянии после каждой задачи**.
 >
-> Snapshot от 2026-07-24.
+> Snapshot от 2026-08-04. Изменён после post-mortem «бот молчит, чек-ины не доходят»
+> (см. §3 «ДВА .env файла» ниже — прочти перед любым изменением webhook URL или env).
+> актуальном состоянии после каждой задачи**.
 
 ## 0. Если нужны серверные операции (SSH)
 
@@ -88,7 +89,8 @@ AGENTS.md                     # правила для AI-агентов
 ├── apps/{backend,bot,frontend,worker}/ ← те же файлы, что локально
 ├── packages/shared/security.py
 ├── infra/                              ← docker-compose.yml + Dockerfile'ы
-├── .env                                ← PROD-секреты (chmod 600)
+├── .env                                ← PROD-секреты (chmod 600, монтируется в backend)
+├── infra/.env                          ← для docker-compose ${VAR} подстановки (см. ⚠️ ниже)
 
 Docker volumes:
   habit-club_pgdata         ← данные PostgreSQL 16
@@ -110,6 +112,58 @@ Docker контейнеры (7):
 Host nginx:
   /etc/nginx/sites-enabled/habit-club   ← reverse proxy 80/443 → 127.0.0.1:{5173,8000,8080,8081}
   /etc/letsencrypt/                      ← TLS по домену
+```
+
+### ⚠️ На сервере ДВА `.env` файла — НЕ путай
+
+> **Snapshot 2026-08-04:** главный урок post-mortem «бот молчит, чек-ины не доходят». Запомни это
+> перед любым изменением webhook / webapp URL, токенов или env-переменных, которые читает
+> `docker-compose`.
+
+| Файл | Кто читает | Что внутри |
+|---|---|---|
+| `/app/.env` | Backend-контейнер (монтируется как `/app/.env`) + Pydantic Settings в `app/core/config.py` | Секреты для backend: `DATABASE_URL`, `SERVICE_SECRET`, `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, и т.д. |
+| `/app/infra/.env` | **Только** `docker-compose` для `${VAR}` интерполяции в `infra/docker-compose.yml` | Переменные, пробрасываемые в контейнеры через `x-backend-env` / `x-bot-env` / `x-worker-env` YAML anchors. **Включает `WEBHOOK_BASE_URL`, `WEBAPP_URL`, `WEBHOOK_SECRET`, `BOT_TOKEN`, `SERVICE_SECRET`, `ENVIRONMENT`** |
+
+**Типичная ошибка нового агента** (snapshot 2026-08-04):
+
+```bash
+# ❌ Неправильно — поправил /app/.env, перезапустил бота, ничего не помогло
+ssh privichki-prod 'sed -i ... /app/.env && docker compose up -d bot'
+
+# ✅ Правильно — править /app/infra/.env (это читает docker-compose)
+ssh privichki-prod 'sed -i ... /app/infra/.env && cd /app/infra && docker compose up -d bot'
+```
+
+**Почему так:** `docker-compose` ищет `.env` рядом с `docker-compose.yml` (т.е. в `/app/infra/`)
+и подставляет значения `${VAR}` в `environment:` блоках сервисов **на старте compose**.
+`/app/.env` — это уже файл **внутри** backend-контейнера (или volume-mounted), его читает только
+сам backend, не compose.
+
+**Какие переменные живут ГДЕ (на 2026-08-04):**
+
+| Переменная | Файл | Почему |
+|---|---|---|
+| `WEBHOOK_BASE_URL` | `/app/infra/.env` | Нужна в `x-bot-env` через `${...}` подстановку compose |
+| `WEBAPP_URL` | `/app/infra/.env` | Аналогично |
+| `WEBHOOK_SECRET`, `BOT_TOKEN`, `SERVICE_SECRET` | `/app/infra/.env` + `/app/.env` (дубликат) | Compose читает одну, backend читает другую |
+| `ENVIRONMENT` | `/app/infra/.env` (читается compose) + backend читает свою копию | Если в compose не пробросить — будет `development` и fail-fast валидация не сработает |
+| `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL` | `/app/infra/.env` (compose) + `/app/.env` (backend) | Аналогично |
+| `OWNER_TELEGRAM_ID`, `ADMIN_TELEGRAM_CHAT_ID`, `SENTRY_DSN` | `/app/infra/.env` (compose) + `/app/.env` (backend) | Аналогично |
+
+**Защита от регрессии (snapshot 2026-08-04):** в `infra/docker-compose.yml` для обязательных
+URL-переменных бота используется синтаксис `${VAR:?must be set in prod ...}` — пустое значение
+рвёт `docker compose up` ДО старта контейнера (см. `x-bot-env` anchor, строки `WEBHOOK_BASE_URL`,
+`WEBAPP_URL`). Теперь нельзя случайно задеплоить с пустым или битым URL.
+
+**После правки переменных в `/app/infra/.env` — перезапустить ТОЛЬКО соответствующий контейнер:**
+
+```bash
+ssh privichki-prod 'cd /app/infra && docker compose up -d bot'      # только бот
+ssh privichki-prod 'cd /app/infra && docker compose up -d backend'   # только бэк
+ssh privichki-prod 'cd /app/infra && docker compose up -d worker'    # только воркер
+# НИКОГДА: docker compose down (гасит весь стек)
+# НИКОГДА: docker compose up -d --force-recreate (пересоздаёт ВСЁ)
 ```
 
 ## 4. Активные контейнеры (что для чего)
@@ -259,6 +313,14 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 - 🟡 **Контракт `chat_id` vs `habit_id`** в `apps/backend/app/api/v1/internal_payments.py`
   ожидает `chat_id: int`, бот шлёт `habit_id: str`. 422 без починки.
 - 🟡 **Bot логирует plain text**, не structlog-JSON как backend/worker.
+- ✅ **Webhook SSL error (закрыто 2026-08-04)** — `WEBHOOK_BASE_URL` указывал на сырой IP
+  в `/app/infra/.env`, Telegram не доставлял апдейты (2 шт в `pending_update_count`).
+  Пофикшено: правка `/app/infra/.env` + `docker compose up -d bot`. Детали — §3 «ДВА
+  .env файла» + `docs/02-architecture.md` §9.2.
+- ✅ **Worker `CheckinService` DI-bug (закрыто 2026-08-04)** — worker не передавал
+  `penalty_repo` в конструктор `CheckinService`, чек-ины возвращали `ok=False` без записи.
+  Пофикшено: добавлен `penalty_repo=PenaltyRepository(session)` в
+  `apps/worker/worker/tasks/process_checkin.py`.
 
 Подробнее — `docs/09-prod-readiness.md` §1.1 и `docs/02-architecture.md` §9.
 

@@ -1,6 +1,8 @@
 # Pravki.md — задачи и аудит
 
-> Snapshot от 2026-07-23 (поздний). Обновлено после 6 UI-фикс коммитов, аудита backend, push в `origin/feature/topic-scoped-checkin`.
+> Snapshot от 2026-08-04. Обновлено после post-mortem «бот молчит, чек-ины не доходят»:
+> фикс `/app/infra/.env` (WEBHOOK_BASE_URL/WEBAPP_URL на сырой IP) + фикс worker `CheckinService`
+> DI-bug (отсутствовал `penalty_repo`). Полная цепочка — см. §7.8 ниже.
 
 ## 0. Workflow
 
@@ -275,6 +277,71 @@
 
 **Оценка:** ~2 часа.
 
+### 7.8 Infra/Worker: «бот молчит, чек-ины не доходят» — M ✅ ВЫПОЛНЕНО (2026-08-04)
+
+**Симптом:** юзер шлёт видео-кружок в топик клуба в Telegram. Бот **не реагирует вообще**.
+В `Telegram.getWebhookInfo` — `pending_update_count: 2`, `last_error_message: "SSL error {certificate verify failed}"`.
+
+**Корневая причина №1 (фикс 1 — `/app/infra/.env`):**
+
+В `/app/infra/.env` (который читает `docker-compose` через `${VAR}` подстановку в `infra/docker-compose.yml`)
+стояло:
+```
+WEBHOOK_BASE_URL=https://169.58.52.78   ← сырой IP
+WEBAPP_URL=https://169.58.52.78         ← сырой IP
+```
+TLS-сертификат в `/etc/letsencrypt/` выписан на `api.prideclub.fun`, не на IP. Telegram пытается
+доставить апдейт на `https://169.58.52.78/bot/webhook` → TLS handshake падает → апдейты копятся в
+`pending_update_count`. Юзер видит «молчащего бота».
+
+**Дополнительный скрытый баг:** в `x-bot-env` anchor `infra/docker-compose.yml` **не было**
+`ENVIRONMENT`. Без `ENVIRONMENT=production` в контейнере — `_validate_webhook_url()` в
+`apps/bot/bot/main.py` возвращался рано (default = `development`) и **не валидировал URL**.
+
+**Корневая причина №2 (фикс 2 — worker `process_checkin.py`):**
+
+После фикса №1 Telegram доставил 2 застрявших апдейта, бот принял, backend положил в Celery,
+worker **упал** с `CheckinService.__init__() missing 1 required positional argument: 'penalty_repo'`.
+`process_checkin._process()` имеет `except Exception` catch-all, который глотает TypeError и
+возвращает `{"ok": False, "err": "..."}`. Celery помечает задачу `succeeded`. Чек-ины **терялись
+молча** — юзер видел «Принято» в чате, а в БД ничего не было.
+
+Причина: в `CheckinService.__init__` добавили `penalty_repo` (для `get_today_status` →
+`TodayStats.penalties_count/total`), backend обновили (`apps/backend/app/api/v1/habits.py:42-49`),
+а worker — забыли.
+
+**Реализованные файлы:**
+- `infra/docker-compose.yml` — `x-bot-env` anchor: добавлены `${VAR:?must be set in prod ...}` на
+  `WEBHOOK_BASE_URL` / `WEBAPP_URL` (fail-fast compose), плюс `ENVIRONMENT: ${ENVIRONMENT:-production}`.
+- `apps/worker/worker/tasks/process_checkin.py` — добавлен `PenaltyRepository` импорт и
+  `penalty_repo=PenaltyRepository(session)` в инстанс `CheckinService`.
+- `/app/infra/.env` на сервере — `WEBHOOK_BASE_URL=https://api.prideclub.fun`, `WEBAPP_URL=https://app.prideclub.fun`.
+- `docs/02-architecture.md` §9.2 — новая запись «Закрытые проблемы (snapshot 2026-08-04)».
+- `docs/AGENT_BOOTSTRAP.md` §3 — новый раздел «⚠️ На сервере ДВА `.env` файла — НЕ путай» с
+  подробной таблицей кто-что-где-почему.
+
+**Деплой:** rsync worker → `docker compose build worker --no-cache` → `docker compose up -d worker`;
+rsync compose → правка `.env` → `docker compose up -d bot`. Верификация:
+- `getWebhookInfo` → `url=https://api.prideclub.fun/bot/webhook`, `pending_update_count=0`.
+- Синтетический тест через Celery: `worker.tasks.process_checkin.run` → `ok=True, checkin_id=...`
+  → строка в `checkins` (потом удалил тестовую запись).
+- 2 ранее застрявших апдейта Telegram доставил → бот принял → backend enqueued → worker
+  (после фикса) обработал бы (если бы фикс был применён ДО доставки; в нашем случае — оба
+  дошли до worker'а, оба вернули `ok=False` до фикса №2, в БД ничего нет — это побочный эффект
+  неработавшего периода).
+
+**Уроки (анти-паттерны):**
+1. **Не два, а три источника правды для env** — `/app/.env` (backend-mounted), `/app/infra/.env`
+   (compose interpolation), и `.env.example` (документация). Правка `/app/.env` **не помогает**
+   для переменных бота — править `/app/infra/.env`.
+2. **Catch-all `except Exception` в worker скрывает DI-баги**. Без логирования на уровне
+   `logger.error("worker_checkin_failed", extra={"err": str(exc), "stack": traceback.format_exc()})`
+   эти баги невидимы. Backlog: добавить traceback + alert в Sentry.
+3. **Fail-fast валидация должна быть активирована на проде**. Сейчас `bot/main.py:_validate_webhook_url`
+   требует `environment == "production"`, но `ENVIRONMENT` не передавалось в контейнер → валидация
+   спала. **Добавлено `ENVIRONMENT: ${ENVIRONMENT:-production}`** — теперь на проде fail-fast
+   работает, на dev — отключается через явный `ENVIRONMENT=development`.
+
 ## 8. Готовые коммиты (сессия 2026-07-23)
 
 | SHA | Сообщение |
@@ -343,6 +410,7 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin feature/top
 | **7.2** `/api/v1/payments/topup` (M) | ✅ | `3a40b31` |
 | **7.1** Фото участников в лидерборде (M) | ✅ | `8f389e1`, `7a9eefd`, `b682163`, `62d01d7`, `6a87fc2` |
 | **7.6** Ребрендинг «Рейтинг» + row в одну строку (M, v3.2) | ✅ | `fb55d91`, `ecadc2b` |
+| **7.8** Бот молчит: webhook SSL + worker DI-bug (M) | ✅ | `TBD` (этот коммит, см. §7.8) |
 | **7.7** Подтверждение ловли с inline-кнопками (S) | 🔴 TODO | — |
 
 Все задачи кроме 7.7 закрыты.

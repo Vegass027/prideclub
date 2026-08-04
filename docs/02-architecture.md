@@ -311,6 +311,23 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | PATCH `/admin/v1/habits/{id}` не сохранял price_month | `apps/frontend/src/admin/pages/HabitEditForm.tsx` | Добавлен `price_month` и `penalty_amount` в payload + helper `rubToKopecks`; типы `AdminHabitUpdatePayload` расширены |
 | Backend ForwardRef('Response') "class not fully defined" | `apps/backend/app/core/middleware.py` | Убран `from __future__ import annotations` (PEP 563 + starlette.Response = нерезолвимый forward ref) |
 
+### 9.2. Закрытые проблемы (snapshot 2026-08-04 — post-mortem: «бот молчит, чек-ины не доходят»)
+
+| Что | Где | Фикс |
+|---|---|---|
+| `WEBHOOK_BASE_URL` и `WEBAPP_URL` указывали на сырой IP `169.58.52.78` в `/app/infra/.env` (а не на домен) → Telegram не мог доставить апдейты (SSL handshake fail) → `pending_update_count: 2` копилось бесконечно | `infra/docker-compose.yml` (через `${WEBHOOK_BASE_URL}` подстановку из `/app/infra/.env`) + `bot/main.py:111` | (1) Поправил `/app/infra/.env` на проде: `WEBHOOK_BASE_URL=https://api.prideclub.fun`, `WEBAPP_URL=https://app.prideclub.fun`; (2) Добавил `ENVIRONMENT: ${ENVIRONMENT:-production}` в `x-bot-env` anchor — теперь `bot/main.py:_validate_webhook_url` срабатывает на проде; (3) Использовал `${WEBHOOK_BASE_URL:?must be set in prod}` и `${WEBAPP_URL:?must be set in prod}` — пустое значение теперь роняет `docker compose up` ещё до старта контейнера; (4) После правки — `docker compose up -d bot`, Telegram доставил 2 зависших апдейта, чек-ины пошли |
+| Worker `CheckinService.__init__() missing 1 required positional argument: 'penalty_repo'` → молчаливый `ok=False, err=...` (Task succeeded per Celery, но в БД ничего) | `apps/worker/worker/tasks/process_checkin.py:62-68` | Добавлен `penalty_repo=PenaltyRepository(session)` (как в `apps/backend/app/api/v1/habits.py:42-49`). Причина бага: в `CheckinService.__init__` добавили `penalty_repo` для `get_today_status` (для `TodayStats.penalties_count/total`), но забыли обновить worker. **Скрытый анти-паттерн:** `process_checkin._process()` имеет `except Exception` catch-all, который глотает любую ошибку инстанцирования и возвращает `{"ok": False, "err": "..."}` — это маскирует баги в DI. Не блокирует (это вне scope этого фикса), но в backlog |
+
+**Урок для будущих агентов:**
+
+1. На сервере ДВА `.env`-файла, не один:
+   - `/app/.env` — монтируется в backend-контейнер (читается приложением).
+   - `/app/infra/.env` — читается `docker-compose` для `${VAR}` подстановки.
+   - **`WEBHOOK_BASE_URL`, `WEBAPP_URL`** — переменные для `docker-compose`, живут в `/app/infra/.env`. Правка `/app/.env` не помогает.
+2. После правки `WEBHOOK_BASE_URL`/`WEBAPP_URL` — перезапустить **только** `habit-bot`: `ssh privichki-prod 'cd /app/infra && docker compose up -d bot'`. **Не делать `docker compose down`** — это гасит весь стек.
+3. При добавлении новых обязательных параметров в DI-конструктор сервиса (`CheckinService`, `PenaltyService`, и т.д.) — синхронно обновить **все** call-сайты: backend API DI (`apps/backend/app/api/v1/*.py`), worker таски (`apps/worker/worker/tasks/*.py`), admin endpoint DI. Перед merge — `rg "ServiceName\\("` по всему проекту.
+4. Worker-таски имеют `except Exception` catch-all, который **маскирует баги DI** как `ok=False`. Если в логах видишь `worker_checkin_failed` с `err='CheckinService.__init__() ...'`, НЕ игнорируй — это серьёзный баг.
+
 ---
 
 ## 10. Topic-scoped чек-ины и уведомления (миграции 010, 011)

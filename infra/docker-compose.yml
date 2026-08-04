@@ -21,11 +21,12 @@ x-backend-env: &backend-env
 x-bot-env: &bot-env
   BOT_TOKEN: ${BOT_TOKEN}
   WEBHOOK_SECRET: ${WEBHOOK_SECRET}
-  WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL}
+  WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:?must be set in prod (https://api.prideclub.fun)}
   WEBHOOK_PATH: ${WEBHOOK_PATH:-/bot/webhook}
-  WEBAPP_URL: ${WEBAPP_URL}
+  WEBAPP_URL: ${WEBAPP_URL:?must be set in prod (https://app.prideclub.fun)}
   BACKEND_URL: http://backend:8000
   SERVICE_SECRET: ${SERVICE_SECRET}
+  ENVIRONMENT: ${ENVIRONMENT:-production}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
 x-worker-env: &worker-env
