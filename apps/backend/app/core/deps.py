@@ -13,6 +13,7 @@ Database-level aliases (`SessionDep`, `RedisDep`) live here. Authentication
 aliases (`TelegramUserDep`, `TelegramUserDbDep`, `ServiceCallerDep`) live in
 `app.api.v1.users` to avoid circular imports.
 """
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -23,11 +24,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.redis import get_redis
+from app.db.redis_async import get_async_redis
 from app.db.session import get_session
 from app.services.avatar_service import AvatarService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
+# Async-синглтон для XREAD/SSE — см. apps/backend/app/db/redis_async.py
+# и PostReview fix к Step 4 (FD-leak при reconnect-loop, если создавать
+# pool на каждый request).
+AsyncRedisDep = Annotated[Redis, Depends(get_async_redis)]
 
 
 def get_avatar_service(
@@ -55,4 +61,10 @@ def get_avatar_service(
 AvatarServiceDep = Annotated[AvatarService, Depends(get_avatar_service)]
 
 
-__all__ = ["SessionDep", "RedisDep", "AvatarServiceDep", "get_avatar_service"]
+__all__ = [
+    "SessionDep",
+    "RedisDep",
+    "AsyncRedisDep",
+    "AvatarServiceDep",
+    "get_avatar_service",
+]

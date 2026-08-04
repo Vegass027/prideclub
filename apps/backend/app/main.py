@@ -33,6 +33,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.middleware import install_middlewares
 from app.core.observability import init_sentry
 from app.db.redis import close_redis, get_redis
+from app.db.redis_async import close_async_redis, get_async_redis
 
 
 @asynccontextmanager
@@ -79,11 +80,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             extra={"error": str(exc)},
         )
 
+    # Startup: то же для async-Redis singleton из db/redis_async.py.
+    # Нужен для SSE XREAD в RedisStreamBus — connection pool живёт
+    # один на процесс, иначе на каждом SSE-открытии создавалась бы
+    # новая фабрика `redis.asyncio.from_url()` (PostReview fix от 2026-08-04,
+    # см. блокер в ревью Step 4 — FD-leak при reconnect-loop).
+    try:
+        async_redis = get_async_redis()
+        await async_redis.ping()
+        logger.info("backend.startup.async_redis_ready")
+    except Exception as exc:  # noqa: BLE001 — старт должен быть устойчивым
+        logger.warning(
+            "backend.startup.async_redis_ping_failed",
+            extra={"error": str(exc)},
+        )
+
     logger.info("backend.startup")
     try:
         yield
     finally:
         await close_redis()
+        await close_async_redis()
         await close_session(app.state.bot_http)
         logger.info("backend.shutdown")
 
@@ -135,6 +152,7 @@ def create_app() -> FastAPI:
 
     # Раздача загруженных медиа (фото клубов)
     import os
+
     _static_dir = os.environ.get("STATIC_DIR", "/app/static")
     os.makedirs(_static_dir, exist_ok=True)
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
@@ -148,21 +166,11 @@ def create_app() -> FastAPI:
     app.include_router(payments.router, prefix="/api/v1", tags=["payments"])
     app.include_router(leaderboard.router, prefix="/api/v1", tags=["leaderboard"])
     app.include_router(events.router, prefix="/api/v1", tags=["events"])
-    app.include_router(
-        internal_checkins.router, prefix="/internal", tags=["internal"]
-    )
-    app.include_router(
-        internal_bot.router, prefix="/internal", tags=["internal"]
-    )
-    app.include_router(
-        internal_payments.router, prefix="/internal", tags=["internal"]
-    )
-    app.include_router(
-        internal_penalties.router, prefix="/internal", tags=["internal"]
-    )
-    app.include_router(
-        admin_suspicious_pairs.router, prefix="/api/v1", tags=["admin"]
-    )
+    app.include_router(internal_checkins.router, prefix="/internal", tags=["internal"])
+    app.include_router(internal_bot.router, prefix="/internal", tags=["internal"])
+    app.include_router(internal_payments.router, prefix="/internal", tags=["internal"])
+    app.include_router(internal_penalties.router, prefix="/internal", tags=["internal"])
+    app.include_router(admin_suspicious_pairs.router, prefix="/api/v1", tags=["admin"])
     app.include_router(admin_api_router, prefix="/admin/v1", tags=["admin"])
 
     return app
