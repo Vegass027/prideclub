@@ -1,7 +1,10 @@
 # 02 — Архитектура
 
-> Snapshot от 2026-07-22. Описывает **реально работающую** систему. Концептуальные
-> разделы (принципы, потоки) сохранены — они не изменились, только уточнены детали.
+> Snapshot от 2026-07-22 (обновлено 2026-08-04 после Step 5 SSE nginx). Описывает
+> **реально работающую** систему. Концептуальные разделы (принципы, потоки)
+> сохранены — они не изменились, только уточнены детали. Раздел §9 «Известные
+> проблемы и долги» актуализирован: добавлена запись про SSE-step5-nginx
+> применён, но Steps 1-4 на проде не задеплоены.
 
 ## 1. Принципы
 
@@ -327,6 +330,20 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 2. После правки `WEBHOOK_BASE_URL`/`WEBAPP_URL` — перезапустить **только** `habit-bot`: `ssh privichki-prod 'cd /app/infra && docker compose up -d bot'`. **Не делать `docker compose down`** — это гасит весь стек.
 3. При добавлении новых обязательных параметров в DI-конструктор сервиса (`CheckinService`, `PenaltyService`, и т.д.) — синхронно обновить **все** call-сайты: backend API DI (`apps/backend/app/api/v1/*.py`), worker таски (`apps/worker/worker/tasks/*.py`), admin endpoint DI. Перед merge — `rg "ServiceName\\("` по всему проекту.
 4. Worker-таски имеют `except Exception` catch-all, который **маскирует баги DI** как `ok=False`. Если в логах видишь `worker_checkin_failed` с `err='CheckinService.__init__() ...'`, НЕ игнорируй — это серьёзный баг.
+
+### 9.3. SSE через Redis Streams — текущая ситуация (snapshot 2026-08-04)
+
+> Полный план — `sse+redis.md`. Шаги 1-4 (backend SSE endpoint, middleware bypass,
+> worker event_publisher, XREAD pipeline + async-Redis singleton) реализованы в
+> ветке `feature/topic-scoped-checkin` и **защищены 89 тестами** (67 backend + 22 worker).
+
+| Что | Где | Статус |
+|---|---|---|
+| **Step 5: nginx `location = /api/v1/events/stream`** | `infra/nginx/nginx.prideclub.conf:97-112`, `nginx.prod.conf:79-99`, `infra/nginx/habit-club-sse.conf.snippet` | ✅ Применено на проде `2026-08-04` (commit `900ef4f`). `nginx -t` ОК. Debug-тест с `return 418` подтвердил exact-match. Бэкап `/var/backups/nginx/habit-club.bak.20260804_1823`. |
+| **Steps 1-4 на проде** | `apps/backend/app/api/v1/events.py`, `core/middleware.py`, `worker/tasks/process_checkin.py` в контейнере `habit-backend` | ❌ **НЕ ЗАДЕПЛОЕНЫ**. Прод работает на `main` (`bd9fd76`). В контейнере `habit-backend` (образ `d2e8c35817ea93dece80377bbd3b6898d47cb01dbf934ec76f783557e8414c4b`) файл `apps/backend/app/api/v1/events.py` **отсутствует**, в `core/middleware.py` нет `SSE_AUTH_BYPASS_PATHS`, в env нет `SSE_TOKEN_SECRET`. Запрос `GET /api/v1/events/stream` через nginx → 401 `{"code":"missing_init_data"}` (initData-middleware отбивает, потому что bypass не сработал — его кода нет на проде). |
+| **Что нужно для работы SSE на проде** | `git` flow + деплой | 1) Merge `feature/topic-scoped-checkin` → `main` (явный "ок" пользователя, см. AGENT_BOOTSTRAP §6). 2) `git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit` + push. 3) Сгенерировать `SSE_TOKEN_SECRET`: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. 4) Добавить `SSE_TOKEN_SECRET` в `/app/.env` (НЕ в `/app/infra/.env` — он для compose, не для приложения). 5) rsync `apps/backend/` + `apps/worker/` → `/tmp/privichki_new/` → `/app/apps/{backend,worker}/` → `docker compose build backend worker --no-cache && docker compose up -d backend worker`. 6) Smoke-test через Mini App: открыть «Сегодня», отправить кружок в бота, убедиться что статус обновляется без ручного refetch. |
+| **nginx-блок при отсутствии backend-кода** | поведение для клиента | Идентично исходному: nginx проксирует → backend отвечает 401/404. Никаких регрессий. Блок становится активным автоматически после деплоя Steps 1-4 (без правок nginx). |
+| **Step 6: frontend `useTodayStream` + `TodayPage`** | `apps/frontend/src/shared/hooks/useTodayStream.ts`, `TodayPage.tsx` | ⏳ pending — после деплоя Steps 1-4. |
 
 ---
 
