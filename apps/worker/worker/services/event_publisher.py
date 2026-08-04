@@ -98,31 +98,17 @@ class EventPublisher:
         Returns:
             True  — XADD выполнен (первая публикация для этой пары).
             False — пропущено по Guard 2 (повторная доставка) ИЛИ
-                    XADD упал (at-most-once, потеря события).
+                    Redis недоступен на любой стадии (SET NX / XADD).
+                    At-most-once: чек-ин уже в БД, событие — UI-hint.
 
         Note:
             Guard 1 (early-skip для ``already_exists``) делается в
             вызывающем коде (``process_checkin._process``), ДО вызова
-            publish_checkin. Здесь — только Guard 2 + XADD.
+            publish_checkin. Здесь — только Guard 2 + XADD под единой
+            защитой try/except, чтобы сетевой блип Redis на ЛЮБОЙ
+            стадии не пробросил исключение в уже закоммиченный task.
         """
         idem_key = self.idempotency_key(membership_id, date_iso)
-        # SET NX EX: True если ключ новый, None если уже есть.
-        # redis-py 5.x: returns True/None (не True/False).
-        acquired = await self._redis.set(
-            idem_key, "1", nx=True, ex=self.IDEMPOTENCY_KEY_TTL_SECONDS
-        )
-        if not acquired:
-            self._log.info(
-                "sse_publish_skip_duplicate",
-                extra={
-                    "user_id": user_id,
-                    "habit_id": habit_id,
-                    "membership_id": membership_id,
-                    "date": date_iso,
-                },
-            )
-            return False
-
         stream_key = self.stream_key(user_id, habit_id)
         fields = {
             "event": event.event,
@@ -132,6 +118,22 @@ class EventPublisher:
             "payload": json.dumps(event.payload, ensure_ascii=False, default=str),
         }
         try:
+            # SET NX EX: True если ключ новый, None если уже есть.
+            # redis-py 5.x: returns True/None (не True/False).
+            acquired = await self._redis.set(
+                idem_key, "1", nx=True, ex=self.IDEMPOTENCY_KEY_TTL_SECONDS
+            )
+            if not acquired:
+                self._log.info(
+                    "sse_publish_skip_duplicate",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "membership_id": membership_id,
+                        "date": date_iso,
+                    },
+                )
+                return False
             await self._redis.xadd(
                 stream_key,
                 fields,
@@ -139,14 +141,22 @@ class EventPublisher:
                 approximate=True,
             )
         except Exception as exc:  # noqa: BLE001 — at-most-once, см. док
-            # Идемпотентность-ключ остался в Redis с TTL 24ч — повторная
-            # доставка этой же пары в течение дня будет пропущена Guard 2.
-            # Это приемлемо: SSE-событие — UI-hint, не финансовая операция.
+            # Покрывает ОБЕ стадии:
+            # 1. SET NX упал (ConnectionError / timeout) — идемпотентность-ключ
+            #    НЕ выставлен. При Celery retry той же задачи process_checkin
+            #    вернёт duplicate=True (CheckinAlreadyExistsError) и Guard 1
+            #    в _process пропустит публикацию. Событие потеряно — ок для MVP.
+            # 2. XADD упал (Redis умер между операциями) — идемпотентность-ключ
+            #    УЖЕ в Redis с TTL 24ч. Повторная доставка будет пропущена
+            #    Guard 2. Тоже ок: at-most-once для UI-hint.
+            # В обоих случаях чек-ин в БД остаётся — публикация не должна
+            # ломать уже закоммиченный task.
             self._log.warning(
                 "sse_publish_failed",
                 extra={
                     "user_id": user_id,
                     "habit_id": habit_id,
+                    "membership_id": membership_id,
                     "err": str(exc),
                 },
             )

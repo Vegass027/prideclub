@@ -542,3 +542,139 @@ async def test_process_checkin_membership_not_found_skips_publish(worker_db) -> 
     assert result["code"] == "membership_not_found"
     # Внутри _publish_checkin_rejected ранний return при None membership.
     assert publisher.calls == []
+
+
+class _ExplodingSetPublisher:
+    """Зарезервировано под регрессию для случая, когда какой-то будущий
+    publisher забудет try/except внутри publish_checkin. Сейчас
+    EventPublisher ловит оба фейла (set + xadd), поэтому
+    _process никогда не видит исключение наружу — этот сценарий
+    покрыт парой тестов в test_event_publisher.py:
+        - test_publish_set_failure_returns_false
+        - test_publish_xadd_failure_returns_false
+    """
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_redis_outage_at_publish_survives(
+    worker_db, monkeypatch
+) -> None:
+    """Интеграционный: Redis умер МЕЖДУ commit и publish → task не падает.
+
+    Используем настоящий ``EventPublisher`` с fakeredis, но патчим
+    ``fakeredis.set`` так, чтобы он бросал ``ConnectionError``. Это
+    имитирует сетевой блип в production Redis сразу после успешного
+    commit'а чек-ина. Инвариант Step 3: publish — best-effort, чек-ин
+    в БД остаётся, _process возвращает успешный результат.
+    """
+    import fakeredis.aioredis
+
+    from worker.services.event_publisher import EventPublisher
+    from worker.tasks.process_checkin import _process
+
+    membership_id_holder: dict[str, str] = {}
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=2006)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        membership = await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        membership_id_holder["id"] = membership.id
+        await session.commit()
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    async def _boom(*_args, **_kwargs):
+        raise ConnectionError("simulated redis outage at SET NX")
+
+    monkeypatch.setattr(redis, "set", _boom)
+    publisher = EventPublisher(redis)
+
+    payload = {
+        "user_id": 2006,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 200506,
+        "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
+        "duration_seconds": 5,
+    }
+
+    result = await _process(
+        payload,
+        session_factory=worker_db.session_factory,
+        publisher=publisher,
+    )
+
+    # ok=True несмотря на то, что публикация упала — это и есть инвариант.
+    assert result["ok"] is True
+    assert result["created"] is True
+
+    # Чек-ин реально в БД — коммит прошёл, publisher-фейл его не откатил.
+    async with worker_db.session_factory() as session:
+        from sqlalchemy import func, select
+
+        from app.models.checkin import Checkin
+
+        count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Checkin)
+                .where(Checkin.membership_id == membership_id_holder["id"])
+            )
+        ).scalar_one()
+        assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_rejected_redis_outage_survives(
+    worker_db, monkeypatch
+) -> None:
+    """Интеграционный: rejected-путь + Redis outage → task возвращает rejected, не падает."""
+    import fakeredis.aioredis
+
+    from worker.services.event_publisher import EventPublisher
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=2007)
+        # Окно 7-10 MSK → за пределами текущего UTC.
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=7,
+            checkin_window_end_hour=10,
+        )
+        await worker_db.add_membership(session, user_id=user.id, habit_id=habit.id)
+        await session.commit()
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    async def _boom(*_args, **_kwargs):
+        raise ConnectionError("simulated redis outage at SET NX")
+
+    monkeypatch.setattr(redis, "set", _boom)
+    publisher = EventPublisher(redis)
+
+    payload = {
+        "user_id": 2007,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 200507,
+        "message_sent_at": datetime.now(tz=timezone.utc).isoformat(),
+        "duration_seconds": 5,
+    }
+
+    result = await _process(
+        payload,
+        session_factory=worker_db.session_factory,
+        publisher=publisher,
+    )
+
+    # rejected-результат вернулся, исключение НЕ пробросилось.
+    assert result["ok"] is False
+    assert result["code"] == "checkin_window_closed"

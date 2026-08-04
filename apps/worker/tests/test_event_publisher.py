@@ -178,8 +178,12 @@ async def test_publish_rejected_event_payload(publisher, fake_redis) -> None:
 
 @pytest.mark.asyncio
 async def test_publish_xadd_failure_returns_false(monkeypatch) -> None:
-    """At-most-once: XADD упал → return False, исключение НЕ пробрасывается."""
-    redis = fakeredis.aioredis.FakeRedis()
+    """At-most-once: XADD упал → return False, исключение НЕ пробрасывается.
+
+    Покрывает стадию 2 в `publish_checkin`: SET NX успел, XADD упал.
+    Идемпотентность-ключ остался в Redis с TTL 24ч.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     publisher = EventPublisher(redis)
 
     async def _boom(*_args, **_kwargs):
@@ -195,6 +199,43 @@ async def test_publish_xadd_failure_returns_false(monkeypatch) -> None:
         event=CheckinEvent(event="checkin.accepted", payload={"ok": True}),
     )
     assert result is False
+
+    # SET NX всё-таки успел до XADD — ключ лежит с TTL.
+    assert await redis.get(publisher.idempotency_key("m-5", "2026-08-04")) == "1"
+
+
+@pytest.mark.asyncio
+async def test_publish_set_failure_returns_false(monkeypatch) -> None:
+    """At-most-once: SET NX упал → return False, исключение НЕ пробрасывается.
+
+    Покрывает стадию 1 в `publish_checkin`: Redis недоступен ДО XADD
+    (например, сетевой блип в момент вызова). Идемпотентность-ключ НЕ
+    выставлен — Guard 1 в process_checkin при Celery retry корректно
+    отработает через CheckinAlreadyExistsError. Но сам факт: исключение
+    НЕ должно проброситься в основной task, который уже закоммитил чек-ин.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    publisher = EventPublisher(redis)
+
+    async def _boom(*_args, **_kwargs):
+        raise ConnectionError("redis unavailable on SET")
+
+    monkeypatch.setattr(redis, "set", _boom)
+
+    result = await publisher.publish_checkin(
+        user_id=1006,
+        habit_id="h-6",
+        membership_id="m-6",
+        date_iso="2026-08-04",
+        event=CheckinEvent(event="checkin.accepted", payload={"ok": True}),
+    )
+    assert result is False
+
+    # SET упал — ключа быть не должно.
+    assert await redis.get(publisher.idempotency_key("m-6", "2026-08-04")) is None
+    # И в стриме ничего.
+    entries = await redis.xrange(publisher.stream_key(1006, "h-6"))
+    assert entries == []
 
 
 @pytest.mark.asyncio
