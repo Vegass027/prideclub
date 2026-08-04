@@ -75,6 +75,17 @@ class SseNotConfiguredError(DomainError):
     code = "sse_not_configured"
 
 
+class TooManySseConnectionsError(DomainError):
+    """429: юзер превысил лимит одновременных SSE-соединений.
+
+    Защита от DoS через replayable SSE-токены (TTL 60с, не одноразовые).
+    Лимит и стратегия — см. app.services.sse.connection_limiter.
+    """
+
+    status_code = 429
+    code = "too_many_sse_connections"
+
+
 class HabitNotFoundError(DomainError):
     status_code = 404
     code = "habit_not_found"

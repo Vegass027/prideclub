@@ -234,6 +234,48 @@ class TestSseStreamTokenValidation:
             monkeypatch.setenv("SSE_TOKEN_SECRET", TEST_SSE_SECRET)
             get_settings.cache_clear()
 
+    @pytest.mark.asyncio
+    async def test_too_many_sse_connections_returns_429(
+        self, app_no_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Когда per-user счётчик в Redis исчерпан, эндпоинт возвращает 429
+        `too_many_sse_connections`, не пропускает в стрим.
+
+        Интеграционный тест через реальный эндпоинт с подменой Redis-клиента
+        на fakeredis (production использует тот же EVAL через lupa).
+        """
+        import fakeredis.aioredis
+
+        from app.services.sse.connection_limiter import (
+            MAX_CONCURRENT_CONNECTIONS_PER_USER,
+            SseConnectionLimiter,
+        )
+
+        # Подменяем get_redis() на fakeredis — эндпоинт возьмёт наш клиент.
+        fake_redis = fakeredis.aioredis.FakeRedis()
+        monkeypatch.setattr("app.api.v1.events.get_redis", lambda: fake_redis)
+
+        user_id = 7777
+        habit_id = "h-" + uuid.uuid4().hex[:8]
+        token = _make_token(user_id=user_id, habit_id=habit_id)
+
+        # Заполняем счётчик до лимита (имитация 5 уже открытых соединений
+        # от того же user_id). 6-й acquire должен провалиться.
+        limiter = SseConnectionLimiter(fake_redis)  # type: ignore[arg-type]
+        for _ in range(MAX_CONCURRENT_CONNECTIONS_PER_USER):
+            assert await limiter.try_acquire(user_id) is True
+        assert await limiter.try_acquire(user_id) is False  # лимит
+
+        # Делаем запрос — должен быть 429 (НЕ открывать стрим).
+        # NB: TestClient + SSE-endpoint = зависает на body, но 429 вернётся
+        # сразу (это исключение из handler'а, до StreamingResponse).
+        with TestClient(app_no_db) as client:
+            r = client.get(
+                f"/api/v1/events/stream?habit_id={habit_id}&token={token}"
+            )
+        assert r.status_code == 429, r.text
+        assert r.json()["code"] == "too_many_sse_connections"
+
 
 # --- heartbeat generator ---------------------------------------------------
 #
@@ -248,8 +290,29 @@ class TestSseStreamTokenValidation:
 class _FakeRequest:
     """Минимальный stand-in для starlette.Request, нужен только для типа."""
 
+    def __init__(self, disconnect: bool = False) -> None:
+        self._disconnect = disconnect
+
     async def is_disconnected(self) -> bool:
-        return False
+        return self._disconnect
+
+
+async def _make_fakeredis_with_filled_counter(user_id: int, count: int):
+    """Async helper: вернуть (redis, limiter) где счётчик уже заполнен до `count`.
+
+    fakeredis.aioredis поддерживает EVAL/EVALSHA через lupa, но прямой
+    sync `redis.incr()` не годится — клиент async. Используем Lua-скрипт
+    acquire (тот же что в проде) — проходит через register_script и работает.
+    """
+    import fakeredis.aioredis
+
+    from app.services.sse.connection_limiter import SseConnectionLimiter
+
+    redis = fakeredis.aioredis.FakeRedis()
+    limiter = SseConnectionLimiter(redis)  # type: ignore[arg-type]
+    for _ in range(count):
+        await limiter.try_acquire(user_id)
+    return redis, limiter
 
 
 class TestSseHeartbeatGenerator:
@@ -259,7 +322,8 @@ class TestSseHeartbeatGenerator:
         увидел 200 OK и не висел в ожидании первого байта."""
         from app.api.v1.events import _sse_heartbeat_generator
 
-        gen = _sse_heartbeat_generator(_FakeRequest(), user_id=1, habit_id="h")
+        redis, limiter = await _make_fakeredis_with_filled_counter(user_id=1, count=0)
+        gen = _sse_heartbeat_generator(_FakeRequest(), 1, "h", limiter)
         first = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert first == ": connected\n\n"
         # Cleanup: закрываем генератор чисто.
@@ -278,7 +342,8 @@ class TestSseHeartbeatGenerator:
         original = events_module.SSE_HEARTBEAT_INTERVAL_SECONDS
         events_module.SSE_HEARTBEAT_INTERVAL_SECONDS = 0.1
         try:
-            gen = _sse_heartbeat_generator(_FakeRequest(), user_id=1, habit_id="h")
+            redis, limiter = await _make_fakeredis_with_filled_counter(user_id=1, count=0)
+            gen = _sse_heartbeat_generator(_FakeRequest(), 1, "h", limiter)
             first = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
             assert first == ": connected\n\n"
 
@@ -304,7 +369,8 @@ class TestSseHeartbeatGenerator:
         original = events_module.SSE_HEARTBEAT_INTERVAL_SECONDS
         events_module.SSE_HEARTBEAT_INTERVAL_SECONDS = 0.1
         try:
-            gen = _sse_heartbeat_generator(_FakeRequest(), user_id=1, habit_id="h")
+            redis, limiter = await _make_fakeredis_with_filled_counter(user_id=1, count=0)
+            gen = _sse_heartbeat_generator(_FakeRequest(), 1, "h", limiter)
             # Прочитаем один chunk, потом "отключим клиента".
             await asyncio.wait_for(gen.__anext__(), timeout=1.0)
 
@@ -317,3 +383,84 @@ class TestSseHeartbeatGenerator:
                 await gen.__anext__()
         finally:
             events_module.SSE_HEARTBEAT_INTERVAL_SECONDS = original
+
+    @pytest.mark.asyncio
+    async def test_release_on_aclose_normal_path(self) -> None:
+        """Путь 1: aclose() (имитация client disconnect) → finally → release.
+
+        Проверяем, что счётчик в Redis возвращается к 0 после aclose —
+        это значит, что finally-блок отработал. Если бы finally не сработал
+        (баг в async-generator cleanup), счётчик остался бы = 1 и в проде
+        у нас была бы утечка при каждом reconnect.
+        """
+        from app.api.v1.events import _sse_heartbeat_generator
+        from app.services.sse.connection_limiter import KEY_PREFIX
+
+        user_id = 42
+        redis, limiter = await _make_fakeredis_with_filled_counter(user_id, count=0)
+        gen = _sse_heartbeat_generator(_FakeRequest(), user_id, "h", limiter)
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+
+        # Сразу после первого yield счётчик НЕ должен быть 0 — acquire
+        # в эндпоинте уже прошёл, но generator ещё не запустил finally.
+        # (Мы передали пустой counter в helper, эндпоинт не вызывался —
+        # поэтому для чистоты теста: acquire вручную перед yield).
+        await limiter.try_acquire(user_id)
+        assert int(await redis.get(f"{KEY_PREFIX}{user_id}")) == 1  # type: ignore[arg-type]
+
+        # aclose() → CancelledError → except → return → finally → release
+        await gen.aclose()
+
+        # finally отработал: счётчик DECR'нулся обратно к 0.
+        count_after = await redis.get(f"{KEY_PREFIX}{user_id}")  # type: ignore[arg-type]
+        # После clamp-decr ключ удалён (count=0 → DECR → -1 → DEL).
+        assert count_after is None or int(count_after) == 0, (
+            f"finally не отработал, count={count_after}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_release_on_is_disconnected_normal_path(self) -> None:
+        """Путь 2: is_disconnected() → True → break → finally → release.
+
+        Этот путь срабатывает когда клиент закрыл EventSource по HTTP
+        (не CancelledError). uvicorn worker restart/graceful shutdown
+        идут по пути 1 (CancelledError); обычное закрытие вкладки —
+        по этому пути. Тест проверяет что finally покрывает оба.
+        """
+        from app.api.v1 import events as _sse_events_module
+        from app.api.v1.events import _sse_heartbeat_generator
+        from app.services.sse.connection_limiter import KEY_PREFIX
+
+        original = _sse_events_module.SSE_HEARTBEAT_INTERVAL_SECONDS
+        _sse_events_module.SSE_HEARTBEAT_INTERVAL_SECONDS = 0.05
+        try:
+            user_id = 99
+            redis, limiter = await _make_fakeredis_with_filled_counter(user_id, count=0)
+
+            # FakeRequest с disconnect=True — is_disconnected() сразу вернёт True
+            fake_req = _FakeRequest(disconnect=True)
+
+            gen = _sse_heartbeat_generator(fake_req, user_id, "h", limiter)
+            await limiter.try_acquire(user_id)
+            assert int(await redis.get(f"{KEY_PREFIX}{user_id}")) == 1  # type: ignore[arg-type]
+
+            # Генератор должен yield ": connected\n\n", потом проверить
+            # is_disconnected() → True → break → finally → release.
+            chunks = []
+            async for chunk in gen:
+                chunks.append(chunk)
+                # Генератор должен выйти сам после break, без aclose().
+                # Если зависнет — wait_for таймаут.
+                if len(chunks) > 5:
+                    pytest.fail("generator не вышел после is_disconnected()")
+
+            # Проверяем что первый chunk — ": connected\n\n"
+            assert chunks[0] == ": connected\n\n"
+
+            # finally отработал: счётчик освобождён.
+            count_after = await redis.get(f"{KEY_PREFIX}{user_id}")  # type: ignore[arg-type]
+            assert count_after is None or int(count_after) == 0, (
+                f"finally не отработал на is_disconnected-path, count={count_after}"
+            )
+        finally:
+            _sse_events_module.SSE_HEARTBEAT_INTERVAL_SECONDS = original

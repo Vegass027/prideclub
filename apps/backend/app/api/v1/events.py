@@ -32,8 +32,12 @@ from app.core.exceptions import (
     ServiceTokenExpiredError,
     SseNotConfiguredError,
     SseStreamForbiddenError,
+    TooManySseConnectionsError,
 )
+from app.core.logging import get_logger
+from app.db.redis import get_redis
 from app.repositories.membership_repository import MembershipRepository
+from app.services.sse.connection_limiter import SseConnectionLimiter
 from app.services.sse.sse_token import (
     SSE_TOKEN_DEFAULT_TTL_SECONDS,
     generate_sse_token,
@@ -116,6 +120,7 @@ async def _sse_heartbeat_generator(
     request: Request,
     user_id: int,
     habit_id: str,
+    connection_limiter: SseConnectionLimiter,
     last_event_id: str | None = None,
 ):
     """Heartbeat-only SSE generator.
@@ -125,21 +130,38 @@ async def _sse_heartbeat_generator(
     принимается уже сейчас (контракт эндпоинта) — в Step 4 используется
     как начальный ID для XREAD вместо `$`.
 
-    При disconnect клиента Starlette отменяет генератор → asyncio.CancelledError.
-    Ловим, делаем cleanup (для Step 4 — cancel XREAD task + close Redis client),
-    для Step 2 — ничего делать не надо.
+    Cleanup покрывает ВСЕ пути выхода из генератора:
+    - is_disconnected() → True (клиент закрыл EventSource по HTTP) → break → finally → release
+    - CancelledError (uvicorn worker shutdown / Starlette при разрыве) → except → finally → release
+    - нормальный return (теоретически возможен в Step 4 при закрытии по логике) → finally → release
+
+    finally освобождает слот в connection_limiter, иначе утечка под нагрузкой.
     """
     try:
         # Initial comment: flush headers сразу, чтобы клиент увидел 200 OK
         # и не висел в ожидании первого байта.
         yield ": connected\n\n"
         while True:
+            if await request.is_disconnected():
+                # Клиент закрыл EventSource по HTTP. Выходим чисто через finally.
+                break
             await asyncio.sleep(SSE_HEARTBEAT_INTERVAL_SECONDS)
             yield ": heartbeat\n\n"
     except asyncio.CancelledError:
-        # Клиент отвалился — чистый выход. Генератор завершается,
-        # StreamingResponse закрывает соединение.
+        # Генератор отменён снаружи (Starlette при разрыве, uvicorn graceful shutdown).
+        # finally всё равно выполнится ниже.
         return
+    finally:
+        # Освобождаем слот в Redis. Идемпотентно через clamp-decr.
+        # Если Redis временно недоступен — логируем warning, не валим
+        # генератор. TTL=180с в connection_limiter страхует от permanent leak.
+        try:
+            await connection_limiter.release(user_id)
+        except Exception as exc:  # noqa: BLE001 — cleanup не должен ронять генератор
+            get_logger("sse_generator").warning(
+                "sse_release_failed",
+                extra={"user_id": user_id, "habit_id": habit_id, "error": str(exc)},
+            )
 
 
 @router.get("/events/stream")
@@ -190,8 +212,19 @@ async def stream_sse_events(
 
     user_id = int(payload["sub"])
 
+    # Per-user concurrency limit — защита от DoS через replayable SSE-токен.
+    # TTL токена 60с (не одноразовый), иначе атакующий может открыть
+    # неограниченное число соединений с одним валидным токеном.
+    # Lua-атомарный check-and-incr с rollback (см. connection_limiter.py).
+    connection_limiter = SseConnectionLimiter(get_redis())
+    if not await connection_limiter.try_acquire(user_id):
+        # Слот не занят — лимит исчерпан. 429, не 503 — это per-user, не server-wide.
+        raise TooManySseConnectionsError()
+
     return StreamingResponse(
-        _sse_heartbeat_generator(request, user_id, habit_id, last_event_id),
+        _sse_heartbeat_generator(
+            request, user_id, habit_id, connection_limiter, last_event_id
+        ),
         media_type="text/event-stream",
         headers={
             # nginx-specific hint: "не буферизируй". Дополняет
