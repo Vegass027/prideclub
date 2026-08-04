@@ -146,13 +146,13 @@ Host nginx:
   ```
   Без этих флагов коммит уйдёт от `Dim41g / ivanov1331d@gmail.com` (твой
   локальный `~/.gitconfig`) — ломается история авторства.
-- **HEAD коммиты (snapshot 2026-07-23):**
-  - `main` — `bd9fd76 docs(tz): v3.1 — синхронизация с HEAD bdfd9c9`
-  - `feature/topic-scoped-checkin` — `0d0893a docs: lint-zero iteration — Annotated DI pattern + prod snapshot` (**23 коммита впереди main**, содержит весь прогресс с 2026-07-22: topic-scoped чек-ины + multi-proof_types + bot pre-filter + lint-zero итерация)
-- **`git push origin main`** — после явного "ок" пользователя. Не пушить самовольно.
-- **SSH-пароль НИКОГДА не коммитить**, даже в `docs/`. Вход — по ed25519 ключу
-  через алиас `ssh privichki-prod`. Пароль root (если задан через `passwd`)
-  хранится только в голове пользователя / password-manager.
+- **HEAD коммиты (snapshot 2026-08-04):**
+  - `main` — `bd9fd76 docs(tz): v3.1 — синхронизация с HEAD bdfd9c9` (НЕ двигается без явного «мерджи в main»)
+  - `feature/topic-scoped-checkin` — `a0e8577 docs(ssh): switch from sshpass to ed25519 key` (**51 коммит впереди main**, содержит весь прогресс с 2026-07-22: topic-scoped чек-ины + multi-proof_types + bot pre-filter + lint-zero + SSH-docs итерация)
+- **`git push origin main`** — только после явного «ок» пользователя. Не пушить самовольно.
+- **Push в `feature/*`** — нормальный рабочий процесс, можно без ОК.
+- **SSH-доступ к серверу** — алиас `ssh privichki-prod` (ed25519 ключ `~/.ssh/id_ed25519_privichki`). Детали в §0 и в `~/.config/kilo/privichki-bootstrap.md` (вне репо).
+- **GitHub-доступ к репо** — split remote: `git fetch` через `git@github-prideclub:` (SSH-ключ `~/.ssh/id_ed25519_github_privichki`, deploy key в репо, read-only), `git push` через `https://github.com/Vegass027/prideclub.git` (PAT в macOS Keychain). Конфиг — `~/.ssh/config` блок `github-prideclub`.
 
 > ⚠️ **Про «расхождение веток» — нормальный git-flow, не баг.**
 >
@@ -355,6 +355,8 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 ## 13. Чего НЕ делать
 
 - ❌ Не коммитить секреты, пароли, `.env`, IP с кредами.
+- ❌ Не коммитить **приватные SSH-ключи** (`id_ed25519_*` без `.pub`, `*.pem`,
+  сертификаты). Публичные ключи (`.pub`) безопасны для документов.
 - ❌ Не править `/app` на сервере напрямую.
 - ❌ Не использовать `docker compose down` без ок.
 - ❌ Не коммитить от `Dim41g / ivanov1331d@gmail.com` (твой локальный git, **не** репо-автор).
