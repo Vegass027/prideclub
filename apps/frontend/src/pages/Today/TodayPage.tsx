@@ -1,6 +1,4 @@
-import { useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { useToday, useTodayStream } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { BottomNav } from "@/shared/ui/BottomNav";
@@ -64,22 +62,16 @@ function Stat({
 
 export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const queryClient = useQueryClient();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
 
   // Real-time: держим ["today", habitId] в кэше актуальным через SSE
-  // (Step 6, `feature/topic-scoped-checkin` → `900ef4f`).
-  // useToday даёт первый снимок при загрузке, useTodayStream — обновления
-  // по checkin.accepted/rejected без polling и без ручного refetch.
-  // Бэкап-страховка: если SSE не подключился (бэкенд не задеплоен,
-  // токен-endpoint вернул 503 и т.п.), invalidateQueries на mount всё
-  // равно подтянет свежий state через обычный polling-mount сценарий.
+  // (Step 6, `feature/topic-scoped-checkin`). useToday даёт первый снимок
+  // при загрузке, useTodayStream — обновления по checkin.accepted/rejected
+  // без polling, без ручного refetch, без лишнего GET на каждый mount.
+  // React Query сам управляет stale-инвалидацией через staleTime: 30_000
+  // в useToday; mount-форс-инвалидейт был избыточным — на масштабе 1000+
+  // юзеров это конкретная лишняя нагрузка на backend.
   useTodayStream(habitId);
-  useEffect(() => {
-    if (habitId) {
-      queryClient.invalidateQueries({ queryKey: ["today", habitId] });
-    }
-  }, [habitId, queryClient]);
 
   const handleOpenChat = () => {
     if (!data) return;
