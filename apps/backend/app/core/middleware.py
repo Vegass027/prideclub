@@ -37,6 +37,12 @@ ADMIN_PREFIX = "/admin/v1/"
 HEALTH_PATHS = {"/health", "/ready", "/metrics", "/docs", "/openapi.json", "/redoc"}
 STATIC_PREFIX = "/static/"  # загруженные медиа (фото клубов) — публичный read-only
 
+# SSE-эндпоинт авторизуется через JWT-токен в query (EventSource в браузере
+# не поддерживает кастомные заголовки, поэтому initData не передать).
+# Exact match — НЕ префикс: будущие /api/v1/events/* остаются под initData.
+# Хендлер /api/v1/events/stream сам валидирует токен и его claim на habit_id.
+SSE_AUTH_BYPASS_PATHS = {"/api/v1/events/stream"}
+
 
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
@@ -60,6 +66,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
         settings = get_settings()
+
+        # SSE-эндпоинт авторизуется через токен в query (см. SSE_AUTH_BYPASS_PATHS).
+        # Exact match — не префикс.
+        if path in SSE_AUTH_BYPASS_PATHS:
+            return await call_next(request)
 
         # Публичные служебные endpoints (k8s probes, OpenAPI) — без аутентификации
         if path in HEALTH_PATHS or path.startswith(STATIC_PREFIX):
@@ -220,6 +231,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         if path in HEALTH_PATHS or path.startswith(STATIC_PREFIX):
+            return await call_next(request)
+
+        # SSE-эндпоинт авторизуется через токен в query, request.state.telegram_user
+        # не заполнен. Per-connection лимит в MVP не вводим (EventSource в браузере
+        # лимитирован ~6 коннекшнами на origin). Если в продакшене понадобится —
+        # лимитировать по user_id из claim токена.
+        if path in SSE_AUTH_BYPASS_PATHS:
             return await call_next(request)
 
         try:

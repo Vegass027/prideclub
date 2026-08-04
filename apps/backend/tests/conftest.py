@@ -32,6 +32,11 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SSE_TOKEN_SECRET", "test-sse-token-secret")
     monkeypatch.setenv("ENVIRONMENT", "test")
     monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://web.telegram.org")
+    # get_settings() в core.config.py обёрнут в @lru_cache — кэш может содержать
+    # данные, прочитанные до того, как monkeypatch подменил env. Сбрасываем,
+    # чтобы create_app() в тестах видел тестовые значения, а не продовые из .env.
+    from app.core.config import get_settings
+    get_settings.cache_clear()
 
 
 @pytest.fixture
