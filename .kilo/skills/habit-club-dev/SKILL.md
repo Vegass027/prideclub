@@ -468,27 +468,27 @@ The standard pipeline is in `infra/deploy.sh` and documented in `docs/10-deploy.
 Core sequence:
 
 1. **Local:** tests pass → commit with `Vegass` author → `git push origin main`.
-2. **Stage to `/tmp/privichki_new/` on server** via `sshpass + rsync`:
+2. **Stage to `/tmp/privichki_new/` on server** via `ssh privichki-prod` (ed25519 key) + `rsync`:
    ```bash
-   sshpass -p "$PASSWORD" rsync -az --delete apps/backend/ \
-     root@169.58.52.78:/tmp/privichki_new/backend/
-   sshpass -p "$PASSWORD" rsync -az --delete apps/worker/  \
-     root@169.58.52.78:/tmp/privichki_new/worker/
+   rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
+   rsync -az --delete apps/worker/  privichki-prod:/tmp/privichki_new/worker/
    ```
 3. **Apply to `/app/apps/X/`** (in-place, atomic with `--delete`):
    ```bash
-   sshpass -p "$PASSWORD" ssh root@169.58.52.78 \
+   ssh privichki-prod \
      'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/'
    ```
 4. **Rebuild + recreate ONLY the affected service**:
    ```bash
-   sshpass -p "$PASSWORD" ssh root@169.58.52.78 \
+   ssh privichki-prod \
      'cd /app/infra && docker compose build backend --no-cache \
       && docker compose up -d backend'
    ```
 5. **Verify:** `curl -s http://127.0.0.1:8000/health` and `/ready`.
 
-`$PASSWORD` comes from `~/.config/kilo/privichki-bootstrap.md` (outside the repo).
+`privichki-prod` is an SSH alias from `~/.ssh/config` pointing to `root@169.58.52.78`
+via ed25519 key `~/.ssh/id_ed25519_privichki`. Password is NOT used in normal work.
+See `~/.config/kilo/privichki-bootstrap.md` for recovery (Contabo rescue-mode).
 
 ### Forbidden on the server
 

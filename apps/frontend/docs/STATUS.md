@@ -278,8 +278,8 @@ npm install
 npm run build       # → dist/
 
 # Деплой на сервер — только src/, dist/ собирается внутри Docker:
-rsync -az apps/frontend/ root@169.58.52.78:/app/apps/frontend/
-ssh root@169.58.52.78 'cd /app/infra && docker compose build frontend --no-cache && docker compose up -d frontend'
+rsync -az apps/frontend/ privichki-prod:/app/apps/frontend/
+ssh privichki-prod 'cd /app/infra && docker compose build frontend --no-cache && docker compose up -d frontend'
 ```
 
 > ⚠️ `dist/` на хосте (`/app/apps/frontend/dist/`) — артефакт локальных сборок,

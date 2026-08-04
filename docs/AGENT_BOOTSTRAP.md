@@ -9,9 +9,11 @@
 
 ## 0. Если нужны серверные операции (SSH)
 
-Пароль, IP, способ подключения — в локальном файле
-**`~/.config/kilo/privichki-bootstrap.md`** (НЕ в репозитории). Прочти его перед
-любыми `ssh`/`rsync`/`docker exec` командами. В этом файле — только указатель.
+Алиас SSH, IP, fingerprint ключа, recovery через Contabo rescue-mode —
+в локальном файле **`~/.config/kilo/privichki-bootstrap.md`** (НЕ в репозитории).
+Прочти его перед любыми `ssh`/`rsync`/`docker exec` командами. Пароль root там
+больше не хранится — вход по ed25519 ключу `~/.ssh/id_ed25519_privichki`
+через алиас `ssh privichki-prod`.
 
 ## 1. Что это за проект (10 секунд)
 
@@ -35,7 +37,7 @@
 | 1 | `docs/02-architecture.md` | 🟢 | Главный файл: стек, контейнеры, домены, схема, потоки. Прочти **полностью**. |
 | 2 | `docs/04-code-standards.md` | 🟡 | Правила кода. Примеры могут отставать от реального кода — за реальным стилем иди в `apps/backend/app/services/`. |
 | 3 | `docs/06-data-model.md` | 🟡 | Схема таблиц + антифрод + идемпотентность. **Список миграций в §3 — актуальный 000..009** (не 000..004 как в старой версии). |
-| 4 | `docs/10-deploy.md` | 🟢 | Runbook: rsync → build → up. Пароль в §1 убран (см. `~/.config/kilo/privichki-bootstrap.md`). |
+| 4 | `docs/10-deploy.md` | 🟢 | Runbook: rsync → build → up. Подключение через `ssh privichki-prod` (ed25519 ключ). |
 | 5 | `docs/09-prod-readiness.md` | 🟡 | Snapshot бэкенда на 2026-07-22. Перед использованием проверь `git log docs/09-prod-readiness.md` — мог обновиться. |
 | 6 | `AGENTS.md` (корень) | 🟢 | Правила поведения агента: layered architecture, DI, деньги в `int`, PII не логировать. |
 | 7 | `docs/01-concept.md` | 🟢 | Продуктовая концепция (стабильна с initial commit). Только если задача про продукт/экономику. |
@@ -148,7 +150,9 @@ Host nginx:
   - `main` — `bd9fd76 docs(tz): v3.1 — синхронизация с HEAD bdfd9c9`
   - `feature/topic-scoped-checkin` — `0d0893a docs: lint-zero iteration — Annotated DI pattern + prod snapshot` (**23 коммита впереди main**, содержит весь прогресс с 2026-07-22: topic-scoped чек-ины + multi-proof_types + bot pre-filter + lint-zero итерация)
 - **`git push origin main`** — после явного "ок" пользователя. Не пушить самовольно.
-- **SSH-пароль НИКОГДА не коммитить**, даже в `docs/`. Только в `~/.config/kilo/privichki-bootstrap.md` (вне репо).
+- **SSH-пароль НИКОГДА не коммитить**, даже в `docs/`. Вход — по ed25519 ключу
+  через алиас `ssh privichki-prod`. Пароль root (если задан через `passwd`)
+  хранится только в голове пользователя / password-manager.
 
 > ⚠️ **Про «расхождение веток» — нормальный git-flow, не баг.**
 >
@@ -211,19 +215,24 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "..."
 git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin main
 
 # Только после явного "ок" на деплой:
-# 1. Синхронизация через sshpass на хост в стэйджинг
-sshpass -p "$PASSWORD" rsync -az --delete apps/backend/ root@169.58.52.78:/tmp/privichki_new/backend/
-sshpass -p "$PASSWORD" rsync -az --delete apps/worker/  root@169.58.52.78:/tmp/privichki_new/worker/
+# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг
+rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
+rsync -az --delete apps/worker/  privichki-prod:/tmp/privichki_new/worker/
 
 # 2. Применение в /app
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
+ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
 
 # 3. Пересборка + рестарт контейнеров
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
+ssh privichki-prod 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
 
 # 4. Проверка
-sshpass -p "$PASSWORD" ssh root@169.58.52.78 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
+ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
 ```
+
+`ssh privichki-prod` — алиас из `~/.ssh/config`, указывает на `root@169.58.52.78`
+через ed25519 ключ `~/.ssh/id_ed25519_privichki` (прописан в `/root/.ssh/authorized_keys`
+на сервере). Пароль не используется. Recovery через Contabo rescue-mode
+описан в `~/.config/kilo/privichki-bootstrap.md`.
 
 `infra/deploy.sh` обёртка вокруг этой процедуры — можно использовать его.
 
