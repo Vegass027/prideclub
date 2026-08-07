@@ -1,9 +1,11 @@
 # 06 — Модель данных
 
-> Snapshot от 2026-07-23. Схема таблиц и антифрод актуальны. **Список миграций
-> расширен до 11** (000 → 011), см. §3. Финансовая идемпотентность — через
+> Snapshot от 2026-07-23 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> SSE+Redis Streams). Схема таблиц и антифрод актуальны. **Список миграций
+> расширен до 13** (000 → 013), см. §3. Финансовая идемпотентность — через
 > уникальные индексы, см. §5. Topic-scoped чек-ины и третий топик для чата
-> клуба — см. §6 (новый раздел).
+> клуба — см. §6. **Redis SSE namespaces** (`sse:user:*`, `sse_published:*`,
+> `sse:conn:*`) — см. §11 (новый раздел).
 
 Финальная схема БД, миграции, антифрод и идемпотентность. Все решения здесь — результат
 6 итераций ревью, готовы к применению.
@@ -574,3 +576,41 @@ def validate_prize_rules(rules: list[PrizeRule]):
   виде — требования бухгалтерского/налогового учёта имеют приоритет.
 - **Срок хранения:** активность + 3 года после последнего платежа, затем архив.
 - **Хранение:** исключительно на территории РФ (Selectel VPS).
+
+---
+
+## 11. Redis namespaces — SSE через Redis Streams
+
+> Реализовано 2026-08-04 (commits `c836542`..`7ada2ad` backend, `11edb14`+`e5cc8e0`
+> worker, `900ef4f` nginx, `5d8c6e6`+`d30832a` frontend). Активно используется на проде:
+> при чек-ине через бота worker публикует событие в Redis Stream, SSE-endpoint
+> читает его через `XREAD BLOCK 30000`, frontend получает фрейм через
+> `EventSource` и обновляет кэш React Query. Полная цепочка — `sse+redis.md`,
+> §0.
+
+Redis DB 0 (тот же namespace, что `catch_rate:*` и `today:{habit_id}:{membership_id}`).
+
+| Ключ | Тип | TTL | Назначение |
+|---|---|---|---|
+| `sse:user:{user_id}:{habit_id}` | Stream | MAXLEN ~1000 (`XADD ... MAXLEN ~ 1000`, O(1) trim) | Per-(user, habit) поток событий чек-инов. `user_id` (numeric BIGINT) × `habit_id` (UUID) → естественная гранулярность для EventSource в `useToday`. Один юзер в нескольких клубах = несколько независимых стримов. |
+| `sse_published:checkin:{membership_id}:{date}` | String `"1"` | 86400 с (24 ч) | Idempotency-guard для публикации (Guard 2 в `event_publisher.py`). `SET key NX EX 86400` перед `XADD` → `False` = повторная доставка, `XADD` skip. Покрывает окно retry (max 60с × 3 + backoff) + таймзонный jitter клубов (±14 ч). |
+| `sse:conn:{user_id}` | String (int counter) | 180 с | Per-user concurrency limiter (Step 2 + fix-up 2 `ec60c0f`). Lua-atomic `INCR + EXPIRE на ПЕРВОМ + проверка + DECR-rollback`. `MAX_CONCURRENT_CONNECTIONS_PER_USER = 5` (1 вкладка + 3-4 клуба активного + 1 дубль reconnect-race). Защита от DoS через replayable token (TTL=60с): один валидный токен не открывает неограниченно. |
+
+**Читатели:**
+
+- `apps/backend/app/services/sse/redis_stream_bus.py` — `XREAD BLOCK 30000 COUNT 100 STREAMS sse:user:{u}:{h} <start_id>`.
+  `<start_id>` резолвится в эндпоинте с приоритетом `Last-Event-ID` header > `last_event_id` query > `$`.
+  На пустой `XREAD` — отправляется SSE-комментарий `: heartbeat\n\n` (proxy keepalive).
+- `apps/worker/worker/services/event_publisher.py` — `XADD sse:user:{u}:{h} MAXLEN ~ 1000 * event checkin.accepted|checkin.rejected habit_id ... user_id ... occurred_at ... payload {...}`.
+  Перед `XADD` — `SET sse_published:checkin:{m}:{d} 1 NX EX 86400` (Guard 2). SET NX + XADD под единым
+  `try/except` (post-review fix `e5cc8e0`) — Redis outage логируется как `sse_publish_failed` warning,
+  чек-ин уже в БД, at-most-once для обеих стадий.
+
+**Async-Redis singleton (Step 4 post-review fix `7ada2ad`):** `apps/backend/app/db/redis_async.py` —
+один пул на процесс (НЕ `from_url()` per SSE-открытие, что вызывало FD-leak при reconnect-loop
+в Telegram WebView). Singleton инициализируется в lifespan startup (`ping()` под try/except),
+закрывается в lifespan shutdown (`aclose()`). `AsyncRedisDep = Annotated[Redis, Depends(get_async_redis)]`
+в `core/deps.py`.
+
+**Миграция не требуется** — Redis используется без персистентности (AOF настроен для DB 0,
+но SSE namespace не критичен для восстановления после Redis restart).

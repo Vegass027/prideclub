@@ -1,8 +1,9 @@
 # 04 — Стандарты кода и архитектурные паттерны
 
-> Snapshot от 2026-07-22. Правила и паттерны актуальны; примеры кода иллюстрируют
+> Snapshot от 2026-07-22 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> SSE+Redis Streams). Правила и паттерны актуальны; примеры кода иллюстрируют
 > **текущий** стиль (с DI через репозитории, без `commit()` в сервисах, с `send_task`
-> через Celery producer).
+> через Celery producer, **SSE endpoint + Guard 1/Guard 2 idempotency** — см. §13).
 
 Принципы и правила, единые для всех сервисов проекта. Цель — масштабируемая кодовая
 база без дублирования логики, удобная для добавления новых привычек и фич.
@@ -513,6 +514,90 @@ fail в `test_close_catch_window.py`, не связано с текущей ра
 - Никаких `time.sleep` в async-коде — только `asyncio.sleep`.
 - Никаких `requests` — только `aiohttp` с настроенными таймаутами.
 - CPU-heavy операции — в `asyncio.to_thread`.
+
+### SSE endpoint + Guard 1/Guard 2 (идемпотентность real-time событий)
+
+> Реализовано в `apps/backend/app/api/v1/events.py` (Steps 1+2+4) +
+> `apps/worker/worker/services/event_publisher.py` (Step 3).
+
+**`POST /api/v1/events/stream/token`** — выдаёт короткоживущий (60 с) JWT
+(`sub=user_id, habit_id=habit_id, scope="sse:today", aud="sse-stream"`), подписан
+**отдельным** `SSE_TOKEN_SECRET` (НЕ `SERVICE_SECRET` — разные контуры, разные секреты,
+разная blast-radius при компрометации, см. `docs/07-security-and-ops.md §2.4`).
+Membership-check через `MembershipRepository.get_for_user_in_habit(...)` —
+**до** выдачи токена. Если `SSE_TOKEN_SECRET` пуст → 503 `sse_not_configured`
+(ops-проблема, не баг юзера, не делаем retry).
+
+**`GET /api/v1/events/stream?habit_id=…&token=…&last_event_id=…`** —
+`StreamingResponse(media_type="text/event-stream")` с генератором:
+
+```python
+async def _sse_event_stream_generator():
+    # XREAD BLOCK 30000 COUNT 100 STREAMS sse:user:{u}:{h} <start_id>
+    # <start_id> = приоритет Last-Event-ID header > last_event_id query > $
+    while not await request.is_disconnected():
+        events = await stream_bus.read_blocking(stream, start_id, block_ms=30000)
+        for entry in events:
+            # format: id: <stream-id>\nevent: <name>\ndata: <json>\n\n
+            yield sse_formatter.format_event_frame(entry)
+        if not events:
+            yield ": heartbeat\n\n"  # SSE-комментарий, держит proxy
+finally:
+    await connection_limiter.release(user_id)  # finally, покрывает оба пути выхода
+```
+
+Альтернативы (отвергнуты):
+- ❌ `fetch() + ReadableStream` — нет auto-reconnect, ~80 строк ручной работы.
+- ❌ Polling с `useEffect` + `setInterval` — на 1000+ юзеров = лишняя нагрузка на backend.
+
+**Guard 1 + Guard 2 (идемпотентность публикации в `event_publisher.py`):**
+
+```python
+async def publish_checkin(self, *, membership_id, date, event, payload):
+    # Guard 1 (early-skip) — дубль чек-ина → нет события
+    if duplicate:  # _process() вернул {ok: True, duplicate: True}
+        return False  # UI уже показывает done, событие бесполезно
+    # Guard 2 — SET NX EX перед XADD (защита от Celery redelivery)
+    if not await redis.set(
+        f"sse_published:checkin:{membership_id}:{date}", "1",
+        nx=True, ex=86400,
+    ):
+        return False  # повторная доставка, XADD не делать
+    await redis.xadd(
+        f"sse:user:{user_id}:{habit_id}",
+        {"event": event, "habit_id": ..., "user_id": ..., ...},
+        maxlen=1000, approximate=True,
+    )
+    return True
+```
+
+**Единый try/except** вокруг SET NX + XADD (post-review fix `e5cc8e0`) — Redis
+outage логируется как `sse_publish_failed` warning, чек-ин уже в БД, возвращается
+`False`. At-most-once семантика:
+- SET NX упал → ключа нет. При Celery retry Guard 1 в `_process()` сработает через
+  `CheckinAlreadyExistsError` → skip публикации.
+- XADD упал → ключ УЖЕ есть. Повторная доставка Guard 2 skip'нет XADD.
+
+**Per-user concurrency limiter** (Step 2 + fix-up 2 `ec60c0f`):
+`SseConnectionLimiter` через Lua-atomic `INCR + EXPIRE на ПЕРВОМ + проверка + DECR-rollback`.
+`MAX_CONCURRENT_CONNECTIONS_PER_USER = 5` — типичный юзер: 1 вкладка + 3-4 клуба + 1 дубль
+reconnect-race. `CONNECTION_TTL_SECONDS = 180` — страховка от `kill -9` permanent leak.
+Защита от DoS через replayable token (TTL=60с, осознанное решение Q4 в `sse+redis.md §5`).
+
+**Frontend pure-function controller** (Step 6):
+`apps/frontend/src/shared/hooks/streamController.ts` — выделен из хука для
+тестируемости без `@testing-library/react` (которого нет в `package.json`).
+DI через 7 параметров (`habitId, queryClient, createEventSource, requestToken,
+setTimeoutFn, clearTimeoutFn, onError, streamBaseUrl`). Manual reconnect-loop (НЕ
+полагаемся на нативный `EventSource` auto-reconnect — нативный реконнект
+ре-шлёт протухший токен, при 401 EventSource закрывается насовсем, в Telegram WebView
+сеть рвётся регулярно → "SSE иногда работает, иногда нет"). Backoff 1s → 2s → 5s → 10s
+cap. 11 vitest unit покрывают reconnect-логику.
+
+**Pure-function controller pattern** — DI через конструктор/параметры, тестируется
+без React rendering. Аналогично backend: сервисы получают репозитории через
+конструктор, в тестах — моки. Не создавать engine/session pool внутри handler'ов,
+не создавать EventSource внутри хука — выносить в controller.
 
 ### Транзакции и сессии
 - Одна транзакция = один handler/middleware.

@@ -1,14 +1,18 @@
 # Habit Club — Статус бэкенда и план до прода
 
-> Дата среза: 2026-07-23 (обновлено после lint-zero итерации: commits `7a39fc1`, `de57457`)
+> Дата среза: 2026-07-23 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> SSE+Redis Streams на проде, см. §1.0 ниже).
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
 > Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
 > `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
+> ⚠️ **2026-08-05 — Beget временно заблокировал `prideclub.fun`** (NS records
+> переключены на `verification-hold.suspended-domain.com`). Юзер пофиксил
+> через support; NS вернулись к рабочим. Подробности — `Pravki.md §7.8`.
 > Документ описывает только **бэкенд** (FastAPI + worker + bot). Фронт — отдельная тема.
 
 ---
 
-## 1. Текущая стадия: **✅ готов к soft-launch + Admin Mini App**
+## 1. Текущая стадия: **✅ готов к soft-launch + Admin Mini App + SSE real-time**
 
 ### 1.0 Что сделано в этой итерации
 - ✅ `/setdomain` в BotFather → Mini App открывается кнопкой в боте
@@ -23,6 +27,36 @@
   для B008. Все 86 handler-сигнатур переведены на `Annotated[X, Depends(get_x)]`
   per FastAPI docs. Без функциональных изменений, все контейнеры healthy после
   деплоя.
+- ✅ **SSE через Redis Streams — Steps 1-6** (2026-08-04, ветка
+  `feature/topic-scoped-checkin` → main, merge commit `0c9a7b8`):
+  - Step 1 `c836542` — `POST /api/v1/events/stream/token` с HS256 JWT (TTL 60 с),
+    отдельный `SSE_TOKEN_SECRET`, membership-check на этапе выдачи.
+  - Step 2 `9d5b374` — `GET /api/v1/events/stream` SSE endpoint + exact-path bypass
+    initData-middleware + `last_event_id` query param в контракте.
+  - Fix-up 1 `a0217ec` — exact-path bypass test + обратная совместимость
+    `POST /events/stream/token` под initData-auth.
+  - Fix-up 2 `ec60c0f` — per-user concurrency limit через Lua-atomic INCR+DECR
+    (`MAX_CONCURRENT = 5`, защита от DoS через replayable token).
+  - Step 3 `11edb14` + `e5cc8e0` — worker `event_publisher.py` с Guard 1 (early-skip
+    на дубль) + Guard 2 (SET NX EX перед XADD под единым try/except).
+  - Step 4 `7ada2ad` — backend `redis_stream_bus.py` + XREAD BLOCK в SSE endpoint
+    + async-Redis singleton (`db/redis_async.py`) — фикс FD-leak при reconnect.
+  - Step 5 `900ef4f` — nginx exact-match `location = /api/v1/events/stream`
+    (`proxy_buffering off`, `proxy_read_timeout 3600s`, `proxy_send_timeout 3600s`,
+    `access_log off`) — применён на проде руками через SSH (бэкап в
+    `/var/backups/nginx/habit-club.bak.20260804_1823`).
+  - Step 6 `5d8c6e6` + `d30832a` — frontend `useTodayStream` хук + `streamController`
+    pure-function с 7-param DI + `sseToken` API + 11 vitest unit + удаление
+    mount-invalidate `useEffect(invalidateQueries)` в `TodayPage`.
+  - Инфра-фиксы `0ceb647` + `4d821d6` — `apps/frontend/.dockerignore` +
+    `infra/docker-compose.yml` `x-backend-env`: `SSE_TOKEN_SECRET: ${SSE_TOKEN_SECRET}`,
+    `SSE_TOKEN_TTL_SECONDS: ${SSE_TOKEN_TTL_SECONDS:-60}`. Подключение через
+    compose-интерполяцию из `/app/infra/.env` (НЕ `/app/.env` — тот не монтируется).
+- ✅ **Smoke-test оба сценария** (2026-08-04): regression check (все API endpoints
+  отвечают корректно, без initData → 401), SSE-сценарий через Mini App
+  (юзер 7295309649, habit `d5134c5b-…`, real-time обновление через EventSource,
+  Redis stream `sse:user:7295309649:d5134c5b-…` XLEN=1, `sse_publish_ok` ровно один).
+  Connection limiter `sse:conn:7295309649` expire'ируется через TTL=180 с после закрытия.
 
 ### 1.1 Что полностью работает (есть на проде, проверено E2E)
 
@@ -47,26 +81,33 @@
 | 16a | **Bot pre-filter** по `proof_types` и дубликату | ✅ Работает с 2026-07-23 | PR №9: `GET /internal/bot/habit_state` → бот проверяет тип и дубликат ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» / «уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. |
 | 17 | **CI в GitHub Actions** | ✅ Конфиг исправлен | `backend-ci.yml`, `frontend-ci.yml` |
 | 18 | **Admin Mini App** (управление клубами: CRUD + activate/archive/restore) | ✅ На проде с `2026-07-21` (commit `ad0267b`) | `apps/frontend/src/admin/`, `admin.prideclub.fun`. Owner-gate в `core/middleware.py`. |
+| 19 | **SSE real-time updates** (Mini App «Сегодня» без polling) | ✅ На проде с `2026-08-04` (commits `c836542`..`d30832a`, merge `0c9a7b8`) | `POST /api/v1/events/stream/token` (JWT TTL 60 с) + `GET /api/v1/events/stream` (XREAD BLOCK 30000) + worker `event_publisher` (Guard 1+Guard 2) + nginx exact-match + frontend `useTodayStream`. Redis streams `sse:user:{u}:{h}`, idempotency keys `sse_published:checkin:{m}:{d}` (24 ч), per-user concurrency `sse:conn:{u}` (MAX=5). Покрыто 100 тестами (67 backend + 22 worker + 11 frontend vitest). Smoke-test: ручной чек-ин через Mini App → real-time обновление без refetch. |
 
 ### 1.2 Тесты
 
-| Пакет | Локально | На сервере |
+| Пакет | Локально (после Step 6) | На сервере |
 |-------|----------|------------|
-| `apps/backend/tests` | **161 passed** | не запускаются в проде (только локально + CI) |
-| `apps/worker/tests` | **34 passed** (2 legacy fail в `test_close_catch_window.py` — pre-existing, не связано с T5) | не запускаются в проде |
-| **Итого** | **195 passed** | — |
+| `apps/backend/tests` | **287 passed** (89 SSE-related + 198 остальных) + **10 failed** (`test_admin_habits_api.py::TestAdminHabitEndpoints` × 9 требуют настоящего Redis, `test_migrations.py::test_alembic_round_trip_on_real_postgres` требует `pg_ctl` — физически невозможно без Docker). | не запускаются в проде (только локально + CI) |
+| `apps/worker/tests` | **58 passed** + **1 failed** (`test_close_season_skips_active_seasons` — **pre-existing**, воспроизводится на `main` `bd9fd76` без SSE-кода, подтверждено в Step 7 через `git checkout main` + repro; не связано с Steps 1-4) | не запускаются в проде |
+| `apps/frontend/tests` | **11 passed** (`test_stream_controller` — vitest 2.1.9, EventSource + requestToken + queryClient моканы, `vi.useFakeTimers` для backoff) | не запускаются в проде |
+| **Итого** | **356 passed** + 11 failed (10 — внешние сервисы в тестах, 1 — pre-existing worker fail) | — |
 
-### 1.3 Live endpoints (после последнего деплоя)
+### 1.3 Live endpoints (после Step 7 deploy 2026-08-04)
 
 ```
-✅ https://app.prideclub.fun          → Mini App (Vite + backend API)
+✅ https://app.prideclub.fun          → Mini App (Vite + backend API) — **real-time SSE обновления работают**
 ✅ https://app.prideclub.fun/health    → {"status":"ok"}
 ✅ https://app.prideclub.fun/ready     → {"status":"ready"} (DB + Redis OK)
 ✅ https://app.prideclub.fun/api/v1/users/me (без auth) → 401
+✅ https://app.prideclub.fun/api/v1/events/stream/token (без initData) → 401 missing_init_data (НЕ 503 sse_not_configured — SSE_TOKEN_SECRET дошёл)
+✅ https://app.prideclub.fun/api/v1/events/stream (без токена) → EventSource 401 invalid_token (при наличии валидного JWT → 200 text/event-stream)
 ✅ https://api.prideclub.fun           → Backend API + bot webhook
 ✅ https://prideclub.fun / www.        → Public web (frontend)
+✅ https://admin.prideclub.fun         → Admin Mini App (owner-only)
 ✅ https://db.prideclub.fun            → pgweb admin (basic auth)
-✅ TLS сертификат Let's Encrypt, валиден 89 дней (автопродление)
+✅ TLS сертификат Let's Encrypt, валиден до 2026-10-19 (autorenewal)
+✅ Redis Stream `sse:user:7295309649:d5134c5b-…` создан при ручном smoke-тесте (XLEN=1, `checkin.accepted` payload)
+✅ Idempotency key `sse_published:checkin:7af92214-…:2026-08-04` TTL=24 ч
 ```
 
 ### 1.4 Решённые проблемы этой итерации
@@ -86,6 +127,10 @@
 | 11 | Финансы (`price_month`, `penalty_amount`) были заморожены после первого участника | Заморозка снята в `HabitService.update`; middleware `/admin/v1/*` уже гейтит доступ только owner'у. Endpoint `PATCH /admin/v1/habits/{id}/force-financials` оставлен для targeted-обновления. См. `02-architecture.md` §12. |
 | 12 | Бот отвечал «Принято, молодец» даже когда worker асинхронно отвергал чек-ин (`code: wrong_type`) | Backend возвращает `{ok: True, task_id: ...}` сразу после `send_task()`. Worker отвергает задачу позже — бот не узнаёт. Решено pre-filter'ом в боте: новый `GET /internal/bot/habit_state?chat_id=...&user_id=...` проверяет `allowed_proof_types` и `already_checked_in` ДО отправки в backend. Юзер сразу получает «в этом клубе принимается только X» или «ты уже отметился сегодня» вместо ложного «Принято». См. `02-architecture.md` §14. Проверено юзером в Telegram: после деплоя бот корректно отвечает. |
 | 13 | ruff падал с 368 ошибками в CI (368 — реальное число, не «49+» как ошибочно считалось) | Двухкоммитный фикс: `7a39fc1` — auto-fix 200 ошибок + 86 B008→Annotated; `de57457` — фикс импорта `TelegramUserDbDep` (забыл обновить 3 файла после выноса alias'а в `users.py`, ImportError блокировал backend старт, починено на сервере и проверено `/health, /ready, /metrics`). |
+| 14 | SSE реальное время не работало в Mini App (polling-mount-invalidate давал stale state 30 с) | Step 5+6 (commits `900ef4f`, `5d8c6e6`, `d30832a`): nginx exact-match блок + frontend `useTodayStream` с manual reconnect-loop. Удалён redundant `useEffect(invalidateQueries)` в `TodayPage` — на масштабе 1000+ юзеров это была конкретная лишняя нагрузка на backend. Подробности `docs/04-code-standards.md §13` и `apps/frontend/docs/STATUS.md`. |
+| 15 | При деплое frontend через `docker compose build frontend --no-cache` падал с `cannot replace to directory .../node_modules/@tanstack/react-query with file` | Добавлен `apps/frontend/.dockerignore` (commit `0ceb647`) — гигиена build context, исключает `node_modules/`. **Реальный деплой frontend через двухслойный метод** (`docs/02-architecture.md §13`): `docker run node:20-alpine + docker cp dist + nginx -s reload`, НЕ через `docker compose build`. |
+| 16 | При деплое Step 7 `SSE_TOKEN_SECRET` не дошёл до backend (положили в `/app/.env`, который **НЕ монтируется** в контейнеры) | Добавлен `SSE_TOKEN_SECRET` в `/app/infra/.env` (рабочий паттерн `${VAR}` интерполяции в `x-backend-env`) и `x-backend-env` в `infra/docker-compose.yml` (commit `4d821d6`). Backend контейнер теперь видит секрет через env-переменную. Подробности — `docs/07-security-and-ops.md §5` и `docs/AGENT_BOOTSTRAP.md §3`. |
+| 17 | `prideclub.fun` заблокирован Beget (`verification-hold.suspended-domain.com`, 2026-08-05) на 2 дня после моего deploy | Юзер обратился в support, NS records восстановлены. **Урок**: NS `verification-hold` означает блокировку registrar'ом — не публичный DNS-провайдер, обходные пути (`curl --resolve`) не работают для Telegram-юзеров. |
 
 ---
 

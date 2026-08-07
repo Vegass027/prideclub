@@ -1,10 +1,13 @@
 # Frontend Status — что сделано и что работает
 
-> Snapshot от 2026-07-23. Включает **topic-scoped чек-ины** (миграции 010/011,
+> Snapshot от 2026-07-23 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> SSE+Redis Streams). Включает **topic-scoped чек-ины** (миграции 010/011,
 > ветка `feature/topic-scoped-checkin`), **третий топик** для чата клуба,
 > кнопки «🎬 Сделать чек-ин» / «💬 Перейти в чат» / «👋 Присоединиться к клубу»
-> и тёмный фон Mini App. Платежи = мок на фронте (`PaymentModal.setTimeout`,
-> `TopUpModal.alert`), бот не вызывает `bot.send_invoice`. См.
+> и тёмный фон Mini App. **Real-time updates через SSE** (commits `5d8c6e6`+`d30832a`):
+> `useTodayStream` хук с manual reconnect-loop, `streamController` pure-function
+> с DI, `sseToken` API — см. раздел «Real-time updates (SSE)». Платежи = мок на фронте
+> (`PaymentModal.setTimeout`, `TopUpModal.alert`), бот не вызывает `bot.send_invoice`. См.
 > [09-prod-readiness.md](../../../docs/09-prod-readiness.md).
 
 > Telegram Mini App для Habit Club (PrideClub). React 18 + TypeScript + Vite + Tailwind + React Query + Zustand.
@@ -190,6 +193,67 @@ apps/frontend/src/
 - `Telegram.WebApp.ready()`, `.expand()`, `.setHeaderColor()`, `.setBackgroundColor()`.
 - API-клиент автоматически добавляет `X-Telegram-Init-Data` в каждый запрос.
 - `getUser()` / `getUserPhoto()` — typed доступ к `initDataUnsafe.user`.
+
+### ✅ Real-time updates (SSE) — Step 6 (2026-08-04)
+
+**Backend pipeline** (Steps 1-4, `feature/topic-scoped-checkin` → main):
+- `POST /api/v1/events/stream/token` — выдаёт JWT (HS256, TTL 60 с) после initData-auth
+  + membership-check. Подписан `SSE_TOKEN_SECRET` (отдельный от `SERVICE_SECRET`).
+- `GET /api/v1/events/stream?habit_id=…&token=…` — `StreamingResponse(text/event-stream)`
+  с `XREAD BLOCK 30000 STREAMS sse:user:{u}:{h} <start_id>` через `redis_stream_bus.py`.
+  `: heartbeat\n\n` на пустой XREAD. Async-Redis singleton (`db/redis_async.py`)
+  — один пул на процесс.
+- Worker `event_publisher.py` — `SET sse_published:checkin:{m}:{d} NX EX 86400`
+  перед `XADD sse:user:{u}:{h} MAXLEN ~ 1000 * event=checkin.accepted|rejected habit_id ... payload {...}`.
+  Guard 1 (early-skip на дубль) + Guard 2 (idempotency через SET NX).
+- nginx exact-match `location = /api/v1/events/stream` (Step 5, commit `900ef4f`):
+  `proxy_buffering off`, `proxy_read_timeout 3600s`, `proxy_send_timeout 3600s`,
+  `access_log off` (SSE-токен в query, не логируется).
+
+**Frontend files** (commits `5d8c6e6` + `d30832a`):
+- `apps/frontend/src/shared/api/sseToken.ts` — `sseTokenApi.request(habitId)` через axios
+  (initData rides on interceptor).
+- `apps/frontend/src/shared/hooks/streamController.ts` — **pure-function controller**
+  с DI через 7 параметров (`habitId, queryClient, createEventSource, requestToken,
+  setTimeoutFn, clearTimeoutFn, onError, streamBaseUrl`). Manual reconnect-loop с
+  backoff `[1s, 2s, 5s, 10s]` cap, inFlight race-protection. НЕ полагается на
+  нативный EventSource auto-reconnect — он ре-шлёт протухший токен, EventSource
+  при 401 закрывается насовсем, в Telegram WebView сеть рвётся регулярно.
+- `apps/frontend/src/shared/hooks/useTodayStream.ts` — тонкая обёртка
+  (`useEffect` + `useRef`), ответственная только за lifecycle. Cleanup в
+  `useEffect` закрывает EventSource и отменяет pending backoff-таймер.
+- `apps/frontend/src/pages/Today/TodayPage.tsx` — `useTodayStream(habitId)`
+  подключён. **Mount-invalidate `useEffect(invalidateQueries)` удалён** (`d30832a`)
+  как избыточный — на масштабе 1000+ юзеров это конкретная лишняя нагрузка
+  на backend без реальной пользы. `useToday` через `useQuery` со `staleTime: 30_000`
+  сам управляет stale-инвалидацией.
+
+**Тесты** (`apps/frontend/src/shared/hooks/__tests__/streamController.test.ts`):
+11 vitest unit. Покрытие: initial open URL shape, `checkin.accepted` →
+`setQueryData` с распарсенным payload + `lastEventId` persistence, `checkin.rejected`
+→ `onError` с message из payload, onerror → close + backoff + новый EventSource
+с свежим токеном (НЕ с тем же — иначе нативный EventSource сдохнет через TTL=60с),
+backoff cap на 10 с, `lastEventId` в reconnect URL, `stop()` отменяет pending
+backoff, `requestToken throws` → backoff retry, `start()` идемпотентность.
+
+**Архитектурный выбор — pure-function controller (не inline в хуке):**
+выделен из хука для тестируемости без `@testing-library/react` (его нет в
+`package.json`). DI через 7 параметров позволяет мокать EventSource,
+queryClient, requestToken, setTimeout, onError. Не создаёт React-зависимости
+в контроллере — следует той же дисциплине что и backend (DI через конструктор,
+никаких глобальных состояний). **One `as unknown as` каст в одной DI-точке**
+(`EventSource` → `StreamEventSourceCtor`) — TypeScript не делает covariance на
+constructor return types, каст явно помечен комментарием с обоснованием.
+
+**Telegram WebView совместимость:** EventSource не поддерживает кастомные
+заголовки (нет initData), поэтому SSE-контур использует двухступенчатый flow —
+`POST /events/stream/token` с initData → JWT → `GET /events/stream?token=…`.
+Nginx exact-match блок работает только для GET на `/api/v1/events/stream`,
+POST `/events/stream/token` остаётся под общим `/api/` блоком с initData-middleware.
+
+**Деплой:** используется метод из `docs/02-architecture.md §13` —
+`docker run node:20-alpine + docker cp dist + nginx -s reload`. НЕ `docker
+compose build frontend` (двухслойный nginx не обновит dist в работающем контейнере).
 
 ---
 

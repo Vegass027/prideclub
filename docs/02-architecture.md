@@ -1,10 +1,10 @@
 # 02 — Архитектура
 
-> Snapshot от 2026-07-22 (обновлено 2026-08-04 после Step 5 SSE nginx). Описывает
-> **реально работающую** систему. Концептуальные разделы (принципы, потоки)
-> сохранены — они не изменились, только уточнены детали. Раздел §9 «Известные
-> проблемы и долги» актуализирован: добавлена запись про SSE-step5-nginx
-> применён, но Steps 1-4 на проде не задеплоены.
+> Snapshot от 2026-07-22 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> Steps 1-6 на проде). Описывает **реально работающую** систему. Концептуальные
+> разделы (принципы, потоки) сохранены — они не изменились, только уточнены
+> детали. Раздел §9 «Известные проблемы и долги» актуализирован: добавлена
+> запись про SSE через Redis Streams (✅ работает на проде с 2026-08-04).
 
 ## 1. Принципы
 
@@ -331,19 +331,22 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 3. При добавлении новых обязательных параметров в DI-конструктор сервиса (`CheckinService`, `PenaltyService`, и т.д.) — синхронно обновить **все** call-сайты: backend API DI (`apps/backend/app/api/v1/*.py`), worker таски (`apps/worker/worker/tasks/*.py`), admin endpoint DI. Перед merge — `rg "ServiceName\\("` по всему проекту.
 4. Worker-таски имеют `except Exception` catch-all, который **маскирует баги DI** как `ok=False`. Если в логах видишь `worker_checkin_failed` с `err='CheckinService.__init__() ...'`, НЕ игнорируй — это серьёзный баг.
 
-### 9.3. SSE через Redis Streams — текущая ситуация (snapshot 2026-08-04)
+### 9.3. SSE через Redis Streams — текущая ситуация (snapshot 2026-08-07)
 
-> Полный план — `sse+redis.md`. Шаги 1-4 (backend SSE endpoint, middleware bypass,
-> worker event_publisher, XREAD pipeline + async-Redis singleton) реализованы в
-> ветке `feature/topic-scoped-checkin` и **защищены 89 тестами** (67 backend + 22 worker).
+> Полный план — `sse+redis.md`. Шаги 1-6 (backend SSE endpoint, middleware bypass,
+> worker event_publisher, XREAD pipeline + async-Redis singleton, nginx SSE
+> блок, frontend `useTodayStream`) **задеплоены и работают на проде с 2026-08-04**.
+> Покрыты 100 тестами (67 backend + 22 worker + 11 frontend vitest).
 
 | Что | Где | Статус |
 |---|---|---|
-| **Step 5: nginx `location = /api/v1/events/stream`** | `infra/nginx/nginx.prideclub.conf:97-112`, `nginx.prod.conf:79-99`, `infra/nginx/habit-club-sse.conf.snippet` | ✅ Применено на проде `2026-08-04` (commit `900ef4f`). `nginx -t` ОК. Debug-тест с `return 418` подтвердил exact-match. Бэкап `/var/backups/nginx/habit-club.bak.20260804_1823`. |
-| **Steps 1-4 на проде** | `apps/backend/app/api/v1/events.py`, `core/middleware.py`, `worker/tasks/process_checkin.py` в контейнере `habit-backend` | ❌ **НЕ ЗАДЕПЛОЕНЫ**. Прод работает на `main` (`bd9fd76`). В контейнере `habit-backend` (образ `d2e8c35817ea93dece80377bbd3b6898d47cb01dbf934ec76f783557e8414c4b`) файл `apps/backend/app/api/v1/events.py` **отсутствует**, в `core/middleware.py` нет `SSE_AUTH_BYPASS_PATHS`, в env нет `SSE_TOKEN_SECRET`. Запрос `GET /api/v1/events/stream` через nginx → 401 `{"code":"missing_init_data"}` (initData-middleware отбивает, потому что bypass не сработал — его кода нет на проде). |
-| **Что нужно для работы SSE на проде** | `git` flow + деплой | 1) Merge `feature/topic-scoped-checkin` → `main` (явный "ок" пользователя, см. AGENT_BOOTSTRAP §6). 2) `git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit` + push. 3) Сгенерировать `SSE_TOKEN_SECRET`: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. 4) Добавить `SSE_TOKEN_SECRET` в `/app/.env` (НЕ в `/app/infra/.env` — он для compose, не для приложения). 5) rsync `apps/backend/` + `apps/worker/` → `/tmp/privichki_new/` → `/app/apps/{backend,worker}/` → `docker compose build backend worker --no-cache && docker compose up -d backend worker`. 6) Smoke-test через Mini App: открыть «Сегодня», отправить кружок в бота, убедиться что статус обновляется без ручного refetch. |
-| **nginx-блок при отсутствии backend-кода** | поведение для клиента | Идентично исходному: nginx проксирует → backend отвечает 401/404. Никаких регрессий. Блок становится активным автоматически после деплоя Steps 1-4 (без правок nginx). |
-| **Step 6: frontend `useTodayStream` + `TodayPage`** | `apps/frontend/src/shared/hooks/useTodayStream.ts`, `TodayPage.tsx` | ⏳ pending — после деплоя Steps 1-4. |
+| **Steps 1-4: backend SSE + middleware bypass + worker event_publisher + XREAD pipeline** | `apps/backend/app/services/sse/{sse_token,sse_formatter,redis_stream_bus,connection_limiter}.py`, `apps/backend/app/api/v1/events.py`, `apps/backend/app/core/middleware.py` (SSE_AUTH_BYPASS_PATHS), `apps/backend/app/db/redis_async.py` (async-singleton), `apps/worker/worker/services/event_publisher.py`, `apps/worker/worker/tasks/process_checkin.py` (Guard 1 + Guard 2) | ✅ **ЗАДЕПЛОЕНЫ** на проде `2026-08-04` (merge commit `0c9a7b8`, deploy через `docker compose build backend worker --no-cache && docker compose up -d backend worker`). Образ `habit-backend`: `63e354d14c7820e4831167954f224be419c49b4b6afc7f28912ec7e6f9aff82f`. Smoke-test: `POST /api/v1/events/stream/token` (без initData) → 401 `{"code":"missing_init_data"}` (НЕ 503 `sse_not_configured` — значит `SSE_TOKEN_SECRET` дошёл до backend). Реальный чек-ин через Mini App → `worker sse_publish_ok event=checkin.accepted` (ровно 1 на чек-ин, Guard 2 не задвоил). Redis stream `sse:user:7295309649:<habit_id>` создан, XLEN=1, idempotency key `sse_published:checkin:7af92214-...:2026-08-04` TTL=24 ч. |
+| **Step 5: nginx `location = /api/v1/events/stream`** | `infra/nginx/nginx.prideclub.conf:97-112`, `nginx.prod.conf:79-99`, `infra/nginx/habit-club-sse.conf.snippet`, `/etc/nginx/sites-enabled/habit-club` (на хосте) | ✅ Применено на проде `2026-08-04` (commit `900ef4f`). `nginx -t` ОК. Debug-тест с `return 418` подтвердил exact-match (блок срабатывает только для точного `/api/v1/events/stream`, `POST /events/stream/token` остаётся под общим `/api/` блоком). Бэкап `/var/backups/nginx/habit-club.bak.20260804_1823`. |
+| **Step 6: frontend `useTodayStream` + `streamController` + `sseToken`** | `apps/frontend/src/shared/api/sseToken.ts`, `apps/frontend/src/shared/hooks/streamController.ts` (pure-function с 7-param DI), `apps/frontend/src/shared/hooks/useTodayStream.ts` (тонкая обёртка), `apps/frontend/src/pages/Today/TodayPage.tsx` | ✅ **ЗАДЕПЛОЕН** на проде `2026-08-04` через двухслойный nginx-метод (`docs/02-architecture.md §13`): `docker run node:20-alpine + npm ci + npm run build` + `docker cp dist` + `nginx -s reload`. Commits `5d8c6e6` + `d30832a`. Mount-invalidate в `TodayPage` удалён (`d30832a`): useToday со `staleTime: 30_000` сам управляет stale-инвалидацией, SSE даёт real-time freshness. **Pure-function controller** (вместо inline EventSource в хуке) — DI через 7 параметров (`habitId, queryClient, createEventSource, requestToken, setTimeoutFn, clearTimeoutFn, onError, streamBaseUrl`), тестируется без React-renderer. 11 vitest unit покрывают: initial open URL shape, checkin.accepted → setQueryData, checkin.rejected → onError, onerror → close + backoff + новый EventSource с свежим токеном, lastEventId в reconnect URL, stop() отменяет pending backoff, requestToken throws → backoff retry, start() идемпотентность. **One `as unknown as` каст** в одной DI-точке (EventSource → StreamEventSourceCtor — TypeScript не делает covariance на constructor return types), помечен комментарием с обоснованием. |
+| **Инфра-фиксы для деплоя** | `apps/frontend/.dockerignore` (commit `0ceb647`), `infra/docker-compose.yml` — `x-backend-env` (commit `4d821d6`): `SSE_TOKEN_SECRET: ${SSE_TOKEN_SECRET}` и `SSE_TOKEN_TTL_SECONDS: ${SSE_TOKEN_TTL_SECONDS:-60}` | ✅ **ЗАДЕПЛОЕНЫ**. `.dockerignore` исключает `node_modules` из build context frontend (без него `docker compose build frontend` падает с `cannot replace to directory .../node_modules/@tanstack/react-query with file`). `SSE_TOKEN_SECRET` подключён через compose-интерполяцию из `/app/infra/.env` (НЕ `/app/.env` — `/app/.env` **не монтируется** в контейнер, было неверное предположение в первоначальной инструкции; реальный паттерн проводки — `${VAR}` из `/app/infra/.env` через `x-backend-env`). |
+| **SSE_TOKEN_SECRET** | `/app/infra/.env`: `SSE_TOKEN_SECRET=<76 chars urlsafe>`, `SSE_TOKEN_TTL_SECONDS=60`. Backup `/app/infra/.env.bak.20260804_202231`. | ✅ Работает на проде. Генерируется `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Длина 76 символов (48 байт base64-urlsafe). |
+| **Что известно не покрыто локально без Docker** | тесты `test_admin_habits_api.py::TestAdminHabitEndpoints` (×9) и `test_migrations.py::test_alembic_round_trip_on_real_postgres` | ⚠️ Физически требуют настоящего Redis/Postgres через `docker-compose exec backend pytest`. Проходят только через CI или на проде. Не блокер — SSE-код покрыт 89 тестами через fakeredis/aiosqlite, всё зелёное. |
+| **Connection limiter edge-case** | `services/sse/connection_limiter.py` | ⚠️ `sse:conn:{user_id}` expire'ируется через TTL=180с если `release()` не вызвался. В реальном кейсе: TTL=180с после закрытия коннекта — окно для `try_acquire` на 6-й коннект (лимит 5). Для MVP приемлемо (страховка от `kill -9`); в v2 — добавить `logger.debug("sse_release_ok user=... count=...")` для верификации cleanup'а через `grep sse_release`. |
 
 ---
 

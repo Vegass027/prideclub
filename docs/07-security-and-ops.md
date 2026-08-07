@@ -1,8 +1,10 @@
 # 07 — Безопасность и операционные процессы
 
-> Snapshot от 2026-07-22. **Хостинг = Contabo VPS 4 (Германия), не Selectel (РФ)** —
+> Snapshot от 2026-07-22 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> SSE+Redis Streams). **Хостинг = Contabo VPS 4 (Германия), не Selectel (РФ)** —
 > см. §1. Бэкапы и Sentry/Grafana **не развёрнуты** на проде, см. §4 и §7.
-> Auth-контур в §2 актуален и работает.
+> Auth-контур в §2 актуален и работает. **SSE_TOKEN_SECRET** добавлен в §2.4
+> (отдельный секрет для SSE-контура, не шарящийся с `SERVICE_SECRET`).
 
 Хостинг, аутентификация, ФЗ-152, бэкапы, секреты, мониторинг. Все решения закрыты
 для соответствия требованиям production-системы с денежной механикой.
@@ -153,6 +155,68 @@ def validate_service_token(token: str, secret: str, expected_audience: str) -> d
 - `aud` (audience) — токен для одного сервиса не работает в другом.
 - `iss` (issuer) — аудит источника.
 - `leeway=30` — устойчивость к расхождению часов.
+
+### 2.4. SSE Token (Mini App real-time updates)
+
+> Реализовано 2026-08-04 (Step 1, commit `c836542`). **Активно используется** —
+> при чек-ине через бота Mini App получает real-time обновление статуса через
+> SSE+Redis Streams без polling.
+
+**`POST /api/v1/events/stream/token`** выдаёт JWT-токен для подключения к SSE.
+Подписан **отдельным** секретом `SSE_TOKEN_SECRET` (HS256, НЕ `SERVICE_SECRET` —
+разные контуры, разные секреты, разная blast-radius при компрометации):
+
+```
+JWT claims:
+  sub:           user_id (numeric)
+  habit_id:      UUID
+  scope:         "sse:today"
+  aud:           "sse-stream"
+  iss:           "backend"
+  iat, exp:      now, now+60s
+TTL:             60 секунд (НЕ одноразовый — осознанное решение Q4)
+Leeway:          10с на валидации (дрейф часов + reconnect-флоу)
+```
+
+```python
+def generate_sse_token(user_id: int, habit_id: UUID) -> str:
+    return jwt.encode({
+        "sub": user_id, "habit_id": str(habit_id),
+        "scope": "sse:today", "aud": "sse-stream",
+        "iss": "backend", "iat": now, "exp": now + 60,
+    }, settings.SSE_TOKEN_SECRET, algorithm="HS256")
+```
+
+**Почему `SSE_TOKEN_SECRET` ≠ `SERVICE_SECRET`:**
+
+| Сценарий | `SERVICE_SECRET` | `SSE_TOKEN_SECRET` |
+|---|---|---|
+| URL | `/internal/*` (bot ↔ backend ↔ worker) | `/api/v1/events/*` (Mini App ↔ backend) |
+| Уровень доверия | trusted services (контейнеры) | untrusted user input (Telegram WebView) |
+| Что даёт компрометация | бот может вызывать `/internal/payments/confirm` от любого юзера | атакующий может читать SSE-стримы юзеров (read-only) |
+| TTL | 60 с (тот же, паттерн тот же) | 60 с |
+| Rotation impact | затронет bot + worker | затронет только Mini App |
+
+Если придётся ротировать `SSE_TOKEN_SECRET` (например, лог-утечка токена
+в access-логе nginx до применения `access_log off` для `/api/v1/events/stream`,
+см. `sse+redis.md §3.2`) — это не затронет internal-контур.
+
+**Membership-check на этапе выдачи токена (НЕ на стриме):**
+- Fail-fast — юзер сразу видит 403 `membership_not_active`, не открывает EventSource зря.
+- Паразитный трафик исключён (пустой стрим с XREAD 30 с блокирует воркер).
+- Через 60 с токен протухнет, но membership не мог измениться так быстро → повторный
+  check на стриме избыточен (+1 RTT к БД).
+
+**`GET /api/v1/events/stream`** (НЕ требует initData — exact-path bypass в
+`core/middleware.py`):
+- `SSE_AUTH_BYPASS_PATHS = {"/api/v1/events/stream"}` — точный set, не префикс
+  (фикс-up 1 `a0217ec` + тест `test_similar_path_under_events_is_not_bypassed`).
+  `POST /events/stream/token` остаётся под initData-middleware.
+
+**Per-user concurrency limit** (см. `sse+redis.md §2.6`):
+`MAX_CONCURRENT_CONNECTIONS_PER_USER = 5` через Lua-atomic `INCR + EXPIRE + DECR-rollback`
+в `services/sse/connection_limiter.py`. Защита от DoS через replayable token (TTL=60с,
+один валидный токен не открывает неограниченное число соединений в окне 60с).
 
 ### 2.3. Middleware
 
