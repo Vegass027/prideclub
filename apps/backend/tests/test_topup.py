@@ -287,6 +287,45 @@ def test_topup_rejects_zero_amount(
     assert r.status_code == 422
 
 
+def test_topup_accepts_empty_string_habit_id(
+    app: Any,
+    _sqlite_engine: Any,
+) -> None:
+    """PR #2: фронт шлёт habit_id="" (или undefined → Pydantic принимает как None).
+
+    Pravki-deposit-sse.md §Z-2.5: deposit глобальный, habit_id опционален.
+    Backend нормализует "" → None на уровне handler'а (payments.py:50), и
+    membership-creation НЕ происходит. Транзакция пишется с
+    related_membership_id=None (FK на memberships nullable).
+    """
+    _, factory = _sqlite_engine
+    habit_id = asyncio.run(_seed_habit(factory))
+    asyncio.run(_seed_member(factory, user_id=125, habit_id=habit_id, deposit_balance=0))
+
+    with TestClient(app) as client:
+        # Фронт PR #2 (useTopUpDeposit) сейчас шлёт {habit_id: ""}.
+        r = client.post(
+            "/api/v1/payments/topup",
+            headers={"X-Telegram-Init-Data": _build_init_data(user_id=125)},
+            json={"habit_id": "", "amount_kopecks": 50_000},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["new_deposit_balance"] == 50_000
+    # Транзакция без related_membership_id.
+    from sqlalchemy import select
+
+    async def _check_tx() -> None:
+        async with factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+            assert len(txs) == 1
+            assert txs[0].related_membership_id is None
+
+    asyncio.run(_check_tx())
+
+
 def test_topup_without_init_data_returns_401(app: Any) -> None:
     """Без initData → middleware 401."""
     with TestClient(app) as client:

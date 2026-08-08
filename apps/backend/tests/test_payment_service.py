@@ -241,11 +241,16 @@ async def test_payment_acquires_lock_on_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_payment_creates_membership_if_missing() -> None:
-    """Если membership нет — _apply создаёт её и продолжает.
+async def test_payment_skips_membership_creation_when_missing() -> None:
+    """PR #2: депозит глобальный, membership-creation на topup УБРАНА.
 
-    После PR #1 user-lock первичен (user всегда есть). Membership может
-    отсутствовать (legacy topup создаёт membership под капотом).
+    Pravki-deposit-sse.md §Z-2.5: после переноса депозита на users.deposit_balance
+    membership больше не нужна для topup'а. Если юзер ещё не в клубе —
+    транзакция записывается с `related_membership_id=None` (FK nullable).
+    Membership создаётся явно через POST /habits/{id}/join.
+
+    Старое поведение "создаём membership под капотом на topup" удалено
+    полностью — это была legacy-логика эпохи deposit-на-membership.
     """
     from app.models.user import User
 
@@ -255,8 +260,7 @@ async def test_payment_creates_membership_if_missing() -> None:
     session = _FakeSession()
     session.users[1] = u
 
-    # Хакнем execute — get_for_user_in_habit возвращает None → PaymentService
-    # должен создать membership, зафлашить, и продолжить.
+    # Хакнем execute — get_for_user_in_habit возвращает None (юзер не в клубе).
     original_execute = session.execute
 
     async def execute_membership_none(stmt):
@@ -274,16 +278,51 @@ async def test_payment_creates_membership_if_missing() -> None:
     service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
 
     tx = await service.confirm_deposit_topup(
-        charge_id="charge-create-membership",
+        charge_id="charge-no-membership",
         user_id=1,
-        habit_id="h1",
+        habit_id="h1",  # даже если habit_id указан, membership не создаётся
         amount_kopecks=50_000,
     )
 
-    # Должна быть создана 1 membership и 1 транзакция.
-    assert len(session.memberships) == 1
+    # НЕ создаётся membership — это было legacy.
+    assert len(session.memberships) == 0, (
+        "PaymentService НЕ должен создавать membership под капотом. "
+        "Это устаревшая логика эпохи deposit-на-membership. См. §Z-2.5."
+    )
+    # Транзакция создаётся без related_membership_id.
     assert len(session.transactions) == 1
+    assert session.transactions[tx.id].related_membership_id is None
     # Депозит юзера увеличен.
     assert u.deposit_balance == 50_000
-    # transaction.balance_after = user.deposit_balance (а не membership).
+    # transaction.balance_after = user.deposit_balance.
     assert tx.balance_after == 50_000
+
+
+@pytest.mark.asyncio
+async def test_payment_with_none_habit_id_skips_membership_lookup() -> None:
+    """PR #2: habit_id=None (фронт не передаёт поле) → membership lookup skipped.
+
+    Если у юзера уже есть membership для какого-то клуба — она не трогается.
+    Если нет — никакая membership не создаётся. Депозит идёт глобально на user.
+    """
+    from app.models.user import User
+
+    u = User(id=1, first_name="u1", deposit_balance=0)
+    user_repo = _FakeUserRepo({1: u})
+
+    session = _FakeSession()
+    session.users[1] = u
+
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
+
+    tx = await service.confirm_deposit_topup(
+        charge_id="charge-no-habit",
+        user_id=1,
+        habit_id=None,  # фронт PR #2 шлёт undefined → Pydantic → None
+        amount_kopecks=30_000,
+    )
+
+    assert len(session.memberships) == 0
+    assert len(session.transactions) == 1
+    assert tx.related_membership_id is None
+    assert u.deposit_balance == 30_000

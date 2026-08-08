@@ -54,7 +54,7 @@ class PaymentService:
         *,
         charge_id: str,
         user_id: int,
-        habit_id: str,
+        habit_id: str | None,
         amount_kopecks: int,
         months: int,
     ) -> Transaction:
@@ -72,7 +72,7 @@ class PaymentService:
         *,
         charge_id: str,
         user_id: int,
-        habit_id: str,
+        habit_id: str | None,
         amount_kopecks: int,
     ) -> Transaction:
         return await self._apply(
@@ -91,7 +91,7 @@ class PaymentService:
         user_id: int,
         kind: str,
         amount_kopecks: int,
-        habit_id: str,
+        habit_id: str | None,
         extend_days: int,
     ) -> Transaction:
         # 1. Идемпотентность: проверяем, что транзакция с таким ключом уже есть.
@@ -114,19 +114,18 @@ class PaymentService:
             # возвращаем явную ошибку через transaction с balance_after=None.
             raise ValueError(f"user {user_id} not found for payment {charge_id}")
 
-        # 3. Membership берём без lock — нужна только для related_membership_id
-        #    в Transaction и для subscription_until. Депозит-мутация идёт через user.
-        m = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
-        if m is None:
-            # Backward-compat: первый платёж этого пользователя в этом клубе —
-            # создаём membership, флашим, чтобы related_membership_id был валиден.
-            m = Membership(
-                user_id=user_id,
-                habit_id=habit_id,
-                subscription_until=None,
-            )
-            self._session.add(m)
-            await self._session.flush()
+        # 3. Membership lookup — только если habit_id указан И существует в БД.
+        #    Pravki-deposit-sse.md §Z-2.5: депозит глобальный, habit_id
+        #    опционален. Membership-row нужна ТОЛЬКО для related_membership_id
+        #    в Transaction. Если юзер ещё не в клубе (или habit_id=None) —
+        #    транзакция записывается без привязки (related_membership_id=None,
+        #    FK nullable на transactions.related_membership_id).
+        m: Membership | None = None
+        if habit_id is not None:
+            m = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
+            # НЕ создаём membership под капотом — это был legacy-хак для
+            # старого deposit-на-membership дизайна. PR #1 депозит на user,
+            # membership создаётся явно через POST /habits/{id}/join.
 
         # 4. Применяем эффект. u.deposit_balance += и subscription_until теперь
         #    безопасны — user-строка под FOR UPDATE, никакой параллельный writer
@@ -138,11 +137,13 @@ class PaymentService:
         )
         if kind == "deposit_topup":
             u.deposit_balance += amount_kopecks
-        if kind == "subscription" and extend_days and m.subscription_until:
-            new_until = m.subscription_until + timedelta(days=extend_days)
-            m.subscription_until = new_until
-        elif kind == "subscription":
-            m.subscription_until = datetime.utcnow().date() + timedelta(days=extend_days)
+        if kind == "subscription" and m is not None:
+            # Subscription требует membership — без неё продлить нечего.
+            # Если club_id нет, кидаем ошибку (UI: "Сначала вступи в клуб").
+            if extend_days and m.subscription_until:
+                m.subscription_until = m.subscription_until + timedelta(days=extend_days)
+            else:
+                m.subscription_until = datetime.utcnow().date() + timedelta(days=extend_days)
 
         tx = Transaction(
             id=str(uuid4()),
@@ -150,12 +151,12 @@ class PaymentService:
             type=tx_type,
             amount=amount_kopecks,
             balance_after=u.deposit_balance,
-            related_membership_id=m.id,
+            related_membership_id=m.id if m is not None else None,
             idempotency_key=charge_id,
         )
         self._session.add(tx)
 
-        if m.status != MembershipStatus.ACTIVE:
+        if m is not None and m.status != MembershipStatus.ACTIVE:
             m.status = MembershipStatus.ACTIVE
 
         # Пересчёт пауз для всех клубов юзера (Pravki-deposit-sse.md §Z-2.5).

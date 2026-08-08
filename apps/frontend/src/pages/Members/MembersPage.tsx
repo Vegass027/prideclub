@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { useCatch, useMembers, useMyHabits } from "@/shared/hooks";
+import { useParams } from "react-router-dom";
+import { useCatch, useMembers } from "@/shared/hooks";
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
@@ -24,17 +24,12 @@ const CATCH_ERROR_LABELS: Record<string, string> = {
 
 export function MembersPage() {
   const { habitId } = useParams<{ habitId: string }>();
-  const navigate = useNavigate();
   const { data, isLoading, isError, error, refetch } = useMembers(habitId);
   const catchMutation = useCatch(habitId);
-  const { data: myHabits } = useMyHabits();
-  const showSwitcher = (myHabits?.items.length ?? 0) > 1;
-  const backTo = showSwitcher ? "/profile" : "/profile";
+  // Pravki-deposit-sse.md §Z-11: убран headerRight "Сменить клуб" — переход
+  // в /profile через BottomNav достаточен, кнопка в шапке дублировала навигацию.
+  const backTo = "/profile";
   const [catchMessage, setCatchMessage] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const headerRight = showSwitcher ? (
-    <button onClick={() => navigate("/profile")} className="text-xs text-primary">Сменить клуб</button>
-  ) : undefined;
 
   const handleCatch = (m: MemberRow) => {
     if (!m.can_catch) return;
@@ -61,7 +56,7 @@ export function MembersPage() {
   if (isLoading) {
     return (
       <ScreenLayout>
-        <PageHeader title="Участники" back backTo={backTo} right={headerRight} />
+        <PageHeader title="Участники" back backTo={backTo} />
         <Skeleton className="h-16 w-full" rows={4} />
         <HabitNav habitId={habitId!} />
       </ScreenLayout>
@@ -71,7 +66,7 @@ export function MembersPage() {
   if (isError) {
     return (
       <ScreenLayout>
-        <PageHeader title="Участники" back backTo={backTo} right={headerRight} />
+        <PageHeader title="Участники" back backTo={backTo} />
         <EmptyState icon="⚠️" title="Не удалось загрузить список" description={String(error)} />
         <BottomNav />
       </ScreenLayout>
@@ -84,7 +79,7 @@ export function MembersPage() {
 
   return (
     <ScreenLayout>
-      <PageHeader title="Участники" subtitle={`${items.length} в клубе`} back backTo={backTo} right={headerRight} />
+      <PageHeader title="Участники" subtitle={`${items.length} в клубе`} back backTo={backTo} />
 
       {catchMessage && (
         <div

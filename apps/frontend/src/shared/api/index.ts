@@ -9,6 +9,7 @@ import type {
   MembersResponse,
   TodayResponse,
   TopupResponse,
+  WalletResponse,
 } from "@/shared/types";
 
 export const marketplaceApi = {
@@ -40,6 +41,11 @@ export const balanceApi = {
   get: () => apiClient.get<BalanceResponse>("/balance").then((r) => r.data),
   topup: (payload: { habit_id: string; amount_kopecks: number }) =>
     apiClient.post<TopupResponse>("/payments/topup", payload).then((r) => r.data),
+};
+
+/** Pravki-deposit-sse.md §Z-4.1: глобальный кошелёк юзера. */
+export const walletApi = {
+  get: () => apiClient.get<WalletResponse>("/me/wallet").then((r) => r.data),
 };
 
 export const leaderboardApi = {

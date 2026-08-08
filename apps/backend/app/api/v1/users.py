@@ -4,12 +4,16 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 
 from app.core.deps import AvatarServiceDep, SessionDep
 from app.core.exceptions import PhotoUnavailableError
 from app.core.security import TelegramUser
+from app.models.habit import Habit
+from app.models.membership import Membership, MembershipStatus
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
+from app.schemas import WalletClubOut, WalletOut
 
 
 def current_user(request: Request) -> TelegramUser:
@@ -84,6 +88,59 @@ async def me(user: TelegramUserDep) -> dict:
         "language_code": user.language_code,
         "is_premium": user.is_premium,
     }
+
+
+@router.get("/me/wallet", response_model=WalletOut)
+async def me_wallet(
+    user: TelegramUserDbDep,
+    session: SessionDep,
+) -> WalletOut:
+    """Pravki-deposit-sse.md §Z-4.1: глобальный депозит + активные клубы с can_checkin.
+
+    Используется на фронте для:
+    - блокировки кнопки «Открыть клуб» на Today page, если deposit < penalty;
+    - предзаполнения TopUpModal при ошибке join'а (insufficient_deposit);
+    - отображения баланса в Profile.
+
+    Один SQL JOIN на (memberships × habits) — для клубов нужен только
+    penalty_amount (для can_checkin) + title (для UI) + status (для badge'а).
+    Текущий deposit берётся с уже поднятого в TelegramUserDbDep user'а.
+
+    `can_checkin` дублирует результат MembershipService.recompute_pause_status
+    (user.deposit_balance >= habit.penalty_amount). LEFT-membership'ы
+    исключены — `status != LEFT`.
+    """
+    user_row = await session.get(User, user.id)
+    if user_row is None:
+        # TelegramUserDbDep уже сделал upsert, но защищаемся от race.
+        return WalletOut(deposit_balance=0, active_clubs=[])
+
+    rows = (
+        await session.execute(
+            select(Membership, Habit.penalty_amount, Habit.title)
+            .join(Habit, Habit.id == Membership.habit_id)
+            .where(
+                Membership.user_id == user.id,
+                Membership.status != MembershipStatus.LEFT,
+            )
+        )
+    ).all()
+
+    active_clubs = [
+        WalletClubOut(
+            habit_id=str(m.habit_id),
+            title=title,
+            penalty_amount=int(penalty_amount),
+            can_checkin=user_row.deposit_balance >= int(penalty_amount),
+            status=m.status.value,
+        )
+        for m, penalty_amount, title in rows
+    ]
+
+    return WalletOut(
+        deposit_balance=user_row.deposit_balance,
+        active_clubs=active_clubs,
+    )
 
 
 @router.get("/users/{user_id}/photo")

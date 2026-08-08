@@ -32,6 +32,9 @@ export function useJoinHabit() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["marketplace"] });
       qc.invalidateQueries({ queryKey: ["today"] });
+      // Pravki-deposit-sse.md §Z-4.2: после join — invalidate wallet
+      // (если join шёл через успешный 200 OK без модала insufficient_deposit).
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     },
   });
 }
@@ -43,6 +46,7 @@ export function useLeaveHabit() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["marketplace"] });
       qc.invalidateQueries({ queryKey: ["today"] });
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     },
   });
 }
@@ -65,6 +69,7 @@ export function useCatch(habitId: string | undefined) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["members", habitId] });
       qc.invalidateQueries({ queryKey: ["balance"] });
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     },
   });
 }
@@ -84,6 +89,9 @@ export function useTopUpDeposit() {
       balanceApi.topup({ habit_id, amount_kopecks }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["balance"] });
+      // Pravki-deposit-sse.md §Z-4.2: после topup — invalidate wallet
+      // (от этого зависит блокировка кнопки «Открыть клуб» на Today page).
+      qc.invalidateQueries({ queryKey: ["wallet"] });
     },
   });
 }
@@ -139,3 +147,4 @@ export function useLeaderboardClubs(tab: LeaderboardTab) {
 
 export { usePhotoBlob } from "./usePhotoBlob";
 export { useTodayStream } from "./useTodayStream";
+export { useWallet } from "./useWallet";

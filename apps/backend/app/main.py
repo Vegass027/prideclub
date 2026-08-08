@@ -128,9 +128,17 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def _domain_error_handler(_: object, exc: DomainError) -> JSONResponse:
+        # Pravki-deposit-sse.md §Z-3.2: InsufficientDepositError требует
+        # передать клиенту required_kopecks / current_kopecks / club_penalty_kopecks
+        # для UI-модала «Недостаточно средств». Все DomainError'ы могут
+        # передавать extras через **kwargs в __init__ — глобальный handler
+        # мерджит их в content (рядом с code/message).
+        content: dict = {"code": exc.code, "message": exc.message}
+        if getattr(exc, "extras", None):
+            content.update(exc.extras)
         return JSONResponse(
             status_code=exc.status_code,
-            content={"code": exc.code, "message": exc.message},
+            content=content,
         )
 
     @app.exception_handler(Exception)

@@ -103,6 +103,24 @@ export interface BalanceResponse {
   history: Transaction[];
 }
 
+/** Клуб в /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
+export interface WalletClub {
+  habit_id: string;
+  title: string;
+  penalty_amount: number;
+  /** user.deposit_balance >= penalty_amount (результат MembershipService.recompute_pause_status). */
+  can_checkin: boolean;
+  /** "active" | "paused" — последний результат recompute. */
+  status: MembershipStatus;
+}
+
+/** Ответ GET /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
+export interface WalletResponse {
+  /** Копейки на users.deposit_balance. */
+  deposit_balance: number;
+  active_clubs: WalletClub[];
+}
+
 export interface TopupResponse {
   ok: boolean;
   transaction_id?: string;

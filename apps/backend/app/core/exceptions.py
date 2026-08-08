@@ -1,15 +1,34 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 class DomainError(Exception):
     status_code: int = 400
     code: str = "domain_error"
 
-    def __init__(self, message: str | None = None, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        code: str | None = None,
+        **extras: Any,
+    ) -> None:
+        """Базовый доменный exception.
+
+        Args:
+            message: текст для логирования / message-поля в JSON.
+            code: машинный код ошибки (по умолчанию = class.code).
+            **extras: дополнительные поля, которые попадут в JSON-ответ.
+                Например, InsufficientDepositError требует required_kopecks /
+                current_kopecks / club_penalty_kopecks для UI-модала
+                «Недостаточно средств». Глобальный handler в main.py
+                мерджит extras в response content под именами этих полей.
+        """
         super().__init__(message or self.code)
         self.message = message or self.code
         if code is not None:
             self.code = code
+        self.extras = extras
 
 
 class InvalidInitDataError(DomainError):
@@ -188,3 +207,31 @@ class TelegramUnavailableError(DomainError):
     """Telegram Bot API недоступен (timeout / 5xx / невалидный file_id)."""
     status_code = 502
     code = "telegram_unavailable"
+
+
+class InsufficientDepositError(DomainError):
+    """403: user.deposit_balance < habit.penalty_amount при join.
+
+    Pravki-deposit-sse.md §Z-3.2: единственный порог 1× penalty. Возвращаем
+    client'у все три поля, чтобы UI мог показать модал с конкретными суммами:
+    - required_kopecks: сколько нужно для вступления (= penalty клуба).
+    - current_kopecks: сколько сейчас на депозите.
+    - club_penalty_kopecks: штраф конкретного клуба (часто = required_kopecks,
+      но если хотим — будущее может разрешать partial topup с cap'ом).
+    """
+    status_code = 403
+    code = "insufficient_deposit"
+
+    def __init__(
+        self,
+        *,
+        required_kopecks: int,
+        current_kopecks: int,
+        club_penalty_kopecks: int,
+    ) -> None:
+        super().__init__(
+            self.code,
+            required_kopecks=required_kopecks,
+            current_kopecks=current_kopecks,
+            club_penalty_kopecks=club_penalty_kopecks,
+        )

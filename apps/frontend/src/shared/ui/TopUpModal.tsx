@@ -1,44 +1,70 @@
 import { useEffect, useState } from "react";
 import { useTopUpDeposit } from "@/shared/hooks";
 import { hapticImpact, hapticNotify, showAlert } from "@/shared/telegram/tma";
-import type { Habit } from "@/shared/types";
+import {
+  DEFAULT_TOPUP_PRESETS_KOPECKS,
+  pickPresetToCover,
+} from "@/shared/utils/topupPresets";
 
 interface TopUpModalProps {
   open: boolean;
   onClose: () => void;
-  habits: Habit[];
+  /**
+   * Pravki-deposit-sse.md §Z-3.4: предзаполнение суммы пополнения.
+   * Используется из InsufficientDepositModal — сумма, которой не хватает
+   * для вступления. Если передано — UI подсвечивает наименьший пресет,
+   * который покрывает defaultAmount (или показывает "своя сумма" input,
+   * если defaultAmount > max пресета).
+   */
+  defaultAmount?: number;
 }
-
-const PRESETS_KOPECKS = [299 * 100, 599 * 100, 999 * 100, 1999 * 100];
 
 const KOPECKS_PER_RUB = 100;
 
 const formatRub = (kopecks: number): string =>
   `${Math.round(kopecks / KOPECKS_PER_RUB).toLocaleString("ru-RU")} ₽`;
 
-export function TopUpModal({ open, onClose, habits }: TopUpModalProps) {
+export function TopUpModal({ open, onClose, defaultAmount }: TopUpModalProps) {
   const topup = useTopUpDeposit();
-  const [selectedHabitId, setSelectedHabitId] = useState<string>("");
+  const [customAmount, setCustomAmount] = useState<string>("");
+
+  // Подсвеченный пресет — если defaultAmount передан и покрывается пресетом,
+  // иначе null (= "своя сумма" режим).
+  const recommendedPreset = defaultAmount
+    ? pickPresetToCover(defaultAmount, DEFAULT_TOPUP_PRESETS_KOPECKS)
+    : null;
+  const showCustomInput =
+    defaultAmount !== undefined && recommendedPreset === null;
+
+  // Предзаполняем custom input при входе в custom-режим.
+  useEffect(() => {
+    if (open && showCustomInput && customAmount === "") {
+      setCustomAmount(String(Math.round(defaultAmount! / KOPECKS_PER_RUB)));
+    }
+    if (!open) {
+      setCustomAmount("");
+    }
+  }, [open, showCustomInput, defaultAmount, customAmount]);
 
   useEffect(() => {
     if (!open) return;
-    if (habits.length > 0 && selectedHabitId === "") {
-      setSelectedHabitId(habits[0].id);
-    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose, habits, selectedHabitId]);
+  }, [open, onClose]);
 
   if (!open) return null;
 
   const handlePick = (amountKopecks: number) => {
-    if (!selectedHabitId) return;
+    if (amountKopecks <= 0) return;
     hapticImpact("medium");
+    // PR #2: backend ещё принимает habit_id (backward-compat) для legacy
+    // membership-create на API уровне. Не шлём его — backend сам определит
+    // membership по user. Передаём пустой habit_id, бэкенд проигнорирует.
     topup.mutate(
-      { habit_id: selectedHabitId, amount_kopecks: amountKopecks },
+      { habit_id: "", amount_kopecks: amountKopecks },
       {
         onSuccess: (data) => {
           if (data.ok) {
@@ -58,6 +84,15 @@ export function TopUpModal({ open, onClose, habits }: TopUpModalProps) {
         },
       },
     );
+  };
+
+  const handleCustomSubmit = () => {
+    const rub = parseInt(customAmount, 10);
+    if (Number.isNaN(rub) || rub <= 0) {
+      void showAlert("Введите сумму больше 0.");
+      return;
+    }
+    handlePick(rub * KOPECKS_PER_RUB);
   };
 
   const isPending = topup.isPending;
@@ -92,58 +127,76 @@ export function TopUpModal({ open, onClose, habits }: TopUpModalProps) {
           Сумма пойдёт на депозит. Если пропустишь день — штраф спишется сначала отсюда.
         </p>
 
-        {habits.length > 1 && (
-          <fieldset className="mb-4">
-            <legend className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-              В какой клуб
-            </legend>
-            <div className="space-y-1">
-              {habits.map((h) => (
-                <label
-                  key={h.id}
-                  className={`flex cursor-pointer items-center gap-2 rounded-card border px-3 py-2 text-sm transition ${
-                    selectedHabitId === h.id
-                      ? "border-primary/60 bg-primary/10 text-text"
-                      : "border-white/5 bg-surface text-muted hover:border-white/20"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="topup-habit"
-                    value={h.id}
-                    checked={selectedHabitId === h.id}
-                    onChange={() => setSelectedHabitId(h.id)}
-                    className="sr-only"
-                    disabled={isPending}
-                  />
-                  <span aria-hidden="true">
-                    {selectedHabitId === h.id ? "●" : "○"}
-                  </span>
-                  <span className="truncate">〖{h.title}〗</span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
+        {defaultAmount !== undefined && (
+          <p className="mb-4 rounded-card border border-primary/30 bg-primary/10 p-3 text-xs text-text">
+            Рекомендуем пополнить на{" "}
+            <strong className="text-primary">{formatRub(defaultAmount)}</strong>{" "}
+            — столько не хватает для вступления.
+          </p>
         )}
 
-        <div className="grid grid-cols-2 gap-2">
-          {PRESETS_KOPECKS.map((amount) => (
-            <button
-              key={amount}
-              type="button"
-              onClick={() => handlePick(amount)}
-              disabled={isPending || !selectedHabitId}
-              className="rounded-card border border-white/5 bg-surface p-4 text-center transition active:scale-95 hover:border-primary/40 disabled:opacity-40"
+        {showCustomInput ? (
+          <div className="mb-4">
+            <label
+              htmlFor="topup-custom"
+              className="mb-2 block text-xs font-semibold uppercase tracking-wide text-muted"
             >
-              <div className="text-lg font-bold text-text">
-                {formatRub(amount)}
-              </div>
-              <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">
-                ≈ {Math.floor(amount / KOPECKS_PER_RUB / 30)} дней
-              </div>
-            </button>
-          ))}
-        </div>
+              Своя сумма (₽)
+            </label>
+            <div className="flex gap-2">
+              <input
+                id="topup-custom"
+                type="number"
+                inputMode="numeric"
+                min="1"
+                value={customAmount}
+                onChange={(e) => setCustomAmount(e.target.value)}
+                disabled={isPending}
+                className="flex-1 rounded-card border border-white/10 bg-surface px-3 py-3 text-base text-text focus:border-primary focus:outline-none disabled:opacity-40"
+                placeholder="например, 1500"
+              />
+              <button
+                type="button"
+                onClick={handleCustomSubmit}
+                disabled={isPending || customAmount === ""}
+                className="rounded-card bg-primary px-5 py-3 text-sm font-semibold text-white transition active:scale-95 disabled:opacity-40"
+              >
+                Пополнить
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {DEFAULT_TOPUP_PRESETS_KOPECKS.map((amount) => {
+              const isRecommended = recommendedPreset === amount;
+              return (
+                <button
+                  key={amount}
+                  type="button"
+                  onClick={() => handlePick(amount)}
+                  disabled={isPending}
+                  className={`rounded-card border p-4 text-center transition active:scale-95 disabled:opacity-40 ${
+                    isRecommended
+                      ? "border-primary bg-primary/15 shadow-[0_0_0_2px_rgba(99,102,241,0.4)]"
+                      : "border-white/5 bg-surface hover:border-primary/40"
+                  }`}
+                >
+                  <div className="text-lg font-bold text-text">
+                    {formatRub(amount)}
+                  </div>
+                  <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted">
+                    ≈ {Math.floor(amount / KOPECKS_PER_RUB / 30)} дней
+                  </div>
+                  {isRecommended && (
+                    <div className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                      рекомендуем
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {isPending && (
           <p className="mt-3 text-center text-xs text-muted">Зачисляю…</p>

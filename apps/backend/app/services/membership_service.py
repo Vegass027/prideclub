@@ -7,6 +7,7 @@ from app.core.constants import MembershipStatus
 from app.core.exceptions import (
     HabitMemberLimitReachedError,
     HabitNotFoundError,
+    InsufficientDepositError,
     MembershipNotActiveError,
     MembershipNotFoundError,
 )
@@ -45,11 +46,38 @@ class MembershipService:
         existing = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
         if existing is not None:
             if existing.status == MembershipStatus.LEFT:
-                # Возобновление: пользователь уже был в клубе, лимит НЕ применяется.
-                # иначе бывший член не смог бы вернуться, даже если место освободилось.
+                # Возобновление: пользователь уже был в клубе, лимит НЕ применяется
+                # (иначе бывший член не смог бы вернуться, даже если место освободилось).
+                # Z-3.1: депозит тоже НЕ проверяется — если юзер уже был ACTIVE
+                # раньше, мы не заставляем его снова платить за вход.
                 existing.status = MembershipStatus.ACTIVE
                 return existing
             return existing
+
+        # Z-3.1: проверка депозита для нового участника.
+        # Применяем ДО member_limit (быстрее отказ если денег нет).
+        # Для LEFT→ACTIVE выше — НЕ проверяем.
+        user = await self._user_repo.get(user_id)
+        if user is None:
+            # Юзер без записи в users — крайне вырожденный кейс (race при
+            # удалении юзера). Не блокируем, но и не создаём membership
+            # неизвестного юзера.
+            raise MembershipNotFoundError()
+        if user.deposit_balance < habit.penalty_amount:
+            self._logger.info(
+                "habit_join_rejected_insufficient_deposit",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "required_kopecks": habit.penalty_amount,
+                    "current_kopecks": user.deposit_balance,
+                },
+            )
+            raise InsufficientDepositError(
+                required_kopecks=habit.penalty_amount,
+                current_kopecks=user.deposit_balance,
+                club_penalty_kopecks=habit.penalty_amount,
+            )
 
         # Новый участник — проверяем member_limit под блокировкой строки клуба.
         # FOR UPDATE на habit гарантирует, что счётчик участников и INSERT membership

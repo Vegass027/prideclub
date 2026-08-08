@@ -178,7 +178,6 @@ export function ProfilePage() {
       <TopUpModal
         open={topUpOpen}
         onClose={() => setTopUpOpen(false)}
-        habits={myHabits?.items ?? []}
       />
 
       <BottomNav />

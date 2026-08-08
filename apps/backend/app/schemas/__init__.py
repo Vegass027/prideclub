@@ -11,6 +11,35 @@ class MarketplaceResponse(BaseModel):
     items: list[HabitOut]
 
 
+class WalletClubOut(BaseModel):
+    """Один клуб в `GET /me/wallet`.
+
+    Pravki-deposit-sse.md §Z-4.1: содержит всё необходимое для UI-кнопки
+    «Открыть клуб» без дополнительных запросов — penalty_amount, can_checkin
+    (deposit >= penalty), статус последнего recompute.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    habit_id: str
+    title: str
+    penalty_amount: int
+    can_checkin: bool  # user.deposit_balance >= habit.penalty_amount
+    status: str  # "active" | "paused" — последний результат recompute_pause_status
+
+
+class WalletOut(BaseModel):
+    """Pravki-deposit-sse.md §Z-4.1: глобальный депозит юзера + список клубов.
+
+    `can_checkin` дублирует результат `MembershipService.recompute_pause_status` —
+    UI Today page использует его для блокировки кнопки «Открыть клуб» без
+    дополнительных запросов.
+    """
+
+    deposit_balance: int  # копейки
+    active_clubs: list[WalletClubOut]
+
+
 class HabitOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

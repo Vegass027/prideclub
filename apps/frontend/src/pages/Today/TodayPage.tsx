@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useToday, useTodayStream } from "@/shared/hooks";
+import { useToday, useTodayStream, useWallet } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
+import { missingKopecks } from "@/shared/utils/topupPresets";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
@@ -9,6 +11,7 @@ import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
 import { StatusBadge } from "@/shared/ui/StatusBadge";
+import { TopUpModal } from "@/shared/ui/TopUpModal";
 import { hapticImpact, openTelegramLink } from "@/shared/telegram/tma";
 import { openCheckinTopic, openChatRoot } from "@/shared/telegram/topicLink";
 import type { ProofType } from "@/shared/types";
@@ -64,6 +67,11 @@ export function TodayPage() {
   const { habitId } = useParams<{ habitId: string }>();
   const { data, isLoading, isError, error, refetch } = useToday(habitId);
 
+  // Pravki-deposit-sse.md §Z-4.1/Z-4.3: используем useWallet для блокировки
+  // кнопки «Сделать чек-ин» если deposit < penalty этого клуба.
+  const { data: wallet } = useWallet();
+  const [topupOpen, setTopupOpen] = useState(false);
+
   // Real-time: держим ["today", habitId] в кэше актуальным через SSE
   // (Step 6, `feature/topic-scoped-checkin`). useToday даёт первый снимок
   // при загрузке, useTodayStream — обновления по checkin.accepted/rejected
@@ -116,6 +124,15 @@ export function TodayPage() {
   const singleProof = allowedProofTypes.length === 1;
   const primaryCfg: ProofCfg =
     PROOF_LABELS[allowedProofTypes[0]] ?? PROOF_LABELS.text;
+
+  // Pravki-deposit-sse.md §Z-4.3: can_checkin из wallet-кеша.
+  // Если wallet ещё не загружен — оптимистично считаем что can_checkin=true
+  // (бэк уже верифицировал membership при GET /habits/{id}/today).
+  const walletClub = wallet?.active_clubs.find((c) => c.habit_id === habit.id);
+  const canCheckin = walletClub?.can_checkin ?? true;
+  const depositMissing = walletClub
+    ? missingKopecks(walletClub.penalty_amount, wallet?.deposit_balance ?? 0)
+    : 0;
 
   return (
     <ScreenLayout>
@@ -212,6 +229,20 @@ export function TodayPage() {
             </ul>
           </>
         )}
+
+        {/* Pravki-deposit-sse.md §Z-4.3: блокировка чек-ина при недостаточном депозите. */}
+        {!canCheckin && walletClub && (
+          <div className="mb-3 rounded-card border border-warning/30 bg-warning/10 p-3 text-sm">
+            <strong className="block text-warning">
+              ⚠️ Для продолжения участия нужно ≥ {formatKopecks(walletClub.penalty_amount)} на депозите.
+            </strong>
+            <span className="mt-1 block text-xs text-muted">
+              Сейчас: {formatKopecks(wallet?.deposit_balance ?? 0)}.{" "}
+              Не хватает: {formatKopecks(depositMissing)}.
+            </span>
+          </div>
+        )}
+
         <div className="flex flex-col gap-2">
           {habit.checkin_topic_thread_id !== null ? (
             <Button
@@ -220,6 +251,8 @@ export function TodayPage() {
                 openCheckinTopic(habit.chat_id, habit.checkin_topic_thread_id);
               }}
               className="w-full"
+              disabled={!canCheckin}
+              aria-disabled={!canCheckin}
             >
               🎬 Сделать чек-ин
             </Button>
@@ -238,6 +271,18 @@ export function TodayPage() {
               className="w-full"
             >
               💬 Перейти в чат
+            </Button>
+          )}
+          {!canCheckin && walletClub && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                hapticImpact("medium");
+                setTopupOpen(true);
+              }}
+              className="w-full"
+            >
+              💰 Пополнить депозит
             </Button>
           )}
         </div>
@@ -323,6 +368,16 @@ export function TodayPage() {
       )}
 
       <HabitNav habitId={habit.id} />
+
+      <TopUpModal
+        open={topupOpen}
+        onClose={() => setTopupOpen(false)}
+        defaultAmount={
+          walletClub
+            ? missingKopecks(walletClub.penalty_amount, wallet?.deposit_balance ?? 0)
+            : undefined
+        }
+      />
     </ScreenLayout>
   );
 }

@@ -1,42 +1,17 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useJoinHabit, useMarketplace, useMyHabits } from "@/shared/hooks";
+import { useMarketplace, useMyHabits } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
-import type { Habit } from "@/shared/types";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
-import { PaymentModal } from "@/shared/ui/PaymentModal";
+import { JoinButton } from "@/shared/ui/JoinButton";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
-import { hapticImpact, hapticNotify } from "@/shared/telegram/tma";
 
 export function MarketplacePage() {
   const { data, isLoading, isError, error, refetch } = useMarketplace();
   const { data: myHabits } = useMyHabits();
-  const navigate = useNavigate();
-  const joinMutation = useJoinHabit();
-  const [payingHabit, setPayingHabit] = useState<Habit | null>(null);
 
   const joinedIds = new Set((myHabits?.items ?? []).map((h) => h.id));
-
-  const handleJoin = (habit: Habit) => {
-    hapticImpact("medium");
-    setPayingHabit(habit);
-  };
-
-  const handlePaymentSuccess = (habit: Habit) => {
-    joinMutation.mutate(habit.id, {
-      onSuccess: () => {
-        hapticNotify("success");
-        navigate(`/habits/${habit.id}/today`);
-      },
-      onError: () => {
-        hapticNotify("error");
-        alert("Не удалось зачислить подписку. Попробуй ещё раз.");
-      },
-    });
-  };
 
   if (isLoading) {
     return (
@@ -90,35 +65,23 @@ export function MarketplacePage() {
             const isJoined = joinedIds.has(h.id);
             return (
               <li key={h.id}>
-                <HabitListItem
-                  habit={h}
-                  isJoined={isJoined}
-                  busy={joinMutation.isPending && joinMutation.variables === h.id}
-                  onJoin={() => handleJoin(h)}
-                />
+                <HabitListItem habit={h} isJoined={isJoined} />
               </li>
             );
           })}
         </ul>
       )}
-      <PaymentModal
-        habit={payingHabit}
-        onClose={() => setPayingHabit(null)}
-        onSuccess={handlePaymentSuccess}
-      />
       <BottomNav />
     </ScreenLayout>
   );
 }
 
 interface HabitListItemProps {
-  habit: Habit;
+  habit: import("@/shared/types").Habit;
   isJoined: boolean;
-  busy: boolean;
-  onJoin: () => void;
 }
 
-function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
+function HabitListItem({ habit, isJoined }: HabitListItemProps) {
   return (
     <article className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
       {habit.photo_url ? (
@@ -168,9 +131,7 @@ function HabitListItem({ habit, isJoined, busy, onJoin }: HabitListItemProps) {
           Открыть клуб →
         </Button>
       ) : (
-        <Button onClick={onJoin} loading={busy} className="w-full" variant="primary">
-          Вступить
-        </Button>
+        <JoinButton habit={habit} />
       )}
       </div>
     </article>
