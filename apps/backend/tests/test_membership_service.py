@@ -89,12 +89,14 @@ async def test_join_at_member_limit_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rejoin_left_member_bypasses_member_limit() -> None:
-    """Возобновление после LEFT — лимит не применяется (бывший член имеет приоритет).
+async def test_rejoin_left_member_with_sufficient_deposit() -> None:
+    """Возобновление LEFT→ACTIVE при достаточном депозите.
 
-    Иначе бы нельзя было вернуться в клуб после выхода, даже если место освободилось.
-    PR #2: для LEFT→ACTIVE депозит тоже НЕ проверяется (даже если 0).
+    Member_limit не применяется для бывшего члена (если место заполнено —
+    всё равно реактивируем, потому что это старый участник).
+    Депозит ПРОВЕРЯЕТСЯ (Variant B: deposit всегда проверяется).
     """
+
     habit = make_habit()
     habit.member_limit = 1
     habit_repo = FakeHabitRepo()
@@ -107,10 +109,39 @@ async def test_rejoin_left_member_bypasses_member_limit() -> None:
     )
 
     user_repo = FakeUserRepo()
-    _seed_user(user_repo, user_id=7, deposit=0)  # deposit=0 но LEFT→ACTIVE ОК
+    _seed_user(user_repo, user_id=7, deposit=10_000)  # хватает на penalty
 
     service = _service(habit_repo, membership_repo, user_repo)
     result = await service.join(user_id=7, habit_id=str(habit.id))
 
     assert result.id == prev.id
     assert result.status == MembershipStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_rejoin_left_member_below_penalty_raises() -> None:
+    """Регрессионный тест для Z-3.1 Variant B: LEFT→ACTIVE без денег = 403.
+
+    Старая версия (до этого фикса) имела bug: deposit < penalty проходило
+    без проверки через LEFT→ACTIVE bypass. Теперь deposit ВСЕГДА проверяется.
+    """
+    from app.core.exceptions import InsufficientDepositError
+
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    prev = membership_repo.add_for(
+        user_id=7, habit_id=str(habit.id), status=MembershipStatus.LEFT
+    )
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=7, deposit=0)
+
+    service = _service(habit_repo, membership_repo, user_repo)
+
+    with pytest.raises(InsufficientDepositError) as exc_info:
+        await service.join(user_id=7, habit_id=str(habit.id))
+
+    assert exc_info.value.code == "insufficient_deposit"
+    # Статус membership НЕ изменился — остался LEFT (rollback транзакции).
+    assert prev.status == MembershipStatus.LEFT

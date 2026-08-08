@@ -10,6 +10,7 @@ from app.core.exceptions import (
     InsufficientDepositError,
     MembershipNotActiveError,
     MembershipNotFoundError,
+    UserNotFoundError,
 )
 from app.core.logging import get_logger
 from app.models.habit import Habit
@@ -43,26 +44,19 @@ class MembershipService:
         if habit is None:
             raise HabitNotFoundError()
 
-        existing = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
-        if existing is not None:
-            if existing.status == MembershipStatus.LEFT:
-                # Возобновление: пользователь уже был в клубе, лимит НЕ применяется
-                # (иначе бывший член не смог бы вернуться, даже если место освободилось).
-                # Z-3.1: депозит тоже НЕ проверяется — если юзер уже был ACTIVE
-                # раньше, мы не заставляем его снова платить за вход.
-                existing.status = MembershipStatus.ACTIVE
-                return existing
-            return existing
-
-        # Z-3.1: проверка депозита для нового участника.
-        # Применяем ДО member_limit (быстрее отказ если денег нет).
-        # Для LEFT→ACTIVE выше — НЕ проверяем.
+        # Z-3.1 (Variant B, согласовано): проверка депозита ВСЕГДА — для нового
+        # участника, для возобновления LEFT→ACTIVE, и для реактивации PAUSED→ACTIVE.
+        # Никаких исключений «уже был раньше» — deposit всегда проверяется.
+        # Если денег не хватает — 403 InsufficientDepositError с суммами для UI.
+        # Делаем ПЕРЕД membership-lookup'ом: не имеет смысла лочить membership,
+        # если денег всё равно нет.
         user = await self._user_repo.get(user_id)
         if user is None:
             # Юзер без записи в users — крайне вырожденный кейс (race при
-            # удалении юзера). Не блокируем, но и не создаём membership
-            # неизвестного юзера.
-            raise MembershipNotFoundError()
+            # удалении юзера между TelegramUserDbDep upsert и join).
+            # План §Z-3.1 явно указывает UserNotFoundError (НЕ MembershipNotFoundError),
+            # чтобы фронт мог различать «юзера нет» vs «клуба/мембершипа нет».
+            raise UserNotFoundError()
         if user.deposit_balance < habit.penalty_amount:
             self._logger.info(
                 "habit_join_rejected_insufficient_deposit",
@@ -78,6 +72,26 @@ class MembershipService:
                 current_kopecks=user.deposit_balance,
                 club_penalty_kopecks=habit.penalty_amount,
             )
+
+        # Существующая membership? (ACTIVE/PAUSED/LEFT)
+        existing = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
+        if existing is not None:
+            if existing.status == MembershipStatus.ACTIVE:
+                # Уже в клубе — no-op (идемпотентный join).
+                return existing
+            # PAUSED или LEFT → реактивируем в ACTIVE.
+            # Депозит УЖЕ проверен выше (>= penalty), так что ACTIVE обосновано.
+            previous_status = existing.status
+            existing.status = MembershipStatus.ACTIVE
+            self._logger.info(
+                "user_rejoined_habit",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "previous_status": previous_status.value,
+                },
+            )
+            return existing
 
         # Новый участник — проверяем member_limit под блокировкой строки клуба.
         # FOR UPDATE на habit гарантирует, что счётчик участников и INSERT membership

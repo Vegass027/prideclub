@@ -235,3 +235,15 @@ class InsufficientDepositError(DomainError):
             current_kopecks=current_kopecks,
             club_penalty_kopecks=club_penalty_kopecks,
         )
+
+
+class UserNotFoundError(DomainError):
+    """404: user record not found.
+
+    Pravki-deposit-sse.md §Z-3.1: при попытке join() если user_repo.get() возвращает
+    None (race при удалении юзера между TelegramUserDbDep upsert и join),
+    кидаем именно эту ошибку — не MembershipNotFoundError, чтобы фронт
+    мог различать «юзера нет» vs «клуба/мембершипа нет».
+    """
+    status_code = 404
+    code = "user_not_found"

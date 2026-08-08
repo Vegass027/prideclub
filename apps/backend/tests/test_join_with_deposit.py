@@ -136,11 +136,12 @@ async def test_join_succeeds_when_deposit_exceeds_penalty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_left_to_active_skips_deposit_check() -> None:
-    """LEFT→ACTIVE возобновление: депозит НЕ проверяется (даже если 0).
+async def test_left_to_active_requires_deposit() -> None:
+    """Z-3.1 Variant B: LEFT→ACTIVE возобновление проверяет депозит.
 
-    Если бывший участник ушёл и вернулся — он уже «заслужил» право
-    на повторное участие без новой оплаты.
+    Старая версия (pre-этот-фикс) имела bug: deposit < penalty проходило
+    без проверки через LEFT→ACTIVE bypass. Теперь deposit ВСЕГДА проверяется
+    перед любой мутацией membership (Variant B, согласовано 2026-08-08).
     """
     habit_repo = FakeHabitRepo()
     habit = make_habit()
@@ -151,7 +152,7 @@ async def test_resume_left_to_active_skips_deposit_check() -> None:
         user_id=1, habit_id=str(habit.id), status=MembershipStatus.LEFT
     )
     user_repo = FakeUserRepo()
-    _seed_user(user_repo, user_id=1, deposit=0)  # deposit=0 — но всё равно ОК
+    _seed_user(user_repo, user_id=1, deposit=0)  # deposit < penalty → 403
 
     service = _make_service(
         user_repo=user_repo,
@@ -159,6 +160,14 @@ async def test_resume_left_to_active_skips_deposit_check() -> None:
         membership_repo=membership_repo,
     )
 
+    with pytest.raises(InsufficientDepositError) as exc_info:
+        await service.join(user_id=1, habit_id=str(habit.id))
+    assert exc_info.value.code == "insufficient_deposit"
+    # Статус membership НЕ изменился — остался LEFT.
+    assert existing.status == MembershipStatus.LEFT
+
+    # С достаточным депозитом — успешно реактивируется.
+    _seed_user(user_repo, user_id=1, deposit=1000)
     m = await service.join(user_id=1, habit_id=str(habit.id))
     assert m.id == existing.id
     assert m.status == MembershipStatus.ACTIVE
@@ -192,11 +201,15 @@ async def test_join_rejected_when_deposit_exhausted_by_other_club() -> None:
 
 @pytest.mark.asyncio
 async def test_join_rejects_when_user_does_not_exist() -> None:
-    """Edge case: юзер без записи в users — MembershipNotFoundError.
+    """Edge case: юзер без записи в users — UserNotFoundError (404).
 
     Это крайне вырожденный кейс (TelegramUserDbDep делает upsert), но
-    если всё-таки — не блокируем 500, кидаем понятную 404.
+    если всё-таки — план §Z-3.1 явно предписывает UserNotFoundError
+    (НЕ MembershipNotFoundError), чтобы фронт мог различать «юзера нет»
+    vs «клуба/мембершипа нет».
     """
+    from app.core.exceptions import UserNotFoundError
+
     habit_repo = FakeHabitRepo()
     habit = make_habit()
     habit.penalty_amount = 500
@@ -210,7 +223,7 @@ async def test_join_rejects_when_user_does_not_exist() -> None:
         membership_repo=membership_repo,
     )
 
-    from app.core.exceptions import MembershipNotFoundError
-
-    with pytest.raises(MembershipNotFoundError):
+    with pytest.raises(UserNotFoundError) as exc_info:
         await service.join(user_id=999, habit_id=str(habit.id))
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.code == "user_not_found"
