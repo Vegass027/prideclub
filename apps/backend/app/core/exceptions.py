@@ -235,3 +235,63 @@ class InsufficientDepositError(DomainError):
             current_kopecks=current_kopecks,
             club_penalty_kopecks=club_penalty_kopecks,
         )
+
+
+class InsufficientDepositChoiceError(DomainError):
+    """422: deposit_amount_kopecks < habit.penalty_amount при subscribe_and_join.
+
+    Pravki-subscribe-and-join.md §Z-13: пользователь выбрал в JoinPayModal
+    сумму депозита, которая НЕ покрывает штраф клуба. Это UI-баг (модалка
+    фильтрует пресеты, но пользователь мог ввести «свою сумму» ниже порога).
+    Отдельное 422 (не 403 как у InsufficientDepositError) — потому что здесь
+    запрос вообще не выполнился, а не «отказ из-за текущего баланса».
+    """
+    status_code = 422
+    code = "insufficient_deposit_choice"
+
+    def __init__(
+        self,
+        *,
+        required_kopecks: int,
+        chosen_kopecks: int,
+    ) -> None:
+        super().__init__(
+            self.code,
+            required_kopecks=required_kopecks,
+            chosen_kopecks=chosen_kopecks,
+        )
+
+
+class SubscriptionRequiredError(DomainError):
+    """422: subscription_accepted=False при отсутствии активной подписки.
+
+    Pravki-subscribe-and-join.md §Z-13.1: единственная запрещённая комбинация
+    в матрице server-side gate. UI адаптирует модалку (прячет чекбокс если
+    подписка активна), но если кто-то шлёт False в обход — 422.
+    """
+    status_code = 422
+    code = "subscription_required"
+
+
+class AlreadyActiveError(DomainError):
+    """409: membership.status == ACTIVE — повторный /subscribe для клуба, где
+    юзер уже состоит.
+
+    Pravki-subscribe-and-join.md §Z-13 шаг 3c: вместо silent success возвращаем
+    явный код, чтобы UI мог показать «Ты уже в клубе, обнови страницу».
+    Идемпотентно для случаев гонки (parallel POST → второй видит уже ACTIVE).
+    """
+    status_code = 409
+    code = "already_active"
+
+
+class IdempotencyConflictError(DomainError):
+    """400: тот же idempotency_key использован с другими параметрами.
+
+    Pravki-subscribe-and-join.md §Z-14.1: клиент должен генерировать uuid4
+    один раз и ретраить с тем же ключом. Если шлёт тот же ключ но другие
+    параметры (habit_id, deposit_amount_kopecks) — это явная ошибка клиента.
+    На практике не должно случаться если uuid4 генерится правильно.
+    """
+    status_code = 400
+    code = "idempotency_conflict"

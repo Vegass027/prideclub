@@ -182,8 +182,15 @@ async def _seed_user_and_memberships(
     user_id: int,
     deposit_balance: int,
     memberships: list[tuple[str, MembershipStatus]],
+    subscription_until_by_habit: dict[str, "datetime | None"] | None = None,
 ) -> None:
-    """Сидит user + список (habit_id, status) memberships."""
+    """Сидит user + список (habit_id, status) memberships.
+
+    Pravki-subscribe-and-join.md §Z-17 substep 1: subscription_until_by_habit
+    позволяет задать подписку per-club для тестов /me/wallet. None или
+    отсутствие ключа → subscription_until = NULL (по умолчанию).
+    """
+    sub_map = subscription_until_by_habit or {}
     async with factory() as s:
         s.add(
             User(
@@ -200,6 +207,8 @@ async def _seed_user_and_memberships(
                     habit_id=habit_id,
                     status=status,
                     joined_at=datetime.now(tz=UTC),
+                    # Pydantic v2: date | None принимает datetime тоже (cast to date).
+                    subscription_until=sub_map.get(habit_id),
                 )
             )
         await s.commit()
@@ -367,6 +376,111 @@ async def test_wallet_includes_paused_memberships_with_correct_status(_engine) -
     club = body["active_clubs"][0]
     assert club["status"] == "paused"
     assert club["can_checkin"] is False
+
+
+# ---------------------------------------------------------------------------
+# Pravki-subscribe-and-join.md §Z-17 substep 1: subscription_until в WalletClubOut
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wallet_exposes_subscription_until_active(_engine) -> None:
+    """Активная подписка (subscription_until в будущем) видна в /me/wallet.
+
+    Pre-check на фронте (JoinButton, Z-17 substep 2) сравнивает это поле
+    с date.today() и выбирает режим модалки. Без этого поля фронт был бы
+    вынужден угадывать (default 'full' = ложные списания подписки).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    _, factory = _engine
+    habit_id = await _seed_habit(factory, penalty_amount=500)
+    sub_until = datetime.now(tz=UTC).date() + timedelta(days=15)
+    await _seed_user_and_memberships(
+        factory,
+        user_id=42,
+        deposit_balance=1000_00,
+        memberships=[(habit_id, MembershipStatus.ACTIVE)],
+        subscription_until_by_habit={habit_id: sub_until},
+    )
+
+    _, client = _make_client(user_id=42)
+    r = client.get(
+        "/api/v1/me/wallet",
+        headers={"X-Telegram-Init-Data": _build_init_data(user_id=42)},
+    )
+    assert r.status_code == 200, r.text
+    club = r.json()["active_clubs"][0]
+    assert club["subscription_until"] == sub_until.isoformat(), (
+        f"expected {sub_until.isoformat()}, got {club['subscription_until']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wallet_exposes_subscription_until_null_for_legacy_membership(_engine) -> None:
+    """membership без subscription_until (legacy /join) → null в /me/wallet.
+
+    JoinButton должен явно обрабатывать null: трактовать как «нет активной
+    подписки» и открывать модалку в режиме «full» с чекбоксом подписки.
+    """
+    _, factory = _engine
+    habit_id = await _seed_habit(factory, penalty_amount=500)
+    # Не передаём subscription_until_by_habit → NULL.
+    await _seed_user_and_memberships(
+        factory,
+        user_id=42,
+        deposit_balance=1000_00,
+        memberships=[(habit_id, MembershipStatus.ACTIVE)],
+    )
+
+    _, client = _make_client(user_id=42)
+    r = client.get(
+        "/api/v1/me/wallet",
+        headers={"X-Telegram-Init-Data": _build_init_data(user_id=42)},
+    )
+    assert r.status_code == 200, r.text
+    club = r.json()["active_clubs"][0]
+    assert club["subscription_until"] is None, (
+        "membership без subscription_until должна возвращаться как null "
+        "— pre-check должен явно обрабатывать null как 'нет подписки'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wallet_legacy_existing_tests_still_pass(_engine) -> None:
+    """Regression-страховка: старые тесты не проверяли subscription_until,
+    но проверяли can_checkin/status/title. Добавление поля не должно их сломать.
+
+    Этот тест по сути дублирует test_wallet_can_checkin_false_when_deposit_below_penalty
+    но явно проверяет что новые поля не мешают существующим ассертам.
+    """
+    _, factory = _engine
+    habit_id = await _seed_habit(factory, penalty_amount=500, title="Планка")
+    await _seed_user_and_memberships(
+        factory,
+        user_id=42,
+        deposit_balance=300,
+        memberships=[(habit_id, MembershipStatus.ACTIVE)],
+    )
+
+    _, client = _make_client(user_id=42)
+    r = client.get(
+        "/api/v1/me/wallet",
+        headers={"X-Telegram-Init-Data": _build_init_data(user_id=42)},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["active_clubs"]) == 1
+    club = body["active_clubs"][0]
+    # Старые ассерты — должны продолжать работать.
+    assert club["habit_id"] == habit_id
+    assert club["penalty_amount"] == 500
+    assert club["can_checkin"] is False
+    assert club["status"] == "active"
+    assert club["title"] == "Планка"
+    # Новый ассерт — поле есть.
+    assert "subscription_until" in club
+    assert club["subscription_until"] is None
 
 
 @pytest.mark.asyncio

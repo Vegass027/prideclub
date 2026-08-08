@@ -103,7 +103,14 @@ export interface BalanceResponse {
   history: Transaction[];
 }
 
-/** Клуб в /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
+/**
+ * Клуб в /me/wallet (Pravki-deposit-sse.md §Z-4.1 + Pravki-subscribe-and-join.md §Z-17 substep 1).
+ *
+ * `subscription_until` добавлен для pre-check на фронте: JoinButton сравнивает
+ * с today и выбирает режим модалки оплаты («full» с чекбоксом подписки или
+ * «deposit-only» без чекбокса, см. §Z-13.1 матрица). None если юзер ещё
+ * ни разу не платил подписку (или legacy /join не устанавливал поле).
+ */
 export interface WalletClub {
   habit_id: string;
   title: string;
@@ -112,6 +119,13 @@ export interface WalletClub {
   can_checkin: boolean;
   /** "active" | "paused" — последний результат recompute. */
   status: MembershipStatus;
+  /**
+   * ISO date "YYYY-MM-DD" или null. Optional в TS потому что бэкенд
+   * (Pydantic) тоже делает default None, и старые фикстуры в тестах
+   * могут не передавать это поле (не влияет на тестируемое поведение).
+   * Фронт-код должен явно обрабатывать null как «нет активной подписки».
+   */
+  subscription_until?: string | null;
 }
 
 /** Ответ GET /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
@@ -126,6 +140,23 @@ export interface TopupResponse {
   transaction_id?: string;
   new_deposit_balance?: number;
   code?: string;
+}
+
+/**
+ * Pravki-subscribe-and-join.md §Z-12.1: ответ POST /api/v1/payments/subscribe.
+ *
+ * `charged_subscription: true` — списали price_month + deposit (новое
+ * вступление или истёкшая подписка). `false` — списали только deposit
+ * (была активная подписка, не трогаем).
+ */
+export interface SubscribeResponse {
+  ok: boolean;
+  transaction_id: string;
+  membership_id: string;
+  new_deposit_balance: number;
+  subscription_until: string; // ISO date "YYYY-MM-DD"
+  total_charged_kopecks: number;
+  charged_subscription: boolean;
 }
 
 export interface LeaderboardBreakdown {
