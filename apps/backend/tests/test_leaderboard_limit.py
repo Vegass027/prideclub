@@ -138,7 +138,6 @@ async def _seed_habit_with_checkins(
                     user_id=user_id,
                     habit_id=habit_id,
                     status=MembershipStatus.ACTIVE,
-                    deposit_balance=0,
                     joined_at=datetime.now(tz=UTC),
                 )
             )

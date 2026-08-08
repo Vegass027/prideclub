@@ -181,14 +181,21 @@ async def _seed_member(
     habit_id: str,
     deposit_balance: int = 0,
 ) -> None:
+    """Сидит User (с deposit_balance) + Membership (ACTIVE, без deposit)."""
     async with factory() as s:
+        s.add(
+            User(
+                id=user_id,
+                first_name=f"u{user_id}",
+                deposit_balance=deposit_balance,
+            )
+        )
         s.add(
             Membership(
                 id=str(uuid.uuid4()),
                 user_id=user_id,
                 habit_id=habit_id,
                 status=MembershipStatus.ACTIVE,
-                deposit_balance=deposit_balance,
                 joined_at=datetime.now(UTC),
             )
         )

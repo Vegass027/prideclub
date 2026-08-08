@@ -12,6 +12,8 @@ from app.core.logging import get_logger
 from app.models.membership import Membership
 from app.models.transaction import Transaction
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.user_repository import UserRepository
+from app.services.membership_service import MembershipService
 
 
 class PaymentService:
@@ -19,24 +21,32 @@ class PaymentService:
 
     idempotency_key = telegram_payment_charge_id.
 
-    Membership-строка берётся под SELECT ... FOR UPDATE (через
-    MembershipRepository.lock_for_update_by_user_habit), чтобы защитить
-    `deposit_balance +=` и `subscription_until` от гонки между параллельными
-    webhook'ами (например subscription_renewal + deposit_topup, пришедшие
-    почти одновременно).
+    Pravki-deposit-sse.md §Z-2: депозит живёт на users.deposit_balance
+    (не на membership). User-level lock сериализует параллельные webhook'и
+    (subscription_renewal + deposit_topup одного юзера). После пополнения
+    MembershipService.recompute_pause_status пересчитывает статусы всех клубов.
 
-    Если membership ещё не существует, создаём её в той же транзакции и
-    повторно лочим (новой select FOR UPDATE видит только-что вставленную
-    строку через identity map).
+    Если membership ещё не существует (юзер пополнил депозит ДО join), создаём
+    её в той же транзакции — для backward-compat с API-контрактом topup'а.
     """
 
     def __init__(
         self,
         session: AsyncSession,
+        user_repo: UserRepository | None = None,
         membership_repo: MembershipRepository | None = None,
+        membership_service: MembershipService | None = None,
     ) -> None:
         self._session = session
+        self._user_repo = user_repo or UserRepository(session)
         self._membership_repo = membership_repo or MembershipRepository(session)
+        self._membership_service = membership_service or MembershipService(
+            session=session,
+            membership_repo=self._membership_repo,
+            user_repo=self._user_repo,
+            # habit_repo=None: PaymentService не вызывает join(), а recompute_pause_status
+            # использует Habit модель напрямую через JOIN.
+        )
         self._logger = get_logger("payment_service")
 
     async def confirm_subscription(
@@ -96,42 +106,38 @@ class PaymentService:
             )
             return existing_tx
 
-        # 2. Достаём membership под FOR UPDATE. Защита от гонки webhook'ов.
-        m = await self._membership_repo.lock_for_update_by_user_habit(
-            user_id, habit_id
-        )
+        # 2. SELECT FOR UPDATE на user. Сериализует параллельные webhook'и
+        #    одного юзера (subscription_renewal + deposit_topup одновременно).
+        u = await self._user_repo.lock_for_update(user_id)
+        if u is None:
+            # Юзер не существует — edge-case (topup без initData?). Не падаем,
+            # возвращаем явную ошибку через transaction с balance_after=None.
+            raise ValueError(f"user {user_id} not found for payment {charge_id}")
+
+        # 3. Membership берём без lock — нужна только для related_membership_id
+        #    в Transaction и для subscription_until. Депозит-мутация идёт через user.
+        m = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
         if m is None:
-            # Первый платёж этого пользователя — создаём membership, флашим,
-            # затем re-lock для гарантии атомарности относительно других
-            # writer'ов, которые могут попытаться сделать то же самое.
+            # Backward-compat: первый платёж этого пользователя в этом клубе —
+            # создаём membership, флашим, чтобы related_membership_id был валиден.
             m = Membership(
                 user_id=user_id,
                 habit_id=habit_id,
-                deposit_balance=0,
                 subscription_until=None,
             )
             self._session.add(m)
             await self._session.flush()
-            # Identity map: повторный lock_for_update вернёт ту же ORM-сущность,
-            # но Postgres SELECT FOR UPDATE всё равно наложит row-lock (или
-            # обнаружит, что строка уже залочена нашей же транзакцией).
-            m = await self._membership_repo.lock_for_update_by_user_habit(
-                user_id, habit_id
-            )
-            # После нашего собственного flush m не может быть None — мы только
-            # что его создали. Защитный assert на случай гонки двух процессов.
-            assert m is not None, "membership just created must be visible"
 
-        # 3. Применяем эффект. m.deposit_balance += и subscription_until теперь
-        # безопасны — строка под FOR UPDATE, никакой параллельный writer не
-        # прочтёт устаревшее значение.
+        # 4. Применяем эффект. u.deposit_balance += и subscription_until теперь
+        #    безопасны — user-строка под FOR UPDATE, никакой параллельный writer
+        #    не прочтёт устаревшее значение.
         tx_type = (
             TransactionType.SUBSCRIPTION.value
             if kind == "subscription"
             else TransactionType.DEPOSIT_TOPUP.value
         )
         if kind == "deposit_topup":
-            m.deposit_balance += amount_kopecks
+            u.deposit_balance += amount_kopecks
         if kind == "subscription" and extend_days and m.subscription_until:
             new_until = m.subscription_until + timedelta(days=extend_days)
             m.subscription_until = new_until
@@ -143,7 +149,7 @@ class PaymentService:
             user_id=user_id,
             type=tx_type,
             amount=amount_kopecks,
-            balance_after=m.deposit_balance,
+            balance_after=u.deposit_balance,
             related_membership_id=m.id,
             idempotency_key=charge_id,
         )
@@ -151,6 +157,10 @@ class PaymentService:
 
         if m.status != MembershipStatus.ACTIVE:
             m.status = MembershipStatus.ACTIVE
+
+        # Пересчёт пауз для всех клубов юзера (Pravki-deposit-sse.md §Z-2.5).
+        # После пополнения ранее PAUSED клуб может снова стать ACTIVE.
+        await self._membership_service.recompute_pause_status(user_id)
 
         try:
             await self._session.flush()
@@ -171,7 +181,7 @@ class PaymentService:
                 "habit_id": habit_id,
                 "kind": kind,
                 "amount_kopecks": amount_kopecks,
-                "deposit_balance_after": m.deposit_balance,
+                "user_deposit_after": u.deposit_balance,
             },
         )
         return tx

@@ -23,6 +23,7 @@ from tests.fakes import (
     FakeHabitRepo,
     FakeMembershipRepo,
     FakeSuspiciousPairsRepository,
+    FakeUserRepo,
     make_habit,
 )
 
@@ -51,11 +52,15 @@ class _NoStreakSession:
         pass
 
     async def execute(self, stmt: Any) -> Any:
-        # PenaltyService делает SELECT по penalties для идемпотентности —
-        # вернём пусто.
+        # PenaltyService делает SELECT по penalties для идемпотентности
+        # и MembershipService.recompute_pause_status делает JOIN-запрос —
+        # вернём пусто для обоих.
         class _Result:
             def first(self_inner) -> Any:
                 return None
+
+            def all(self_inner) -> list:
+                return []
 
         return _Result()
 
@@ -71,12 +76,15 @@ class _NoopLimiter:
 
 @pytest.mark.asyncio
 async def test_apply_catch_happy_path() -> None:
+    """Pravki-deposit-sse.md §Z-2: депозит списывается с user, не с membership."""
     habit_repo = FakeHabitRepo()
     habit = make_habit()
     habit_repo.add(habit)
     membership_repo = FakeMembershipRepo()
     violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
-    violator.deposit_balance = 500
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
     checkin_repo = FakeCheckinRepo()
     limiter = _NoopLimiter()
     session = _NoStreakSession()
@@ -87,6 +95,7 @@ async def test_apply_catch_happy_path() -> None:
         membership_repo=membership_repo,
         checkin_repo=checkin_repo,
         suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
         redis_port=limiter,
     )
 
@@ -97,9 +106,11 @@ async def test_apply_catch_happy_path() -> None:
         catcher_membership_id=str(uuid4()),
     )
     assert penalty.amount == habit.penalty_amount
-    assert violator.deposit_balance == 500 - habit.penalty_amount
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500 - habit.penalty_amount
     assert session.transactions[0].type == TransactionType.PENALTY.value
-    assert session.transactions[0].balance_after == violator.deposit_balance
+    assert session.transactions[0].balance_after == violator_user.deposit_balance
 
 
 @pytest.mark.asyncio
@@ -109,6 +120,8 @@ async def test_apply_catch_cannot_catch_self() -> None:
     habit_repo.add(habit)
     membership_repo = FakeMembershipRepo()
     m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
 
     service = PenaltyService(
         session=_NoStreakSession(),
@@ -116,6 +129,7 @@ async def test_apply_catch_cannot_catch_self() -> None:
         membership_repo=membership_repo,
         checkin_repo=FakeCheckinRepo(),
         suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
     )
 
     with pytest.raises(CannotCatchSelfError):
@@ -128,14 +142,24 @@ async def test_apply_catch_cannot_catch_self() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
+async def test_apply_catch_deposit_exhausted_raises_without_mutation() -> None:
+    """deposit=0 → PenaltyService бросает PenaltyAlreadyProcessedError
+    с code="deposit_exhausted", НЕ мутируя ни deposit, ни status.
+
+    По Pravki правке B единственный источник статуса — recompute_pause_status,
+    и worker (apps/worker/worker/tasks/process_penalty.py:_pause_violator)
+    вызывает его в отдельной транзакции при получении кода "deposit_exhausted".
+    Здесь мы проверяем контракт PenaltyService: raise + правильный код,
+    без in-mutation (rollback транзакции всё равно откатит любую мутацию).
+    """
     habit_repo = FakeHabitRepo()
     habit = make_habit()
     habit.penalty_amount = 1000
     habit_repo.add(habit)
     membership_repo = FakeMembershipRepo()
     violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
-    violator.deposit_balance = 0  # депозит исчерпан — membership должен быть paused
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
 
     service = PenaltyService(
         session=_NoStreakSession(),
@@ -143,17 +167,24 @@ async def test_apply_catch_deposit_exhausted_pauses_membership() -> None:
         membership_repo=membership_repo,
         checkin_repo=FakeCheckinRepo(),
         suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
     )
 
-    with pytest.raises(PenaltyAlreadyProcessedError):
+    with pytest.raises(PenaltyAlreadyProcessedError) as exc_info:
         await service.apply_catch(
             catcher_user_id=2,
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
         )
-    # Депозит исчерпан → membership paused.
-    assert violator.status == MembershipStatus.PAUSED
+    assert exc_info.value.code == "deposit_exhausted"
+
+    # PenaltyService НЕ мутирует status (rollback всё равно бы стёр мутацию).
+    # Worker вызовет recompute_pause_status отдельной транзакцией.
+    assert violator.status == MembershipStatus.ACTIVE
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 0  # не ушёл в минус
 
 
 def test_rate_limit_parse() -> None:
@@ -168,3 +199,16 @@ def test_rate_limit_parse() -> None:
 async def test_penalty_full_amount_to_fund() -> None:
     """Принятая юр. модель: 100% штрафа → prize_pool (см. 01-concept §4)."""
     assert PenaltyConfig.FUND_SHARE == 1.0
+
+
+def _make_user(*, id: int, deposit_balance: int) -> Any:
+    """Хелпер для теста — не подтягиваем models.user.Umporary, чтобы избежать
+    зависимости от полной БД-модели User (с photo_file_id и т.п.).
+    """
+    from app.models.user import User
+
+    return User(
+        id=id,
+        first_name=f"u{id}",
+        deposit_balance=deposit_balance,
+    )

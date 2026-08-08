@@ -39,6 +39,7 @@ class _FakeSession:
     def __init__(self) -> None:
         self.transactions: dict[str, Transaction] = {}
         self.memberships: dict[str, Membership] = {}
+        self.users: dict[int, Any] = {}
         self.committed = False
         self.rolled_back = False
 
@@ -65,17 +66,34 @@ class _FakeSession:
                 if tx.idempotency_key is not None:
                     return _Result(scalar=tx)
             return _Result(scalar=None)
-        if "memberships" in text:
+        if "memberships" in text and "users.id" not in text:
             for m in self.memberships.values():
                 return _Result(scalar=m)
             return _Result(scalar=None)
+        if "users" in text and "deposit_balance" in text:
+            for u in self.users.values():
+                return _Result(scalar=u)
+            return _Result(scalar=None)
         return _Result(rows=[])
+
+
+def _seed_user_for_payment(user_repo: _FakeUserRepo, session: _FakeSession, user_id: int) -> Any:
+    """Создаёт User в user_repo и session.users (для idempotency_/subscription тестов)."""
+    from app.models.user import User
+
+    u = User(id=user_id, first_name=f"u{user_id}", deposit_balance=0)
+    user_repo._store[user_id] = u  # type: ignore[attr-defined]
+    session.users[user_id] = u
+    return u
 
 
 @pytest.mark.asyncio
 async def test_payment_idempotent() -> None:
     session = _FakeSession()
-    service = PaymentService(session)
+    user_repo = _FakeUserRepo()
+    _seed_user_for_payment(user_repo, session, user_id=1)
+
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
 
     tx1 = await service.confirm_deposit_topup(
         charge_id="charge-1",
@@ -101,7 +119,10 @@ async def test_payment_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_subscription_extends_until() -> None:
     session = _FakeSession()
-    service = PaymentService(session)
+    user_repo = _FakeUserRepo()
+    _seed_user_for_payment(user_repo, session, user_id=42)
+
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
 
     initial_until = date(2026, 2, 1)
     m = Membership(
@@ -110,7 +131,6 @@ async def test_subscription_extends_until() -> None:
         habit_id="h1",
         status=MembershipStatus.ACTIVE,
         subscription_until=initial_until,
-        deposit_balance=0,
     )
     session.memberships[m.id] = m
 
@@ -121,8 +141,10 @@ async def test_subscription_extends_until() -> None:
         text = str(stmt)
         if "transactions" in text and "idempotency_key" in text:
             return _Result(scalar=None)
-        if "memberships" in text:
+        if "memberships" in text and "users.id" not in text:
             return _Result(scalar=m)
+        if "users" in text and "deposit_balance" in text:
+            return _Result(scalar=None)
         return await original_execute(stmt)
 
     session.execute = execute_with_membership  # type: ignore[assignment]
@@ -139,48 +161,69 @@ async def test_subscription_extends_until() -> None:
 
 
 # ---------------------------------------------------------------------------
-# U4: FOR UPDATE на membership при обработке платежей.
-# Используем фейковый MembershipRepository, который фиксирует вызовы lock'а.
+# U4 (обновлён для PR #1): lock_for_update на USER при обработке платежей.
+# Используем фейковый UserRepository, который фиксирует вызовы lock'а.
 # ---------------------------------------------------------------------------
 
 
-class _FakeMembershipRepo:
-    """Зеркалит прод-API MembershipRepository, но без реального SELECT.
+class _FakeUserRepo:
+    """Зеркалит прод-API UserRepository, но без реального SELECT.
 
     Записывает последовательность вызовов lock'ов, чтобы тест мог проверить
-    контракт блокировки. Хранит memberships в dict по (user_id, habit_id).
+    контракт блокировки. Хранит users в dict по user_id.
     """
 
-    def __init__(self, store: dict[tuple[int, str], Membership] | None = None) -> None:
-        self._store: dict[tuple[int, str], Membership] = store or {}
-        self.lock_calls: list[tuple[int, str]] = []
+    def __init__(self, store: dict[int, Any] | None = None) -> None:
+        self._store: dict[int, Any] = store or {}
+        self.lock_calls: list[int] = []
 
-    async def lock_for_update_by_user_habit(
-        self, user_id: int, habit_id: str
-    ) -> Membership | None:
-        self.lock_calls.append((user_id, habit_id))
-        return self._store.get((user_id, habit_id))
+    async def lock_for_update(self, user_id: int) -> Any | None:
+        self.lock_calls.append(user_id)
+        return self._store.get(user_id)
 
-    def add_membership(self, m: Membership) -> None:
-        self._store[(m.user_id, str(m.habit_id))] = m
+    async def get(self, user_id: int) -> Any | None:
+        return self._store.get(user_id)
 
 
 @pytest.mark.asyncio
-async def test_payment_acquires_lock_on_existing_membership() -> None:
-    """_apply должен идти через lock_for_update_by_user_habit (а не SELECT без lock)."""
+async def test_payment_acquires_lock_on_user() -> None:
+    """PR #1: PaymentService лочит USER (а не membership) для deposit_topup.
+
+    Защита от гонки webhook'ов одного юзера (subscription_renewal + topup).
+    """
+    from app.models.user import User
+
+    u = User(id=1, first_name="u1", deposit_balance=0)
+    user_repo = _FakeUserRepo({1: u})
+
+    session = _FakeSession()
+    session.users[1] = u
+
+    # Создаём existing membership чтобы не упёрлись в "create new".
     m = Membership(
         id=str(uuid4()),
         user_id=1,
         habit_id="h1",
         status=MembershipStatus.ACTIVE,
-        deposit_balance=0,
     )
-    repo = _FakeMembershipRepo({(1, "h1"): m})
+    session.memberships[m.id] = m
 
-    # Передаём явный фейковый session, чтобы PaymentService не упал
-    # на неподдерживаемом execute() у _FakeSession (lock уже сделает repo).
-    session = _FakeSession()
-    service = PaymentService(session, membership_repo=repo)  # type: ignore[arg-type]
+    # Хакнем execute чтобы get_for_user_in_habit нашёл membership.
+    original_execute = session.execute
+
+    async def execute_with_membership(stmt):
+        text = str(stmt)
+        if "memberships" in text and "users.id" not in text:
+            return _Result(scalar=m)
+        if "users" in text and "deposit_balance" in text:
+            return _Result(scalar=u)
+        if "transactions" in text and "idempotency_key" in text:
+            return _Result(scalar=None)
+        return await original_execute(stmt)
+
+    session.execute = execute_with_membership  # type: ignore[assignment]
+
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
 
     await service.confirm_deposit_topup(
         charge_id="charge-lock-existing",
@@ -189,73 +232,58 @@ async def test_payment_acquires_lock_on_existing_membership() -> None:
         amount_kopecks=10_000,
     )
 
-    assert repo.lock_calls == [(1, "h1")], (
-        "должен быть ровно один lock_for_update_by_user_habit перед += "
+    # Должен быть ровно один lock на user.
+    assert user_repo.lock_calls == [1], (
+        "должен быть ровно один lock_for_update на user перед += "
         "депозита — иначе гонка webhook'ов теряет деньги"
     )
-    assert m.deposit_balance == 10_000
+    assert u.deposit_balance == 10_000
 
 
 @pytest.mark.asyncio
-async def test_payment_creates_and_re_locks_missing_membership() -> None:
-    """Если membership нет — _apply создаёт, flush'ит, затем lock'ит повторно.
+async def test_payment_creates_membership_if_missing() -> None:
+    """Если membership нет — _apply создаёт её и продолжает.
 
-    Контракт: create-then-lock гарантирует атомарность относительно
-    параллельного writer'а, который тоже пытается создать ту же membership.
+    После PR #1 user-lock первичен (user всегда есть). Membership может
+    отсутствовать (legacy topup создаёт membership под капотом).
     """
-    # Сценарий: первый вызов lock'а возвращает None (membership ещё не создана),
-    # затем в session.add() появляется новая Membership; второй вызов lock'а
-    # её уже видит.
-    class _SideEffectRepo(_FakeMembershipRepo):
-        def __init__(self) -> None:
-            super().__init__()
-            self._created: list[Membership] = []
+    from app.models.user import User
 
-        async def lock_for_update_by_user_habit(
-            self, user_id: int, habit_id: str
-        ) -> Membership | None:
-            self.lock_calls.append((user_id, habit_id))
-            existing = self._store.get((user_id, habit_id))
-            if existing is not None:
-                return existing
-            # Имитируем flush из payment_service — после первого None
-            # мы «внезапно видим» только что созданную Membership.
-            if self._created:
-                return self._created[0]
-            return None
+    u = User(id=1, first_name="u1", deposit_balance=0)
+    user_repo = _FakeUserRepo({1: u})
 
-        def register_created(self, m: Membership) -> None:
-            """PaymentService вызовет session.add() → дёрнем этот хук."""
-            self._created.append(m)
-            self._store[(m.user_id, str(m.habit_id))] = m
-
-    repo = _SideEffectRepo()
     session = _FakeSession()
+    session.users[1] = u
 
-    # Перехватываем session.add: когда PaymentService добавляет новую
-    # Membership — синхронизируем с фейковым репо.
-    orig_add = session.add
+    # Хакнем execute — get_for_user_in_habit возвращает None → PaymentService
+    # должен создать membership, зафлашить, и продолжить.
+    original_execute = session.execute
 
-    def intercept_add(obj: Any) -> None:
-        orig_add(obj)
-        if isinstance(obj, Membership):
-            repo.register_created(obj)
+    async def execute_membership_none(stmt):
+        text = str(stmt)
+        if "memberships" in text and "users.id" not in text:
+            return _Result(scalar=None)
+        if "users" in text and "deposit_balance" in text:
+            return _Result(scalar=u)
+        if "transactions" in text and "idempotency_key" in text:
+            return _Result(scalar=None)
+        return await original_execute(stmt)
 
-    session.add = intercept_add  # type: ignore[assignment]
+    session.execute = execute_membership_none  # type: ignore[assignment]
 
-    service = PaymentService(session, membership_repo=repo)  # type: ignore[arg-type]
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
 
-    await service.confirm_deposit_topup(
-        charge_id="charge-create-then-lock",
+    tx = await service.confirm_deposit_topup(
+        charge_id="charge-create-membership",
         user_id=1,
         habit_id="h1",
         amount_kopecks=50_000,
     )
 
-    # Должно быть 2 вызова lock: первый (None), второй (после flush).
-    assert len(repo.lock_calls) == 2, (
-        f"при отсутствии membership должно быть 2 lock'а (1-None, 2-after-flush); "
-        f"получили {len(repo.lock_calls)}. Один = регресс к гонке webhook'ов"
-    )
-    assert repo.lock_calls[0] == (1, "h1")
-    assert repo.lock_calls[1] == (1, "h1")
+    # Должна быть создана 1 membership и 1 транзакция.
+    assert len(session.memberships) == 1
+    assert len(session.transactions) == 1
+    # Депозит юзера увеличен.
+    assert u.deposit_balance == 50_000
+    # transaction.balance_after = user.deposit_balance (а не membership).
+    assert tx.balance_after == 50_000

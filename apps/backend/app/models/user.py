@@ -28,6 +28,11 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Pravki-deposit-sse.md §Z-2.1: глобальный депозит на пользователя (в копейках).
+    # Общий для всех клубов. Списание и пополнение — через этот баланс, не через
+    # memberships.deposit_balance (то поле удалено миграцией 014b).
+    deposit_balance: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+
     # Pravki.md §7.1: Telegram file_id аватарки для подхода C'
     # (307 redirect на Telegram CDN). NULL = нет аватарки или worker
     # ещё не подтянул. Endpoint /api/v1/users/{id}/photo → 404 если NULL.

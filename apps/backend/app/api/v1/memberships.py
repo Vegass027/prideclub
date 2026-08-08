@@ -9,6 +9,7 @@ from app.core.deps import SessionDep
 from app.core.exceptions import HabitArchivedError, HabitInactiveError
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas import MembershipOut
 from app.services.membership_service import MembershipService
 
@@ -22,6 +23,7 @@ async def get_membership_service(
         session=session,
         habit_repo=HabitRepository(session),
         membership_repo=MembershipRepository(session),
+        user_repo=UserRepository(session),
     )
 
 

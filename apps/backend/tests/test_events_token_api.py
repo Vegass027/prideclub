@@ -203,7 +203,6 @@ async def habit_and_member(_sqlite_engine: Any) -> tuple[str, int]:
                 user_id=user_id,
                 habit_id=habit_id,
                 status=MembershipStatus.ACTIVE.value,
-                deposit_balance=0,
                 bonus_points=0,
                 auto_renew_enabled=False,
             )
@@ -249,7 +248,6 @@ async def habit_and_paused_member(_sqlite_engine: Any) -> tuple[str, int]:
                 user_id=user_id,
                 habit_id=habit_id,
                 status=MembershipStatus.PAUSED.value,
-                deposit_balance=0,
                 bonus_points=0,
                 auto_renew_enabled=False,
             )

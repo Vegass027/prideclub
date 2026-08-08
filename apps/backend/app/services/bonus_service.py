@@ -147,6 +147,6 @@ class BonusService:
             type=TransactionType.BONUS_SUBSCRIPTION.value,
             amount=0,
             related_membership_id=membership.id,
-            balance_after=membership.deposit_balance,
+            balance_after=user.deposit_balance,
         )
         self._session.add(transaction)

@@ -658,9 +658,14 @@ async def test_force_update_financials_only_changes_target_fields() -> None:
     - memberships.auto_renew_enabled не изменился,
     - memberships.status не изменился,
     - active_members_count не сбросился.
+
+    PR #1: deposit_balance переехал с membership на user — здесь используем
+    отдельный FakeUserRepo для хранения и проверки.
     """
     from uuid import uuid4
 
+    from app.models.user import User
+    from tests.fakes import FakeUserRepo
 
     svc, repo, _ = _make_service()
     h = make_habit(id=str(uuid4()))
@@ -673,14 +678,17 @@ async def test_force_update_financials_only_changes_target_fields() -> None:
         user_id=12345,
         habit_id=h.id,
     )
-    membership.deposit_balance = 500_00
+    # Pravki-deposit-sse.md §Z-2.1: deposit_balance на user.
+    user_repo = FakeUserRepo()
+    user = User(id=12345, first_name="u", deposit_balance=500_00)
+    user_repo.add(user)
     membership.subscription_until = None
     membership.auto_renew_enabled = True
     repo.set_active_member_count(h.id, 5)
 
     snapshot = {
         "user_id": membership.user_id,
-        "deposit_balance": membership.deposit_balance,
+        "user_deposit_balance": user.deposit_balance,
         "subscription_until": membership.subscription_until,
         "auto_renew_enabled": membership.auto_renew_enabled,
         "active_members_count": 5,
@@ -701,7 +709,9 @@ async def test_force_update_financials_only_changes_target_fields() -> None:
 
     # Участник не тронут.
     from_repo = await svc._membership_repo.get(membership.id)  # noqa: SLF001
-    assert from_repo.deposit_balance == snapshot["deposit_balance"]
+    from_user = await user_repo.get(user.id)
+    assert from_user is not None
+    assert from_user.deposit_balance == snapshot["user_deposit_balance"]
     assert from_repo.subscription_until == snapshot["subscription_until"]
     assert from_repo.auto_renew_enabled == snapshot["auto_renew_enabled"]
     assert from_repo.status.value == "active"  # MembershipStatus.ACTIVE

@@ -44,7 +44,6 @@ class Membership(Base):
         server_default=MembershipStatus.ACTIVE.value,
     )
 
-    deposit_balance: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     bonus_points: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     auto_renew_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"

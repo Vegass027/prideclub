@@ -20,17 +20,36 @@ from app.models.user import User
 class FakeUserRepo:
     """Замена UserRepository. Тест задаёт пользователей через `add(user)`.
 
-    Покрывает контракт T3 BonusService (`user_repo.get(user_id)`).
+    Покрывает контракт:
+    - get(user_id) — T3 BonusService
+    - lock_for_update(user_id) — PenaltyService/PaymentService (PR #1, Z-2.4)
+    - add_balance(user_id, amount) — утилита для тестов recompute_pause_status
+
+    В фейке блокировка не нужна — возвращаем объект как есть.
     """
 
     def __init__(self) -> None:
         self._store: dict[int, User] = {}
+        self._lock_calls: list[int] = []
 
     def add(self, user: User) -> None:
         self._store[user.id] = user
 
     async def get(self, user_id: int) -> User | None:
         return self._store.get(user_id)
+
+    async def lock_for_update(self, user_id: int) -> User | None:
+        """Фейк SELECT FOR UPDATE — в фейке блокировка no-op."""
+        self._lock_calls.append(user_id)
+        return self._store.get(user_id)
+
+    async def add_balance(self, user_id: int, amount: int) -> User:
+        """Фейк: lock_for_update + deposit_balance += amount."""
+        u = await self.lock_for_update(user_id)
+        if u is None:
+            raise ValueError(f"user {user_id} not found")
+        u.deposit_balance += amount
+        return u
 
 
 class FakeHabitRepo:
@@ -223,12 +242,12 @@ class FakeMembershipRepo:
     def add_for(
         self, *, user_id: int, habit_id: str, status: MembershipStatus = MembershipStatus.ACTIVE
     ) -> Membership:
+        # Pravki-deposit-sse.md §Z-2.1: deposit_balance больше не на membership.
         m = Membership(
             id=str(uuid4()),
             user_id=user_id,
             habit_id=habit_id,
             status=status,
-            deposit_balance=1000,
         )
         self._store[str(m.id)] = m
         return m
@@ -252,12 +271,12 @@ class FakeMembershipRepo:
 
     async def create(self, user_id: int, habit_id: str) -> Membership:
         """Зеркалит прод-сигнатуру: id генерируется в репо, не в сервисе."""
+        # Pravki-deposit-sse.md §Z-2.1: deposit_balance больше не на membership.
         m = Membership(
             id=str(uuid4()),
             user_id=user_id,
             habit_id=habit_id,
             status=MembershipStatus.ACTIVE,
-            deposit_balance=0,
         )
         self._store[str(m.id)] = m
         return m

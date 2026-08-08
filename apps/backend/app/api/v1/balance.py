@@ -5,8 +5,8 @@ from sqlalchemy import select
 
 from app.api.v1.users import TelegramUserDbDep
 from app.core.deps import SessionDep
-from app.models.membership import Membership
 from app.models.transaction import Transaction
+from app.models.user import User
 
 router = APIRouter()
 
@@ -16,10 +16,11 @@ async def balance(
     user: TelegramUserDbDep,
     session: SessionDep,
 ) -> dict:
-    memberships = (await session.execute(
-        select(Membership).where(Membership.user_id == user.id)
-    )).scalars().all()
-    deposit_balance = sum(m.deposit_balance for m in memberships)
+    # Pravki-deposit-sse.md §Z-2.1: депозит — на users.deposit_balance (один на юзера).
+    # Один SELECT по users.id вместо SUM по всем memberships.
+    deposit_balance = (await session.execute(
+        select(User.deposit_balance).where(User.id == user.id)
+    )).scalar_one_or_none() or 0
 
     txns = (await session.execute(
         select(Transaction)

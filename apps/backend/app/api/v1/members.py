@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import TelegramUserDbDep
@@ -201,6 +202,13 @@ async def catch_violator(
     except PenaltyAlreadyProcessedError as exc:
         await session.rollback()
         return CatchResponse(ok=False, code=exc.code)
+    except IntegrityError:
+        # Pravki-deposit-sse.md §Z-2.8: гонка двух параллельных catch'ей на одну
+        # и ту же (membership_id, date, reason). UNIQUE-индекс uq_penalty_per_day_reason
+        # (миграция 002) срабатывает на INSERT второй транзакции. session.commit()
+        # бросает IntegrityError — для юзера это эквивалентно "уже обработано".
+        await session.rollback()
+        return CatchResponse(ok=False, code="penalty_already_processed")
     except Exception as exc:
         await session.rollback()
         from app.core.exceptions import DomainError

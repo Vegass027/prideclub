@@ -6,7 +6,6 @@ from typing import Protocol
 
 from app.core.logging import get_logger
 from app.core.exceptions import PenaltyAlreadyProcessedError
-from app.core.constants import MembershipStatus
 from app.models.membership import Membership
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
@@ -17,23 +16,43 @@ from db.session import async_session_factory  # type: ignore[import-not-found]
 
 
 async def _pause_violator(payload: dict, *, factory) -> None:
-    """При deposit_exhausted переводим violator в PAUSED в отдельной транзакции.
+    """При deposit_exhausted пересчитываем паузу в отдельной транзакции.
 
-    `apply_catch` мутирует `violator.status = PAUSED`, но raise+rollback
-    откатывают это изменение. Поэтому здесь — короткая отдельная транзакция,
-    которая гарантированно сохраняет PAUSED в БД.
+    `apply_catch` бросает PenaltyAlreadyProcessedError("deposit_exhausted")
+    ДО recompute_pause_status, поэтому ни депозит-списание, ни статус не
+    сохраняются в БД. Здесь — короткая отдельная транзакция, которая
+    через MembershipService.recompute_pause_status выставляет корректный
+    статус для ВСЕХ клубов юзера (PAUSED если депозит < penalty, ACTIVE
+    иначе). См. Pravki-deposit-sse.md §Z-2.5/§Z-2.6, правка B:
+    "Единственный источник статуса membership при изменении депозита —
+    recompute_pause_status".
     """
     from sqlalchemy import select
 
+    from app.repositories.membership_repository import MembershipRepository
+    from app.repositories.user_repository import UserRepository
+    from app.services.membership_service import MembershipService
+
     violator_id = payload["violator_membership_id"]
     async with factory() as session:
+        # Нужен user_id — берём из membership.
         result = await session.execute(
-            select(Membership).where(Membership.id == violator_id)
+            select(Membership.user_id).where(Membership.id == violator_id)
         )
-        m = result.scalar_one_or_none()
-        if m is not None and m.status == MembershipStatus.ACTIVE:
-            m.status = MembershipStatus.PAUSED
-            await session.commit()
+        row = result.first()
+        if row is None:
+            return
+        user_id = row[0]
+
+        # MembershipService.recompute_pause_status внутри берёт
+        # user_repo.lock_for_update(user_id) — сериализуется с любым
+        # параллельным catch/topup этого юзера.
+        await MembershipService(
+            session=session,
+            membership_repo=MembershipRepository(session),
+            user_repo=UserRepository(session),
+        ).recompute_pause_status(user_id)
+        await session.commit()
 
 
 async def _send_catch_notification(
@@ -182,8 +201,9 @@ async def _process(
             await session.rollback()
             log.info("worker_penalty_duplicate", extra={"code": exc.code})
             # Особый случай: "deposit_exhausted" требует, чтобы violator перешёл
-            # в PAUSED в БД. Service ставит violator.status = PAUSED, но rollback
-            # откатывает это изменение. Поэтому обрабатываем отдельным коммитом.
+            # в PAUSED в БД. apply_catch raise'ит ДО recompute_pause_status, поэтому
+            # изменение статуса откатывается. Здесь отдельной транзакцией вызываем
+            # recompute_pause_status — он пересчитает статус для ВСЕХ клубов юзера.
             if exc.code == "deposit_exhausted":
                 await _pause_violator(payload, factory=factory)
             return {"ok": True, "duplicate": True, "code": exc.code}

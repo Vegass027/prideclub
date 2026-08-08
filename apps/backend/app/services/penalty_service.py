@@ -26,6 +26,8 @@ from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
+from app.repositories.user_repository import UserRepository
+from app.services.membership_service import MembershipService
 
 
 class RedisPort(Protocol):
@@ -36,6 +38,12 @@ class PenaltyService:
     """Бизнес-логика штрафов.
 
     Одна операция = одна транзакция (вызывающий код в worker управляет commit'ом).
+
+    Pravki-deposit-sse.md §Z-2: депозит живёт на users.deposit_balance (НЕ на
+    membership). Списание идёт через user-level lock, что автоматически сериализует
+    параллельные catch/topup этого юзера в любых клубах. После списания
+    MembershipService.recompute_pause_status пересчитывает статусы всех
+    ACTIVE/PAUSED membership'ов юзера (см. §Z-2.5).
     """
 
     def __init__(
@@ -45,6 +53,8 @@ class PenaltyService:
         membership_repo: MembershipRepository,
         checkin_repo: CheckinRepository,
         suspicious_repo: SuspiciousPairsRepository,
+        user_repo: UserRepository | None = None,
+        membership_service: MembershipService | None = None,
         redis_port: RedisPort | None = None,
     ) -> None:
         self._session = session
@@ -52,6 +62,13 @@ class PenaltyService:
         self._membership_repo = membership_repo
         self._checkin_repo = checkin_repo
         self._suspicious_repo = suspicious_repo
+        self._user_repo = user_repo or UserRepository(session)
+        self._membership_service = membership_service or MembershipService(
+            session=session,
+            habit_repo=habit_repo,
+            membership_repo=membership_repo,
+            user_repo=self._user_repo,
+        )
         self._redis = redis_port
         self._logger = get_logger("penalty_service")
 
@@ -68,11 +85,24 @@ class PenaltyService:
             if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
                 raise TooManyCatchAttemptsError()
 
-        violator = await self._membership_repo.lock_for_update(violator_membership_id)
+        # 1. Membership читаем БЕЗ лока — нужен только для habit_id и user_id.
+        #    Pravki-deposit-sse.md §Z-2.4 / Q1: единственный лок — на user.
+        #    Membership-лок не нужен, потому что:
+        #      (a) депозит живёт на user (Pravki Z-2.1);
+        #      (b) penalty-INSERT защищён UNIQUE (membership_id, date, reason)
+        #          — гонку ловит Z-2.8 IntegrityError handler;
+        #      (c) статус membership'а пересчитывается централизованно в
+        #          recompute_pause_status ниже (читает свежее состояние через JOIN).
+        violator = await self._membership_repo.get(violator_membership_id)
         if catcher_membership_id is not None and catcher_membership_id == violator_membership_id:
             raise CannotCatchSelfError()
         if violator.status != MembershipStatus.ACTIVE:
             raise MembershipNotActiveError()
+
+        # 2. SELECT FOR UPDATE на user. Сериализует все параллельные
+        #    catch/topup этого юзера в любых клубах (Z-2.4).
+        violator_user = await self._user_repo.lock_for_update(violator.user_id)
+        assert violator_user is not None, "violator membership has no user"
 
         habit = await self._habit_repo.get(str(violator.habit_id))
         if habit is None:
@@ -90,17 +120,15 @@ class PenaltyService:
             raise PenaltyAlreadyProcessedError()
 
         # Списываем депозит (но не ниже 0).
-        amount = min(habit.penalty_amount, violator.deposit_balance)
+        amount = min(habit.penalty_amount, violator_user.deposit_balance)
         if amount <= 0:
-            # Депозит исчерпан — membership переходит в paused.
-            # НЕ flush'им до raise — rollback откатит изменение. Worker-таска
-            # обязана обработать "deposit_exhausted" в отдельной транзакции
-            # (см. worker/tasks/process_penalty.py: ловит этот код и ставит
-            # membership в PAUSED отдельным коммитом).
-            violator.status = MembershipStatus.PAUSED
+            # Депозит исчерпан. Статус membership'а пересчитается в recompute ниже
+            # (PAUSED если депозит < penalty этого клуба, иначе ACTIVE).
+            # Pravki правка B: единый централизованный пересчёт, никаких
+            # построчных `status = PAUSED` в этом методе.
             raise PenaltyAlreadyProcessedError("deposit_exhausted", code="deposit_exhausted")
 
-        violator.deposit_balance -= amount
+        violator_user.deposit_balance -= amount
         await self._habit_repo.add_to_prize_pool(str(habit.id), amount)
 
         # Применяется ли кэтчер-бонус — отдельная проверка suspicious_pairs (см. apply_catch_bonus).
@@ -133,14 +161,15 @@ class PenaltyService:
             user_id=violator.user_id,
             type=TransactionType.PENALTY.value,
             amount=-amount,
-            balance_after=violator.deposit_balance,
+            balance_after=violator_user.deposit_balance,
             related_penalty_id=penalty.id,
             related_membership_id=violator_membership_id,
         )
         self._session.add(transaction)
 
-        if violator.deposit_balance == 0:
-            violator.status = MembershipStatus.PAUSED
+        # Единственный источник статуса membership при изменении депозита —
+        # централизованный recompute_pause_status (Pravki Z-2.5, правка B).
+        await self._membership_service.recompute_pause_status(violator.user_id)
 
         await self._session.flush()
 
@@ -152,6 +181,7 @@ class PenaltyService:
                 "amount": amount,
                 "habit_id": str(habit.id),
                 "club_date": str(club_date),
+                "user_deposit_after": violator_user.deposit_balance,
             },
         )
         return penalty
@@ -163,10 +193,16 @@ class PenaltyService:
 
         Идемпотентность обеспечивается INSERT ON CONFLICT DO NOTHING через
         уникальный индекс (membership_id, date, reason).
+
+        Тот же паттерн, что и apply_catch: membership читается без лока,
+        лок только на user. Membership-лок не нужен (Z-2.4 / Q1).
         """
-        violator = await self._membership_repo.lock_for_update(violator_membership_id)
+        violator = await self._membership_repo.get(violator_membership_id)
         if violator.status != MembershipStatus.ACTIVE:
             return None
+
+        violator_user = await self._user_repo.lock_for_update(violator.user_id)
+        assert violator_user is not None, "violator membership has no user"
 
         habit = await self._habit_repo.get(str(violator.habit_id))
         if habit is None:
@@ -182,12 +218,13 @@ class PenaltyService:
         if existing.first() is not None:
             return None
 
-        amount = min(habit.penalty_amount, violator.deposit_balance)
+        amount = min(habit.penalty_amount, violator_user.deposit_balance)
         if amount <= 0:
-            violator.status = MembershipStatus.PAUSED
+            # Депозит исчерпан. Статус пересчитается в recompute ниже.
+            # Без построчного `status = PAUSED` (Pravki правка B).
             return None
 
-        violator.deposit_balance -= amount
+        violator_user.deposit_balance -= amount
         await self._habit_repo.add_to_prize_pool(str(habit.id), amount)
 
         penalty = Penalty(
@@ -210,14 +247,14 @@ class PenaltyService:
             user_id=violator.user_id,
             type=TransactionType.PENALTY.value,
             amount=-amount,
-            balance_after=violator.deposit_balance,
+            balance_after=violator_user.deposit_balance,
             related_penalty_id=penalty.id,
             related_membership_id=violator_membership_id,
         )
         self._session.add(transaction)
 
-        if violator.deposit_balance == 0:
-            violator.status = MembershipStatus.PAUSED
+        # Единственный источник статуса — recompute_pause_status (Z-2.5, правка B).
+        await self._membership_service.recompute_pause_status(violator.user_id)
 
         await self._session.flush()
         self._logger.info(
@@ -226,6 +263,7 @@ class PenaltyService:
                 "violator_membership_id": violator_membership_id,
                 "amount": amount,
                 "habit_id": str(habit.id),
+                "user_deposit_after": violator_user.deposit_balance,
             },
         )
         return penalty

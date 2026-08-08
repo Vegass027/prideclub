@@ -46,7 +46,6 @@ class MembershipOut(BaseModel):
     user_id: int
     habit_id: str
     status: str
-    deposit_balance: int
     subscription_until: date | None
     auto_renew_enabled: bool
     joined_at: datetime

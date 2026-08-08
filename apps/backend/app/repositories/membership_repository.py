@@ -74,7 +74,14 @@ class MembershipRepository:
             yield membership
 
     async def lock_for_update(self, membership_id: str) -> Membership:
-        """SELECT ... FOR UPDATE — для списания депозита."""
+        """SELECT ... FOR UPDATE на memberships.id — для status-валидации в PenaltyService.
+
+        Pravki-deposit-sse.md §Z-2: депозит живёт на users.deposit_balance, поэтому
+        списание идёт через user-level lock (user_repo.lock_for_update), а не здесь.
+        Этот lock остался только для проверки `if violator.status != ACTIVE` —
+        защищает от гонки двух параллельных catch'ей на одну membership (чтобы
+        оба не прошли гейт «ACTIVE» одновременно).
+        """
         result = await self._session.execute(
             select(Membership).where(Membership.id == membership_id).with_for_update()
         )
@@ -82,6 +89,7 @@ class MembershipRepository:
         return m
 
     async def create(self, user_id: int, habit_id: str) -> Membership:
+        # Pravki-deposit-sse.md §Z-2.1: deposit_balance переехал на users.
         m = Membership(
             user_id=user_id,
             habit_id=habit_id,
@@ -96,7 +104,3 @@ class MembershipRepository:
         if m is None:
             return
         m.status = MembershipStatus.PAUSED
-
-    async def add_balance(self, membership_id: str, amount: int) -> None:
-        m = await self.lock_for_update(membership_id)
-        m.deposit_balance += amount
