@@ -376,12 +376,20 @@ class MembershipService:
             m = existing
             await self._session.flush()
 
-        # Шаг 7: пополнить депозит.
+        # Шаг 7: посчитать total_charged (для tx.amount и alert в UI).
+        # Subscription fee (price_month) идёт на «доход клуба/платформы»
+        # (записывается в transactions как type=SUBSCRIPTION для аудита),
+        # но НЕ попадает на deposit_balance — на нём лежат ТОЛЬКО деньги,
+        # которые могут быть списаны как штраф.
+        # Pravki-subscribe-and-join.md §Z-13 шаг 7: deposit_balance
+        # пополняется на deposit_amount_kopecks, а не на price_month+deposit.
+        # Это поймано пользователем при тестировании 2026-08-09:
+        # «1000 это оплата клуба она не должна быть на депозите».
         if charged_subscription:
             total_charged = habit.price_month + deposit_amount_kopecks
         else:
             total_charged = deposit_amount_kopecks
-        u.deposit_balance += total_charged
+        u.deposit_balance += deposit_amount_kopecks    # ← только депозитная часть
 
         # Шаг 8: создать транзакцию (тип условный — см. §Z-13.3).
         if charged_subscription:
@@ -392,8 +400,8 @@ class MembershipService:
             id=str(uuid4()),
             user_id=user_id,
             type=tx_type,
-            amount=total_charged,
-            balance_after=u.deposit_balance,
+            amount=total_charged,         # ← полная сумма списания с юзера (для UI/alert)
+            balance_after=u.deposit_balance,    # ← только депозитная часть
             related_membership_id=m.id,
             idempotency_key=full_key,
         )

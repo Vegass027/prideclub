@@ -199,15 +199,22 @@ async def test_subscribe_creates_active_membership_and_charges_combined_payment(
     assert m.habit_id == str(habit.id)
     # 2. subscription_until = today + 30 days.
     assert m.subscription_until == date.today() + timedelta(days=30)
-    # 3. User.deposit_balance пополнен на price_month + deposit.
-    assert user_repo._store[1].deposit_balance == 1_000_00 + 500_00
+    # 3. User.deposit_balance пополнен ТОЛЬКО на deposit_amount (НЕ на price_month+deposit).
+    # Subscription fee (1000₽) — это доход клуба/платформы, идёт в transactions как
+    # type=SUBSCRIPTION для аудита, но НЕ на deposit_balance (на нём только деньги
+    # которые могут быть списаны как штраф).
+    assert user_repo._store[1].deposit_balance == 500_00
+    # 3b. tx.amount — это полная сумма списания (для UI/alert).
+    assert tx.amount == 1_000_00 + 500_00
+    # 3c. tx.balance_after — это deposit_balance после транзакции (только депозитная часть).
+    assert tx.balance_after == 500_00
     # 4. Transaction создана с правильным типом и суммой.
     assert charged is True
     assert tx.type == TransactionType.SUBSCRIPTION.value
     assert tx.amount == 1_500_00
     assert tx.user_id == 1
     assert tx.related_membership_id == m.id
-    assert tx.balance_after == 1_500_00
+    assert tx.balance_after == 500_00    # ← депозитная часть (после фикса 2026-08-09)
     # 5. Idempotency key имеет префикс "subscribe:".
     assert tx.idempotency_key == "subscribe:test-key-1"
 
@@ -277,7 +284,8 @@ async def test_subscribe_idempotent_with_same_key() -> None:
         idempotency_key="idemp-1",
     )
     assert charged1 is True
-    assert user_repo._store[1].deposit_balance == 1_500_00
+    # После фикса 2026-08-09: deposit_balance пополняется ТОЛЬКО на deposit_amount.
+    assert user_repo._store[1].deposit_balance == 500_00
 
     # Второй вызов с тем же ключом — должен вернуть ту же транзакцию без нового списания.
     m2, tx2, charged2 = await service.subscribe_and_join(
@@ -291,8 +299,8 @@ async def test_subscribe_idempotent_with_same_key() -> None:
     # Та же транзакция и membership.
     assert tx2.id == tx1.id
     assert m2.id == m1.id
-    # Но НЕ списали второй раз.
-    assert user_repo._store[1].deposit_balance == 1_500_00
+    # Но НЕ списали второй раз (deposit_balance остался 500₽).
+    assert user_repo._store[1].deposit_balance == 500_00
 
 
 @pytest.mark.asyncio
