@@ -299,19 +299,42 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 
 ## 9. Что не работает на проде (snapshot 2026-07-23)
 
-- ❌ **Платежи = мок.** `PaymentModal.setTimeout(1200)`, `TopUpModal.alert()`.
-  Бот не вызывает `bot.send_invoice`, в `.env` нет `PROVIDER_TOKEN`,
-  в БД `transactions=0`.
+> **Snapshot 2026-08-09:** секция ниже была отредактирована (актуальное состояние
+> зафиксировано в Pravki-subscribe-and-join.md §0 и §5 ритуала). Сверяйтесь
+> с реальным кодом через `git log --oneline <file>` + `git show <commit>`, а не только
+> с этим разделом. Свежие snapshot'ы — `Pravki.md §7`, `docs/09-prod-readiness.md §1.1`.
+
+- 🟡 **Платежи = мок на уровне Telegram API** (НЕ на уровне backend flow). Backend endpoint
+  `POST /api/v1/payments/subscribe` работает и создаёт ACTIVE membership с реальной
+  записью в `users.deposit_balance` + `transactions(amount=price_month+deposit,
+  type=SUBSCRIPTION|DEPOSIT_TOPUP)`. Закрыто коммитом `b98cab0` 2026-08-09: до
+  фикса subscription fee попадал на `deposit_balance` (юзеры видели 1250₽ вместо 250₽);
+  теперь deposit_balance инкрементируется **только** на `deposit_amount_kopecks`,
+  subscription_fee идёт в `transactions.amount` как доход клуба/платформы.
+  Что осталось моком: **отсутствие реального `bot.send_invoice`** — на проде нет
+  `PROVIDER_TOKEN`, бот не вызывает Telegram Payment API, деньги «списываются»
+  без взаимодействия с Telegram. Это отдельная задача (см. Pravki-subscribe-and-join.md §6).
+- 🟡 **Z-19 joiner-late protection** — реализован (commit `497d01d`, 2026-08-09), но
+  отдельная документация в `docs/` не обновлена. Защита: `HabitStateResponse.is_joined_late`
+  + bot pre-filter + worker `CheckinJoinedLateError` (см. `apps/worker/worker/tasks/process_checkin.py:160`
+  и `apps/bot/bot/handlers/checkin.py:177`). 3 уровня защиты подтверждены автотестами
+  (12 backend + 2 worker + 3 bot). Frontend: блок на TodayPage для статуса `joined_late`.
+  TODO: задокументировать в `docs/09-prod-readiness.md §1.1` (отдельная задача ритуала).
 - ❌ **Бэкапы не развёрнуты.** `backup_cron.sh` готов, нет `aws` CLI, нет
   `S3_*` env, нет cron-задачи. Текущая защита — только volume `habit-club_pgdata`.
 - ❌ **Sentry = no-op** (DSN пуст). Grafana не развёрнута. Кастомных Prometheus-метрик нет.
 - ❌ **Хостинг — Contabo (Германия), не Selectel (РФ).** ФЗ-152 под риском для
-  реальных ПДн (сейчас в БД только 10 тест-юзеров, 0 clubs/transactions).
+  реальных ПДн (сейчас в БД 2 тест-юзера, 3 habits, 3 memberships, 4 transactions).
 - ❌ **AI-комендант и "Удалить аккаунт"** — не реализованы (в v2).
 - 🟡 **В БД 0 habits при 9 файлах в `uploads/club_photos/`** — POST
   `/admin/v1/habits` не отрабатывал, расследовать.
+  ⚠️ **Расхождение с реальностью:** на 2026-08-09 в `habits` 3 строки (восстановлены
+  из pg_dump'а 2026-08-09). Расследование нужно проверить заново.
 - 🟡 **Контракт `chat_id` vs `habit_id`** в `apps/backend/app/api/v1/internal_payments.py`
   ожидает `chat_id: int`, бот шлёт `habit_id: str`. 422 без починки.
+  ⚠️ **Расхождение:** см. комментарий в `Pravki-subscribe-and-join.md §0` «Текущее
+  состояние бота на проде» — `internal_payments.py` остаётся мёртвым кодом (бот не
+  вызывает его). Удалить или переименовать параметр — отдельная задача.
 - 🟡 **Bot логирует plain text**, не structlog-JSON как backend/worker.
 - ✅ **Webhook SSL error (закрыто 2026-08-04)** — `WEBHOOK_BASE_URL` указывал на сырой IP
   в `/app/infra/.env`, Telegram не доставлял апдейты (2 шт в `pending_update_count`).
@@ -321,8 +344,24 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
   `penalty_repo` в конструктор `CheckinService`, чек-ины возвращали `ok=False` без записи.
   Пофикшено: добавлен `penalty_repo=PenaltyRepository(session)` в
   `apps/worker/worker/tasks/process_checkin.py`.
+- ✅ **MembershipService LEFT/PAUSED bypass** (закрыто 2026-08-09 коммитом `ae6bd07`,
+  сейчас на `feature/fix/left-paused-deposit-bypass` ветке или уже в `main`).
+  `join` теперь проверяет deposit ВСЕГДА — никаких исключений для LEFT/PAUSED.
+- ⚠️ **Docker build cache конфликт** (2026-08-09, НЕ закрыто) — `docker compose build
+  frontend` падает с overlay-конфликтом на `@tanstack/react-query`. Workaround
+  применён (commit `4a390e1`): `image: nginx:1.27-alpine` + volume mount на bundle.
+  Диагностика первопричины — отдельная задача (см. `docs/10-deploy.md` §runbook
+  после фикса этого snapshot'а).
+- ⚠️ **Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE**
+  (2026-08-09, НЕ закрыто). `docker compose run --rm backend alembic upgrade head`
+  стартует контейнер, но не пишет в БД — миграция висит. Workaround: ручной
+  `docker exec habit-postgres psql` с `ALTER TYPE checkin_status ADD VALUE IF NOT
+  EXISTS 'joined_late'` + `UPDATE alembic_version SET version_num='015_...'`.
+  Диагностика первопричины — отдельная задача (см. `docs/10-deploy.md` §runbook).
 
-Подробнее — `docs/09-prod-readiness.md` §1.1 и `docs/02-architecture.md` §9.
+Подробнее — `docs/09-prod-readiness.md` §1.1, `docs/02-architecture.md` §9, `docs/10-deploy.md` §runbook,
+и финальные snapshot'ы планов: `Pravki-subscribe-and-join.md` §0 (Z-13..Z-18 + Z-19),
+`Pravki-deposit-sse.md` §Z-2.9 (PR #1).
 
 ## 10. Стиль кода — короткая шпаргалка
 
