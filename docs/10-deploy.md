@@ -252,3 +252,111 @@ echo "0 3 * * * /app/infra/backup/backup_cron.sh" >> /etc/cron.d/habit-backup
 - ❌ Не использовать `docker cp` для изменения кода — пропадёт при recreate.
 - ❌ Не коммитить в main без проверки CI (GitHub Actions).
 - ❌ Не запускать тесты на прод-БД напрямую (только в test-DB через миграцию test).
+
+## 9. Известные инфраструктурные баги (snapshot 2026-08-09)
+
+Два бага infra-уровня, обнаружены при deploy Pravki-subscribe-and-join. Workaround'ы
+задокументированы, диагностика первопричин — отдельные задачи.
+
+### 9.1 Docker build cache overlay-конфликт (frontend)
+
+**Симптом:** при попытке `docker compose build frontend` (или любой попытке
+пересобрать образ `habit-club-frontend`) — падает с ошибкой:
+
+```
+failed to solve: cannot replace to directory
+/var/lib/docker/overlay2/.../merged/app/node_modules/@tanstack/react-query
+with file
+```
+
+**Причина:** на сервере в Docker overlay cache остались слои от прошлого
+multi-stage build, где `@tanstack/react-query` был directory (от `npm ci`).
+Новый build context добавляет этот путь как file (после смены lockfile/package.json).
+Overlay filesystem не позволяет «directory → file» замещение в одном слое.
+
+**Что НЕ помогло:**
+- `docker compose build --no-cache` (overlay cache не очищается).
+- `docker compose build --no-cache --pull` (тот же overlay-конфликт).
+- `DOCKER_BUILDKIT=1 BUILDKIT_SANDBOX_HOSTNAME=alt-build` (тот же overlay-конфликт).
+- `docker rmi habit-club-frontend` (overlay остаётся).
+- `docker builder prune -af` (не очистил проблемные слои).
+
+**Workaround (применён 2026-08-09, commit `4a390e1`):**
+в `infra/docker-compose.yml` для сервиса `frontend` убран `build:` и используется
+базовый `image: nginx:1.27-alpine` с volume mount на bundle:
+
+```yaml
+  frontend:
+    image: nginx:1.27-alpine   # было build: {context: .., dockerfile: ...}
+    container_name: habit-frontend
+    volumes:
+      # Bundle живёт на хосте, rsync'ится при deploy.
+      - /app/apps/frontend/dist:/usr/share/nginx/html
+      - club_uploads:/usr/share/nginx/html/static
+    ports:
+      - "127.0.0.1:5173:80"
+```
+
+**Deploy процедура (frontend):**
+
+```bash
+# 1. Локально: пересобрать bundle
+cd apps/frontend
+npm run build
+# 2. На сервер: rsync bundle (dist/), НЕ пересобираем образ
+rsync -az --delete apps/frontend/dist/ privichki-prod:/app/apps/frontend/dist/
+# 3. Перезапустить контейнер (volume mount подхватится автоматически)
+ssh privichki-prod 'cd /app/infra && docker compose up -d frontend'
+# 4. Verify
+ssh privichki-prod 'curl -s http://127.0.0.1:5173/ | grep -oE "main-[A-Za-z0-9]+\.js"'
+```
+
+**Когда можно вернуть `build:`:** после диагностики overlay-конфликта
+(возможно через BuildKit cache mount или `docker buildx` с другим runtime).
+См. отдельную задачу в репо.
+
+### 9.2 Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE
+
+**Симптом:** при `docker compose run --rm backend alembic upgrade head` после успешного
+старта контейнера (`INFO [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO [alembic.runtime.migration] Will assume transactional DDL.`) — миграция НЕ применяется.
+`SELECT * FROM alembic_version` показывает старую версию. В логах нет ни ошибок,
+ни сообщения «running upgrade».
+
+**Причина (предположительно):** миграция 015 (`015_checkin_status_extra_values.py`)
+содержит `op.execute("ALTER TYPE checkin_status ADD VALUE IF NOT EXISTS 'joined_late'")`.
+В PostgreSQL `ALTER TYPE ... ADD VALUE` не может выполняться внутри транзакции,
+которую Alembic открывает по умолчанию (`transaction_per_migration=True`).
+Контейнер останавливается с exit 0 без выполнения ALTER, потому что DDL был
+откатан внутри транзакции, но Alembic не зафиксировал это в `alembic_version`.
+
+**Workaround (применён 2026-08-09):** ручное применение миграции через psql
+внутри контейнера postgres + обновление alembic_version:
+
+```bash
+# 1. На сервере: добавить enum-значения в БД напрямую
+ssh privichki-prod 'docker exec habit-postgres psql -U habits -d habits -c "
+  ALTER TYPE checkin_status ADD VALUE IF NOT EXISTS '\''joined_late'\'';
+  ALTER TYPE checkin_status ADD VALUE IF NOT EXISTS '\''caught'\'';
+"'
+# 2. Обновить alembic_version чтобы синхронизировать state
+ssh privichki-prod 'docker exec habit-postgres psql -U habits -d habits -c "
+  UPDATE alembic_version SET version_num = '\''015_checkin_status_extra_values'\'';
+"'
+# 3. Verify
+ssh privichki-prod 'docker exec habit-postgres psql -U habits -d habits -c "
+  SELECT enum_range(NULL::checkin_status);
+  SELECT version_num FROM alembic_version;
+"'
+# Должно быть: {done,missed,joined_late,caught} + 015_checkin_status_extra_values
+```
+
+**Альтернатива для будущих миграций:** в файле миграции использовать autocommit.
+В Alembic 1.13+ нет встроенного декоратора `autocommit`, но можно обойти через
+`op.execute("COMMIT")` перед `ALTER TYPE ADD VALUE` — но это внутри DDL-транзакции
+alembic может не работать. Альтернатива: разделить ALTER TYPE на отдельную
+миграцию с `op.execute("COMMIT"); op.execute("BEGIN")` обёрткой. Диагностика
+первопричины — отдельная задача.
+
+**Когда можно использовать `alembic upgrade head` через compose:** после фикса
+autocommit-паттерна в alembic-op обёртке. До этого — ручной workaround выше.

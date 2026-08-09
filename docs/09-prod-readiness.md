@@ -82,6 +82,24 @@
 | 17 | **CI в GitHub Actions** | ✅ Конфиг исправлен | `backend-ci.yml`, `frontend-ci.yml` |
 | 18 | **Admin Mini App** (управление клубами: CRUD + activate/archive/restore) | ✅ На проде с `2026-07-21` (commit `ad0267b`) | `apps/frontend/src/admin/`, `admin.prideclub.fun`. Owner-gate в `core/middleware.py`. |
 | 19 | **SSE real-time updates** (Mini App «Сегодня» без polling) | ✅ На проде с `2026-08-04` (commits `c836542`..`d30832a`, merge `0c9a7b8`) | `POST /api/v1/events/stream/token` (JWT TTL 60 с) + `GET /api/v1/events/stream` (XREAD BLOCK 30000) + worker `event_publisher` (Guard 1+Guard 2) + nginx exact-match + frontend `useTodayStream`. Redis streams `sse:user:{u}:{h}`, idempotency keys `sse_published:checkin:{m}:{d}` (24 ч), per-user concurrency `sse:conn:{u}` (MAX=5). Покрыто 100 тестами (67 backend + 22 worker + 11 frontend vitest). Smoke-test: ручной чек-ин через Mini App → real-time обновление без refetch. |
+| 20 | **Pravki-deposit-sse: deposit на users** (PR #1, commit `ac6951f`) | ✅ На проде с `2026-08-08` | `users.deposit_balance` (BigInt, NOT NULL DEFAULT 0). Миграции 014a (ADD COLUMN + backfill + 3 sanity-чека) + 014b (DROP COLUMN memberships.deposit_balance). `MembershipService.recompute_pause_status(user_id)` пересчитывает ACTIVE/PAUSED по всем клубам юзера после каждого изменения депозита (PR #1 §Z-2.6). Тестов: 304 passed (vs baseline 288, +16). Покрытие: `test_user_deposit_balance.py` (8 кейсов), `test_recompute_pause_status.py` (4 кейса), `test_catch_api.py` (defense-in-depth). Smoke-test: ручной catch → `user.deposit_balance` уменьшается, `prize_pool` увеличивается, status=PAUSED. |
+| 21 | **Pravki-deposit-sse: UI join/wallet** (PR #2, commit `9736b5b`) | ✅ На проде с `2026-08-08` | `useWallet()` хук (staleTime 30s), `GET /me/wallet` endpoint с `WalletClubOut.can_checkin`, `TopUpModal` без radio (пресеты 299/599/999/1999 ₽, фильтрация по `penalty_amount`). 89 frontend vitest + 287 backend. |
+| 22 | **LEFT/PAUSED bypass fix** (commit `ae6bd07`) | ✅ На проде | `MembershipService.join` теперь проверяет депозит ВСЕГДА — никаких исключений для LEFT/PAUSED. Раньше: LEFT→ACTIVE реактивация без проверки депозита (баг). Сейчас: user-lock + депозит-check для всех трёх кейсов (new / LEFT→ACTIVE / PAUSED→ACTIVE). |
+| 23 | **Pravki-subscribe-and-join: объединённый платёж подписка+депозит** (commits `b51eb90` + `b98cab0`) | ✅ На проде с `2026-08-08` | Новый endpoint `POST /api/v1/payments/subscribe`. `MembershipService.subscribe_and_join(*, user_id, habit_id, deposit_amount_kopecks, subscription_accepted, idempotency_key)` с 3-кейсовой логикой (3a/3b/3c — см. `Pravki-subscribe-and-join.md` §Z-13.1 матрица). Frontend: `JoinPayModal` (чекбокс подписки + пресеты депозита, отфильтрованные по `penalty_amount`), `useJoinAndPay` hook. **Subscription fee НЕ попадает на `deposit_balance`** (b98cab0) — кладётся только `deposit_amount_kopecks`. Тестов: 24 в `test_subscribe_and_join.py` + обновлённые assertions. |
+| 24 | **Pravki-bug-fixes Z-19: joiner-late protection** (commit `497d01d`) | ✅ На проде с `2026-08-09` | 3 уровня защиты: (1) bot pre-filter на `is_joined_late=True` в `HabitStateResponse` → REJECT_JOINED_LATE с подставленными `start`/`end` окна; (2) worker `process_checkin` симметричная проверка → `CheckinJoinedLateError` (422) ДО `get_or_create_done`; (3) worker race-fallback возвращает `window_start`/`window_end` для бота в результате. Защита от двойного списания и нелогичного alert'а. Alembic миграция 015 (enum extension). 12 backend + 2 worker + 3 bot тестов. Defensive fallback в `StatusBadge` (commit `564b8db`) на случай рассинхрона кэша. |
+| 25 | **Frontend image: workaround для overlay-конфликта** (commit `4a390e1`) | ✅ На проде | Frontend сервис в compose переключён на `image: nginx:1.27-alpine` + volume mount на `/app/apps/frontend/dist` (вместо `build:`). Bundle переживает recreate/restart. Подробности и deploy-процедура — `docs/10-deploy.md` §9.1. |
+
+**Snapshot 2026-08-09 (после Z-19 deploy):**
+- **Alembic:** `015_checkin_status_extra_values` (head)
+- **Миграции:** 000 → 015 (16 файлов, последние 014a/014b/015 — из этой сессии)
+- **БД:** 2 users, 3 habits (Пробежка, Планка, Чтение), 3 memberships, 4 transactions
+- **Backend:** `habit-backend` Up, healthy, commit `497d01d` + `564b8db` (Z-19 + defensive StatusBadge)
+- **Bot:** `habit-bot` Up, commit `497d01d` (Z-19 prefilter + race-fallback text)
+- **Worker:** `habit-worker` Up, commit `497d01d` (joined_late handling + window_start/end fallback)
+- **Frontend:** `habit-frontend` Up, bundle `main-CmHeC1H6.js` (Z-19 + defensive fix)
+- **Тесты локально:** 354 passed backend (24 новых в `test_subscribe_and_join.py` + 12 в `test_joined_late_protection.py` + baseline 318), 17 worker, 35 frontend
+- **Тесты на проде:** не запускаются (только локально + CI)
+- **9 baseline-fails** в `test_admin_habits_api.py::TestAdminHabitEndpoints` — требуют настоящий Redis (не связано с этой сессией)
 
 ### 1.2 Тесты
 

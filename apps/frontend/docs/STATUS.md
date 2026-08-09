@@ -14,6 +14,13 @@
 > **Production**:
 > - User Mini App: `https://app.prideclub.fun/`
 > - Admin Mini App: `https://admin.prideclub.fun/` (owner-only, через `OWNER_TELEGRAM_ID`)
+>
+> **Snapshot 2026-08-09 (Pravki-subscribe-and-join + bug-fixes Z-19 deploy):**
+> bundle `main-CmHeC1H6.js` (включает `JoinPayModal`, блок `joined_late` в
+> `TodayPage`, defensive fallback в `StatusBadge`). Compose workaround для
+> overlay-конфликта — `image: nginx:1.27-alpine` + volume mount на bundle,
+> см. `docs/10-deploy.md` §9.1. **ВНИМАНИЕ:** не возвращать `build:` в compose
+> до диагностики overlay-конфликта (см. отдельную задачу в репо).
 
 ---
 
@@ -108,6 +115,17 @@ apps/frontend/src/
 - «Мои клубы» теперь живут только на странице профиля.
 
 ### ✅ Today (внутри клуба)
+
+**Обновлено 2026-08-09 (Pravki-subscribe-and-join + bug-fixes Z-19):**
+- `JoinPayModal` — модалка оплаты при первом вступлении (чекбокс подписки +
+  пресеты депозита из `topupPresets.ts`, отфильтрованные по `penalty_amount`,
+  кнопка «Оплатить X ₽» с total = `price_month + deposit`).
+- `JoinButton` — открывает `JoinPayModal` (вместо прямого POST `/join` как в PR #2).
+- Блок для статуса `joined_late` (новый Pravki-bug-fixes Z-19): «Вы вступили
+  после чек-ина. Следующая отметка — завтра.» Нейтральный тон (не штрафной).
+- Defensive fallback в `StatusBadge` для рассинхрона кэша браузера:
+  `statusConfig[status] ?? FALLBACK_BADGE` — unknown статус показывает `•`,
+  не падает (commit `564b8db`).
 - Hero-карточка с описанием привычки + окно чек-ина.
 - `StatusBadge`: ожидает / принят / пропущен / не в окне.
 - **Топик-фильтр чек-инов (миграция 010)**: кнопка «🎬 Сделать чек-ин» появляется
