@@ -150,15 +150,26 @@ services:
         condition: service_healthy
 
   frontend:
-    build:
-      context: ..
-      dockerfile: infra/docker/frontend.Dockerfile
+    # Pravki-subscribe-and-join §Z-19 (temporary workaround 2026-08-09):
+    # multi-stage Dockerfile (npm ci + nginx) ломается с overlay-конфликтом
+    # на @tanstack/react-query при rebuild. Диагностика не завершена.
+    # Вариант 1: используем базовый nginx:1.27-alpine + volume mount на bundle
+    # на хосте. Deploy: rsync apps/frontend/dist → /app/apps/frontend/dist,
+    # затем docker compose up -d frontend (БЕЗ --build).
+    # TODO: вернуть нормальный multi-stage build когда overlay-баг
+    # диагностирован и пофикшен (см. отдельную задачу в репо).
+    image: nginx:1.27-alpine
     container_name: habit-frontend
     restart: unless-stopped
     mem_limit: 96m
     memswap_limit: 128m
     cpus: 0.2
     volumes:
+      # Bundle с хоста (rsync'ится при deploy из apps/frontend/dist).
+      # Mount override'ит содержимое /usr/share/nginx/html в image — bundle
+      # переживает любой recreate/restart контейнера.
+      - /app/apps/frontend/dist:/usr/share/nginx/html
+      # Legacy: shared static volume (используется бэкендом для uploads).
       - club_uploads:/usr/share/nginx/html/static
     ports:
       - "127.0.0.1:5173:80"
