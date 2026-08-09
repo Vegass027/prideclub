@@ -107,7 +107,21 @@ async def list_members(
         if existing is not None:
             status = existing.status.value
         else:
-            status = "pending" if habit.is_within_checkin_window(now) else "missed"
+            # Pravki-bug-fixes §Z-19 (joiner-late protection):
+            # если Checkin на сегодня нет, определяем статус исходя из
+            # (а) membership.joined_at в TZ клуба — сегодня? после закрытия окна?
+            # (б) текущего времени в окне (нормальная pending/missed логика).
+            joined_in_club_tz = m.joined_at.astimezone(habit.tzinfo)
+            joined_today_in_club_tz = joined_in_club_tz.date() == club_date
+            if joined_today_in_club_tz and habit.was_joined_after_window(m.joined_at):
+                # Новичок сегодня, окно уже закрыто → нельзя поймать (can_catch
+                # станет False потому что status != 'missed'). На TodayPage самого
+                # юзера показывается нейтральный текст.
+                status = "joined_late"
+            elif habit.is_within_checkin_window(now):
+                status = "pending"
+            else:
+                status = "missed"
 
         # photo_url: relative путь, frontend обернёт в absolute URL
         # (Pravki §7.1 v3.1, nginx try_files на /api/v1/users/N/photo).

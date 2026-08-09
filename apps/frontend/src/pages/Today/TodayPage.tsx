@@ -367,6 +367,19 @@ export function TodayPage() {
         </section>
       )}
 
+      {/* Pravki-bug-fixes §Z-19 (joiner-late protection):
+          юзер вступил в клуб сегодня ПОСЛЕ checkin_window_end.
+          Нейтральный тон (не штрафной как missed, не зелёный как done).
+          Без мутации депозита и без CTA. */}
+      {checkin.status === "joined_late" && (
+        <section className="mt-4 rounded-card border border-muted/30 bg-muted/10 p-4 text-sm">
+          <strong className="block text-text">Вы вступили после чек-ина.</strong>
+          <span className="text-muted">
+            Следующая отметка — завтра.
+          </span>
+        </section>
+      )}
+
       <HabitNav habitId={habit.id} />
 
       <TopUpModal

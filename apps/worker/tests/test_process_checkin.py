@@ -678,3 +678,149 @@ async def test_process_checkin_rejected_redis_outage_survives(
     # rejected-результат вернулся, исключение НЕ пробросилось.
     assert result["ok"] is False
     assert result["code"] == "checkin_window_closed"
+
+
+# ---------------------------------------------------------------------------
+# Pravki-bug-fixes §Z-19: worker race-fallback для joined_late.
+#
+# Сценарий: бот pre-filter пропустил (старый бот, race, прямой вызов), и
+# worker всё равно отвергает joined_late. Проверяем что:
+# 1. result содержит code="joined_late" + window_start/end (race-fallback для бота).
+# 2. НЕ создаются Checkin/Penalty/Transaction (DB integrity).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_joined_late_returns_window_fallback(worker_db) -> None:
+    """Worker отвергает joined_late + возвращает window_start/end для race-fallback бота.
+
+    Это симметричная серверная защита от race / старого бота / прямого вызова
+    (Pravki-bug-fixes §Z-19). Даже если бот pre-filter был bypassed (или
+    юзер вступил между pre-filter и worker'ом), worker повторно блокирует
+    чек-ин и возвращает race-fallback данные для дружественного сообщения.
+    """
+    from datetime import datetime, timezone as tz
+    from zoneinfo import ZoneInfo
+    from worker.tasks.process_checkin import _process
+
+    MSK = ZoneInfo("Europe/Moscow")
+    # joined_at = 16:00 MSK сегодня (= 13:00 UTC) — после окна 06-12.
+    # Выбираем фиксированный час а не datetime.now() чтобы тест был
+    # time-stable (joined_late должен срабатывать даже если тест запускается
+    # в момент, когда окно открыто).
+    today_utc = datetime.now(tz=tz.utc)
+    joined_at = today_utc.replace(hour=13, minute=0, second=0, microsecond=0)
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=1501)
+        # Окно 06:00-12:00 MSK. joined_at = 16:00 MSK → после окна.
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=6,
+            checkin_window_end_hour=12,
+        )
+        await worker_db.add_membership(
+            session,
+            user_id=user.id,
+            habit_id=habit.id,
+            joined_at=joined_at,
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": 1501,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 150101,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    # Главное: race-fallback для бота.
+    assert result["ok"] is False, f"Expected ok=False, got: {result}"
+    assert result["code"] == "joined_late", (
+        f"Expected code='joined_late', got: {result.get('code')}"
+    )
+    # Window times для дружественного сообщения бота.
+    assert result["window_start"] == "06:00", (
+        f"Expected window_start='06:00', got: {result.get('window_start')}"
+    )
+    assert result["window_end"] == "12:00", (
+        f"Expected window_end='12:00', got: {result.get('window_end')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_joined_late_no_db_writes_in_worker(worker_db) -> None:
+    """При worker-level joined_late отказе НЕ создаются Checkin/Penalty/Transaction.
+
+    Симметричный тест backend Z-19.7: проверяет DB integrity и на уровне
+    worker'а (где реальные INSERT'ы могли бы произойти).
+    """
+    from datetime import datetime, timezone as tz
+    from zoneinfo import ZoneInfo
+    from app.models.checkin import Checkin
+    from app.models.penalty import Penalty
+    from app.models.transaction import Transaction
+    from sqlalchemy import select, func
+    from worker.tasks.process_checkin import _process
+
+    MSK = ZoneInfo("Europe/Moscow")
+    today_utc = datetime.now(tz=tz.utc)
+    joined_at = today_utc.replace(hour=13, minute=0, second=0, microsecond=0)
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=1502)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=6,
+            checkin_window_end_hour=12,
+        )
+        await worker_db.add_membership(
+            session,
+            user_id=user.id,
+            habit_id=habit.id,
+            joined_at=joined_at,
+        )
+        await session.commit()
+
+    # Считаем строки ДО вызова worker'а.
+    async with worker_db.session_factory() as session:
+        checks_before = await session.scalar(select(func.count()).select_from(Checkin)) or 0
+        penalties_before = await session.scalar(select(func.count()).select_from(Penalty)) or 0
+        tx_before = await session.scalar(select(func.count()).select_from(Transaction)) or 0
+
+    payload = {
+        "user_id": 1502,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 150201,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    assert result["ok"] is False
+    assert result["code"] == "joined_late"
+
+    # Считаем строки ПОСЛЕ. Должны быть идентичны (никто ничего не создал).
+    async with worker_db.session_factory() as session:
+        checks_after = await session.scalar(select(func.count()).select_from(Checkin)) or 0
+        penalties_after = await session.scalar(select(func.count()).select_from(Penalty)) or 0
+        tx_after = await session.scalar(select(func.count()).select_from(Transaction)) or 0
+
+    assert checks_after == checks_before, (
+        f"Checkin count changed: {checks_before} → {checks_after}. "
+        f"Worker created a Checkin despite joined_late rejection!"
+    )
+    assert penalties_after == penalties_before, (
+        f"Penalty count changed: {penalties_before} → {penalties_after}"
+    )
+    assert tx_after == tx_before, (
+        f"Transaction count changed: {tx_before} → {tx_after}"
+    )

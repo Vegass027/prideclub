@@ -2,7 +2,18 @@ export type ProofType = "video_note" | "photo" | "text";
 
 export type MembershipStatus = "active" | "paused" | "left";
 
-export type CheckinStatus = "done" | "missed" | "pending" | "not_started";
+// Pravki-bug-fixes §Z-19 (joiner-late protection): пользователь вступил
+// в клуб сегодня ПОСЛЕ checkin_window_end. can_catch=False в /members
+// (status != 'missed'). На TodayPage самого юзера показывается мягкий
+// текст "Вы вступили после чек-ина, следующая отметка — завтра".
+//
+// Pravki-bug-fixes §Z-21 (caught badge): "caught" добавится в §Z-21.3.
+export type CheckinStatus =
+  | "done"
+  | "missed"
+  | "pending"
+  | "not_started"
+  | "joined_late";
 
 export interface User {
   id: number;

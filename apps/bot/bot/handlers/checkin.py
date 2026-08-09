@@ -86,12 +86,17 @@ def _parse_proof(message: Message) -> dict[str, Any] | None:
     return None
 
 
-def _text_for_code(code: str | None, *, name: str = "") -> str:
+def _text_for_code(code: str | None, *, name: str = "", **kwargs) -> str:
     """Маппинг backend/worker code → пользовательский текст.
 
     `name` (first_name юзера) подставляется в шаблоны с {name}.
     Если name пустое — шаблон отрендерится без обращения, просто "{name}"
     останется плейсхолдером (намеренно: имя не всегда доступно).
+
+    Pravki-bug-fixes §Z-19: для code='joined_late' worker возвращает
+    дополнительные поля result['window_start'] / result['window_end']
+    для дружественного сообщения с временем окна клуба. Передаются
+    через **kwargs из handle_proof.
     """
     if code in ("forwarded",):
         return checkin_texts.REJECT_FORWARDED.format(name=name)
@@ -101,6 +106,12 @@ def _text_for_code(code: str | None, *, name: str = "") -> str:
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
     if code in ("out_of_window", "checkin_window_closed"):
         return checkin_texts.REJECT_OUT_OF_WINDOW.format(name=name)
+    if code in ("joined_late",):
+        return checkin_texts.REJECT_JOINED_LATE.format(
+            name=name,
+            start=kwargs.get("window_start", "?"),
+            end=kwargs.get("window_end", "?"),
+        )
     return checkin_texts.REJECT_UNKNOWN
 
 
@@ -173,6 +184,23 @@ async def _prefilter(
             extra={"user_id": user_id, "chat_id": chat_id},
         )
         return checkin_texts.REJECT_ALREADY_CHECKED_IN.format(name=name)
+
+    # Pravki-bug-fixes §Z-19 (joiner-late protection):
+    # Юзер вступил в клуб сегодня после закрытия checkin_window.
+    # Backend в HabitStateResponse уже посчитал is_joined_late через общий
+    # habit.was_joined_after_window — бот НЕ дублирует tz-логику.
+    # Возвращаем дружественное сообщение с временем окна (state['checkin_window_*']).
+    # Задача в Celery НЕ создаётся — return ниже прерывает поток.
+    if state.get("is_joined_late"):
+        log.info(
+            "prefilter_joined_late",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_JOINED_LATE.format(
+            name=name,
+            start=state.get("checkin_window_start", "?"),
+            end=state.get("checkin_window_end", "?"),
+        )
 
     if detected_type is None:
         # Defense — F.video_note|F.photo|F.text уже отфильтровали.
@@ -280,4 +308,16 @@ async def handle_proof(
         return
 
     log.warning("checkin_rejected", extra={"code": code})
-    await _reply(bot, message, _text_for_code(code, name=name))
+    # Pravki-bug-fixes §Z-19: для code='joined_late' worker возвращает
+    # window_start/window_end в result. Передаём их в _text_for_code чтобы
+    # race-fallback дал то же сообщение что и pre-filter (с временем окна).
+    await _reply(
+        bot,
+        message,
+        _text_for_code(
+            code,
+            name=name,
+            window_start=result.get("window_start"),
+            window_end=result.get("window_end"),
+        ),
+    )

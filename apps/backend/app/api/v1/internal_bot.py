@@ -293,6 +293,15 @@ class HabitStateResponse(BaseModel):
     checkin_topic_thread_id: int | None = None
     already_checked_in: bool = False
     checked_in_at: datetime | None = None
+    # Pravki-bug-fixes §Z-19 (joiner-late protection):
+    # бот проверяет is_joined_late в pre-filter и отвечает дружественным
+    # сообщением с window_start/window_end ("ваш первый чек-ин завтра").
+    # True если юзер вступил сегодня после закрытия checkin_window —
+    # вычисляется на backend через тот же habit.was_joined_after_window,
+    # что и /members handler (Z-19.4). Бот НЕ дублирует tz-логику.
+    is_joined_late: bool = False
+    checkin_window_start: str | None = None  # "HH:MM" — для текста ответа ботом
+    checkin_window_end: str | None = None
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -340,6 +349,22 @@ async def get_habit_state(
             already_checked_in = True
             checked_in_at = checkin.verified_at
 
+    # Pravki-bug-fixes §Z-19: joined_late вычисляется здесь ОДИН РАЗ на
+    # backend (общая tz-логика через habit.was_joined_after_window).
+    # Бот получает готовый bool + window times и не дублирует расчёты.
+    # При race (юзер вступил между двумя вызовами) — backend всегда
+    # читает свежее membership.joined_at из БД, бот доверяет.
+    # Defensive: membership может быть None (юзер без membership в клубе —
+    # /habit_state endpoint всё равно возвращает found=True чтобы бот знал
+    # про клуб, но joined_late неприменим). Аналогично joined_at=None
+    # в тестах.
+    is_joined_late = False
+    if membership is not None and membership.joined_at is not None:
+        joined_in_club_tz = membership.joined_at.astimezone(habit.tzinfo)
+        club_date_now = habit.club_date(datetime.now(tz=UTC))
+        if joined_in_club_tz.date() == club_date_now:
+            is_joined_late = habit.was_joined_after_window(membership.joined_at)
+
     return HabitStateResponse(
         found=True,
         habit_id=str(habit.id),
@@ -347,5 +372,8 @@ async def get_habit_state(
         checkin_topic_thread_id=habit.checkin_topic_thread_id,
         already_checked_in=already_checked_in,
         checked_in_at=checked_in_at,
+        is_joined_late=is_joined_late,
+        checkin_window_start=habit.checkin_window_start.strftime("%H:%M"),
+        checkin_window_end=habit.checkin_window_end.strftime("%H:%M"),
     )
 

@@ -330,7 +330,10 @@ async def worker_db(monkeypatch):
                 user_id=user_id,
                 habit_id=habit_id,
                 status=status or MembershipStatus.ACTIVE,
-                deposit_balance=deposit_balance,
+                # Pravki-deposit-sse.md §Z-2.1: deposit_balance мигрировал на
+                # users.deposit_balance. Членство не имеет этого поля с PR #1.
+                # Параметр deposit_balance сохранён в сигнатуре для backward-
+                # compat со старыми вызывами (ничего не делает).
                 joined_at=effective_joined_at,
             )
             session.add(m)

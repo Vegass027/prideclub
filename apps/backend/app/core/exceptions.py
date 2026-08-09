@@ -237,6 +237,21 @@ class InsufficientDepositError(DomainError):
         )
 
 
+class CheckinJoinedLateError(DomainError):
+    """422: пользователь вступил в клуб сегодня ПОСЛЕ закрытия checkin_window.
+
+    Pravki-bug-fixes §Z-19 (joiner-late protection): защита от попытки чек-ина
+    в день вступления. Используется и в worker `process_checkin` (симметричная
+    серверная защита против race / старого бота / прямого вызова), и в
+    CheckinService.get_today_status (для статуса в TodayResponse).
+
+    code = "joined_late" — бот мапит его в дружественное сообщение с
+    временем окна клуба (см. apps/bot/bot/handlers/checkin_texts.py).
+    """
+    status_code = 422
+    code = "joined_late"
+
+
 class InsufficientDepositChoiceError(DomainError):
     """422: deposit_amount_kopecks < habit.penalty_amount при subscribe_and_join.
 

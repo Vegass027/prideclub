@@ -6,6 +6,7 @@ from typing import Protocol
 
 from app.core.exceptions import (
     CheckinAlreadyExistsError,
+    CheckinJoinedLateError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     HabitArchivedError,
@@ -118,11 +119,40 @@ class CheckinService:
 
             raise ProofValidationError("wrong_type")
 
-        # Окно чек-ина — в TZ клуба.
+        # Pravki-bug-fixes §Z-19 (joiner-late protection): симметричная серверная
+        # защита от race / старого бота / прямого вызова / etc.
+        # ВАЖНО: проверяем joined_late ПЕРЕД обычной window check — иначе
+        # для новичка вступившего в 13:00 (окно 06-12) сначала сработал бы
+        # CheckinWindowClosedError (status_code == code "checkin_window_closed"),
+        # и joined_late никогда бы не был достигнут. Новичок должен получить
+        # специфическое сообщение "ваш первый чек-ин завтра", а не общее
+        # "окно закрыто".
+        # Запрос к membership.joined_at СВЕЖИЙ из БД (не из кеша) — это
+        # race-safe: если юзер вступил между pre-filter бота и этой проверкой,
+        # мы увидим актуальное состояние.
+        club_date = habit.club_date(now_utc)
+        # Defensive: joined_at=None пропускается (только в тестах).
+        if membership.joined_at is not None:
+            joined_in_club_tz = membership.joined_at.astimezone(habit.tzinfo)
+            if (
+                joined_in_club_tz.date() == club_date
+                and habit.was_joined_after_window(membership.joined_at)
+            ):
+                self._logger.info(
+                    "checkin_rejected_joined_late",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "joined_at_utc": membership.joined_at.isoformat(),
+                        "club_date": str(club_date),
+                    },
+                )
+                raise CheckinJoinedLateError()
+
+        # Окно чек-ина — в TZ клуба. Идёт ПОСЛЕ joined_late чтобы новичок
+        # получил специфический код, а не общий "checkin_window_closed".
         if not habit.is_within_checkin_window(now_utc):
             raise CheckinWindowClosedError()
-
-        club_date = habit.club_date(now_utc)
 
         try:
             checkin, created = await self._checkin_repo.get_or_create_done(
@@ -195,11 +225,28 @@ class CheckinService:
         if existing is not None:
             status = existing.status.value
         else:
-            window_open = habit.is_within_checkin_window(now_utc)
-            if window_open:
-                status = "pending"
-            else:
-                status = "missed"
+            # Defensive: joined_at может быть None в тестах (FakeMembershipRepo
+            # не задаёт поле). В проде NOT NULL constraint + server_default
+            # гарантируют значение, но мы не падаем на None.
+            joined_at = membership.joined_at
+            status = None
+            if joined_at is not None:
+                # Pravki-bug-fixes §Z-19 (joiner-late protection):
+                # joined_late имеет приоритет над pending/missed — даже если окно
+                # случайно открыто (race в TZ, DST и т.п.), joined_late остаётся.
+                # Это status для TodayResponse — UI TodayPage (Z-19.5) показывает
+                # отдельный блок для joined_late.
+                joined_in_club_tz = joined_at.astimezone(habit.tzinfo)
+                if (
+                    joined_in_club_tz.date() == club_date
+                    and habit.was_joined_after_window(joined_at)
+                ):
+                    status = "joined_late"
+            if status is None:
+                if habit.is_within_checkin_window(now_utc):
+                    status = "pending"
+                else:
+                    status = "missed"
 
         checkin_count = await self._checkin_repo.count_done_for_membership(
             str(membership.id)

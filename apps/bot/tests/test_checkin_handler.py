@@ -593,3 +593,118 @@ async def test_prefilter_video_note_too_short_takes_priority_over_wrong_type() -
     text = bot.sent[0]["text"]
     assert "Видео-кружочек" not in text
     assert "только" in text or "Фото" in text
+
+# ---------------------------------------------------------------------------
+# Pravki-bug-fixes §Z-19: bot pre-filter для joined_late.
+#
+# Сценарий: бот получает habit_state с is_joined_late=True →
+# 1. Отвечает REJECT_JOINED_LATE с подставленными start/end.
+# 2. НЕ создаёт Celery-задачу (backend.post не вызывается).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_skips_backend() -> None:
+    """is_joined_late=True → REJECT_JOINED_LATE с временем окна, без backend.post."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": True,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Главное: Celery-задача НЕ создаётся.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], (
+        f"Backend /internal/checkins/process must NOT be called for joined_late, "
+        f"got calls: {process_calls}"
+    )
+    # Юзеру отвечено с подставленным временем окна.
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "06:00" in text, f"Expected start '06:00' in response, got: {text}"
+    assert "12:00" in text, f"Expected end '12:00' in response, got: {text}"
+    assert "вступили" in text or "завтра" in text, (
+        f"Expected joined_late wording, got: {text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_falls_back_on_missing_window() -> None:
+    """Если is_joined_late=True но start/end отсутствуют (старый backend),
+    fallback на '?' (не падаем, не молчим)."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": True,
+            # start/end отсутствуют (на случай если кто-то использует старый backend)
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Backend process всё равно НЕ вызван.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == []
+    # Ответ отправлен с '?' fallback.
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "?" in text, f"Expected '?' fallback in response, got: {text}"
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_false_proceeds_to_backend() -> None:
+    """is_joined_late=False → обычный путь, backend.post вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+        response={"ok": True, "task_id": "t-1", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Celery-задача создаётся.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert len(process_calls) == 1, (
+        f"Expected backend /internal/checkins/process to be called once, "
+        f"got {len(process_calls)} calls"
+    )
+    # И ответ "Принято".
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "Принято" in text

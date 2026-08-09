@@ -12,6 +12,15 @@ class MembershipStatus(StrEnum):
 class CheckinStatus(StrEnum):
     DONE = "done"
     MISSED = "missed"
+    # Pravki-bug-fixes §Z-19 (joiner-late protection):
+    # юзер вступил в клуб сегодня ПОСЛЕ checkin_window_end.
+    # Защита от ловли в день вступления: can_catch=False в /members
+    # (status != 'missed').
+    JOINED_LATE = "joined_late"
+    # Pravki-bug-fixes §Z-21 (caught status badge):
+    # юзер пойман в этот день. PenaltyService.apply_catch пишет
+    # Checkin(status='caught') при успешной поимке. can_catch=False.
+    CAUGHT = "caught"
 
 
 class PenaltyReason(StrEnum):
