@@ -370,7 +370,7 @@ describe("JoinButton (Pravki-subscribe-and-join.md §Z-17)", () => {
     // Alert использует РЕАЛЬНУЮ списанную сумму (500 ₽, не UI-предпосчитанную 1500 ₽).
     // И явно говорит что подписка НЕ списывалась.
     await waitFor(() => {
-      const lastCall = warnSpy.mock.calls.at(-1);
+      const lastCall = warnSpy.mock.calls[warnSpy.mock.calls.length-1];
       expect(lastCall?.[0]).toBe("[showAlert]");
       expect(lastCall?.[1]).toMatch(/Списано 500 ₽/);
       expect(lastCall?.[1]).toMatch(/только депозит/);
@@ -420,7 +420,7 @@ describe("JoinButton (Pravki-subscribe-and-join.md §Z-17)", () => {
     await user.click(screen.getByRole("button", { name: /Оплатить .* ₽/i }));
 
     await waitFor(() => {
-      const lastCall = warnSpy.mock.calls.at(-1);
+      const lastCall = warnSpy.mock.calls[warnSpy.mock.calls.length-1];
       // toLocaleString("ru-RU") использует non-breaking space (U+00A0)
       // между разрядами, поэтому regex с обычным пробелом не подходит.
       expect(lastCall?.[1]).toMatch(/Списано 1[\s\u00a0]500 ₽/);
