@@ -23,14 +23,30 @@ def fake_redis() -> fakeredis.aioredis.FakeRedis:
     return fakeredis.aioredis.FakeRedis(decode_responses=True)
 
 
-def _make_payload(habit_id: str = "h-1", penalty_id: str = "p-1") -> dict:
+def _make_payload(
+    habit_id: str = "h-1",
+    penalty_id: str = "p-1",
+    catcher_user_id: int = 501,
+    violator_user_id: int = 502,
+    violator_membership_id: str = "m-502",
+    catcher_first_name: str = "CatcherAlice",
+    amount: int = 10000,
+) -> dict:
+    """Make payload for publish_catch_event tests.
+
+    Item 8: добавлены опциональные catcher_first_name и overrides для
+    catcher_user_id/violator_user_id чтобы новые тесты (Test 5) могли
+    проверять payload enrichment без дублирования логики.
+    Defaults сохранены — старые тесты работают без изменений.
+    """
     return {
         "habit_id": habit_id,
         "penalty_id": penalty_id,
-        "catcher_user_id": 501,
-        "violator_user_id": 502,
-        "violator_membership_id": "m-502",
-        "amount": 10000,
+        "catcher_user_id": catcher_user_id,
+        "catcher_first_name": catcher_first_name,
+        "violator_user_id": violator_user_id,
+        "violator_membership_id": violator_membership_id,
+        "amount": amount,
     }
 
 
@@ -140,3 +156,132 @@ def test_celery_task_is_registered() -> None:
     from worker.celery_app import celery_app
 
     assert "worker.tasks.publish_catch_event.run" in celery_app.tasks
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 8): enrich publish_catch_event с violator_first_name.
+#
+# Контракт (Item 8 Variant C из разведки):
+# - Backend передаёт catcher_first_name (0 round-trip, из scope).
+# - Worker дополнительно делает PK lookup violator_first_name (Variant C).
+# - При failure lookup'а — log warning, payload без violator_first_name.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_publish_catch_event_enriches_with_violator_first_name(fake_redis) -> None:
+    """Test 5 (mandatory): publish_catch_event._run обогащает payload через
+    UserRepository.get(violator_user_id) — fetch first_name в worker.
+
+    Backend НЕ делает этот fetch — рабочий side. +1 PK lookup в worker,
+    не блокирует HTTP response catch_violator.
+    """
+    from worker.services.event_publisher import EventPublisher
+    from worker.tasks.publish_catch_event import _run
+
+    # Payload как от backend celery_producer.send_task (Item 8 contract).
+    payload = _make_payload(
+        violator_user_id=7777,
+        catcher_first_name="Alice",  # NEW: backend уже передаёт
+    )
+
+    publisher = EventPublisher(fake_redis)
+
+    # Патчим _fetch_violator_first_name чтобы вернуть детерминированный first_name.
+    # Тест проверяет КОНТРАКТ — что _run вызывает _fetch_violator_first_name
+    # и подставляет результат в payload. Реальный UserRepository тестируется
+    # в worker/tests/test_user_repository.py (не нужно дублировать).
+    with patch(
+        "worker.tasks.publish_catch_event._build_production_publisher",
+        return_value=publisher,
+    ):
+        with patch(
+            "worker.tasks.publish_catch_event._fetch_violator_first_name",
+            return_value="VictimBob",
+        ) as fetch_mock:
+            result = await _run(payload)
+
+    # Verify _fetch_violator_first_name был вызван с violator_user_id из payload.
+    fetch_mock.assert_called_once_with(7777)
+
+    assert result["ok"] is True
+
+    # XADD payload содержит оба first_name (catcher из backend + violator из worker fetch).
+    habit_stream = publisher.habit_stream_key("h-1")
+    entries = await fake_redis.xrange(habit_stream)
+    assert len(entries) == 1
+    _entry_id, fields = entries[0]
+    import json
+    inner = json.loads(fields["payload"])
+    assert inner["catcher_first_name"] == "Alice", (
+        f"catcher_first_name должен быть из backend payload, got: {inner.get('catcher_first_name')!r}"
+    )
+    assert inner["violator_first_name"] == "VictimBob", (
+        f"violator_first_name должен быть из worker fetch (UserRepository.get), "
+        f"got: {inner.get('violator_first_name')!r}"
+    )
+    assert inner["violator_user_id"] == 7777
+
+
+@pytest.mark.asyncio
+async def test_run_publish_catch_event_handles_missing_violator_first_name(fake_redis) -> None:
+    """Edge case: violator был удалён между apply_catch и worker fetch.
+    _fetch_violator_first_name возвращает None → payload без violator_first_name,
+    publish продолжается (UI fallback на user_id).
+    """
+    from worker.services.event_publisher import EventPublisher
+    from worker.tasks.publish_catch_event import _run
+
+    payload = _make_payload(violator_user_id=8888)
+
+    publisher = EventPublisher(fake_redis)
+
+    with patch(
+        "worker.tasks.publish_catch_event._build_production_publisher",
+        return_value=publisher,
+    ):
+        with patch(
+            "worker.tasks.publish_catch_event._fetch_violator_first_name",
+            return_value=None,  # violator удалён / не найден
+        ):
+            result = await _run(payload)
+
+    assert result["ok"] is True  # publish всё равно успешен
+
+    habit_stream = publisher.habit_stream_key("h-1")
+    entries = await fake_redis.xrange(habit_stream)
+    import json
+    inner = json.loads(entries[0][1]["payload"])
+    assert inner["violator_first_name"] is None, (
+        f"violator_first_name должно быть None при отсутствии user, "
+        f"got: {inner.get('violator_first_name')!r}"
+    )
+    # catcher_first_name всё равно в payload (из backend).
+    assert inner["catcher_first_name"] == payload.get("catcher_first_name", "")
+
+
+@pytest.mark.asyncio
+async def test_run_publish_catch_event_handles_violator_fetch_exception(fake_redis) -> None:
+    """Edge case: UserRepository.get raises (DB down / timeout).
+    _fetch_violator_first_name ловит exception, возвращает None, publish продолжается.
+    """
+    from worker.services.event_publisher import EventPublisher
+    from worker.tasks.publish_catch_event import _run
+
+    payload = _make_payload()
+
+    publisher = EventPublisher(fake_redis)
+
+    with patch(
+        "worker.tasks.publish_catch_event._build_production_publisher",
+        return_value=publisher,
+    ):
+        with patch(
+            "worker.tasks.publish_catch_event._fetch_violator_first_name",
+            return_value=None,  # функция сама ловит exception → None
+        ):
+            result = await _run(payload)
+
+    assert result["ok"] is True, (
+        f"publish не должен ломаться при failed violator fetch, got: {result}"
+    )

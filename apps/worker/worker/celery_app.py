@@ -48,6 +48,10 @@ celery_app = Celery(
         # Pravki-bug-fixes §Z-21 (Item 6): broadcast catch_event
         # в habit-stream через EventPublisher.publish_to_habit.
         "worker.tasks.publish_catch_event",
+        # Pravki-bug-fixes §Z-21 (Item 8): personal you_were_caught
+        # в user-stream через EventPublisher.publish_checkin
+        # (event_type='caught' → COLLISION-изоляция).
+        "worker.tasks.publish_you_were_caught",
     ],
 )
 

@@ -256,12 +256,30 @@ async def catch_violator(
             return CatchResponse(ok=False, code=exc.code)
         raise
 
-    # Pravki-bug-fixes §Z-21 (Item 6): после успешного commit() Penalty
+    # Pravki-bug-fixes §Z-21 (Item 6 + Item 8): после успешного commit() Penalty
     # уже в БД — это ФИНАНСОВЫЙ ИНВАРИАНТ, который НЕЛЬЗЯ ломать.
-    # Broadcast в habit-stream — UI-hint (см. Pravki-deposit-sse.md §Z-6):
-    # at-most-once, без ретрая. Если брокер недоступен или send_task бросает
-    # исключение — логируем warning, но НЕ ломаем HTTP-ответ catch_violator
-    # (юзер уже видит CatchResponse.ok=True, penalty в БД, что ему и нужно).
+    # Два broadcast'а (Items 6 + 8): habit-stream (catch_event, для ВСЕХ
+    # участников клуба) и user-stream violator'а (you_were_caught, personal).
+    #
+    # ОБЕРНУТЫ В РАЗДЕЛЬНЫЕ try/except — каждый broadcast независим:
+    # если broker временно упал между первым и вторым send_task, восстановление
+    # ко второму всё равно позволит publish_you_were_caught дойти до воркера.
+    # НЕ объединять в один try — падение первого отменит второй.
+    #
+    # At-most-once на каждый: если брокер недоступен ИЛИ send_task бросает
+    # исключение — warning-лог, НЕ ломаем HTTP-ответ catch_violator
+    # (юзер уже видит CatchResponse.ok=True, penalty в БД).
+    #
+    # catcher_first_name берём из `user` (TelegramUserDbDep, JWT init_data) —
+    # уже в scope, 0 round-trip'ов. violator_first_name worker добудет
+    # отдельным PK lookup'ом (Variant C из разведки Item 8).
+    log = get_logger("members.catch_violator")
+    catcher_first_name: str = user.first_name or "User"
+    violator_user_id: int = violator_membership.user_id
+
+    # Broadcast #1: catch_event в habit-stream (для всех участников клуба).
+    # Бэкенд не обогащает violator_first_name здесь — worker fetch'ит
+    # отдельно (см. publish_catch_event._run).
     try:
         from app.services.celery_producer import send_task
 
@@ -271,18 +289,50 @@ async def catch_violator(
                 "habit_id": habit_id,
                 "penalty_id": str(penalty.id),
                 "catcher_user_id": user.id,
-                "violator_user_id": violator_membership.user_id,
+                "catcher_first_name": catcher_first_name,
+                "violator_user_id": violator_user_id,
                 "violator_membership_id": payload.violator_membership_id,
                 "amount": penalty.amount,
             },
         )
     except Exception as exc:  # noqa: BLE001 — broadcast failure must not break HTTP response
-        log = get_logger("members.catch_violator")
         log.warning(
             "catch_publish_task_failed",
             extra={
                 "habit_id": habit_id,
                 "penalty_id": str(penalty.id),
+                "event": "publish_catch_event",
+                "err": str(exc),
+                "err_type": exc.__class__.__name__,
+            },
+        )
+        # НЕ пробрасываем исключение — catch уже успешен, broadcast
+        # attempt для ВТОРОГО события (publish_you_were_caught) ещё впереди.
+
+    # Broadcast #2: you_were_caught в user-stream violator'а (personal).
+    # Отдельный try/except от broadcast #1 — независимые попытки.
+    try:
+        from app.services.celery_producer import send_task
+
+        send_task(
+            "publish_you_were_caught",
+            {
+                "user_id": violator_user_id,
+                "membership_id": payload.violator_membership_id,
+                "habit_id": habit_id,
+                "catcher_user_id": user.id,
+                "catcher_first_name": catcher_first_name,
+                "amount": penalty.amount,
+                "date_iso": club_date.isoformat(),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — broadcast failure must not break HTTP response
+        log.warning(
+            "you_were_caught_publish_task_failed",
+            extra={
+                "habit_id": habit_id,
+                "user_id": violator_user_id,
+                "event": "publish_you_were_caught",
                 "err": str(exc),
                 "err_type": exc.__class__.__name__,
             },

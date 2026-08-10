@@ -8,4 +8,5 @@ from . import (  # noqa: F401
     process_penalty,
     process_payment,
     publish_catch_event,
+    publish_you_were_caught,
 )

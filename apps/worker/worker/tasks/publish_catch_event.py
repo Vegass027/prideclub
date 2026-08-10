@@ -1,4 +1,4 @@
-"""Pravki-bug-fixes §Z-21 (Item 6): broadcast catch_event в habit-stream.
+"""Pravki-bug-fixes §Z-21 (Item 6 + Item 8): broadcast catch_event в habit-stream.
 
 После apply_catch на backend'е (через POST /api/v1/habits/{id}/catch) handler
 отправляет celery-таску ``publish_catch_event`` через `send_task()`.
@@ -9,9 +9,16 @@ SSE-клиенты этого клуба получают событие чер�
 - habit_id: str — UUID клуба
 - penalty_id: str — UUID Penalty row (для idempotency_key scope_suffix)
 - catcher_user_id: int — кто поймал
+- catcher_first_name: str — для UI (Item 9) — кэтчер показывается в Members/Today
 - violator_user_id: int — кого поймали
 - violator_membership_id: str — для broadcast'а фронт знает кто жертва
 - amount: int — копейки
+
+Worker fetch (Item 8, Variant C из разведки):
+- violator_first_name: int — PK lookup в `users` по violator_user_id.
+  Backend НЕ делает этот fetch (выбран Вариант C чтобы держать backend
+  image-light). +1 query в worker (отдельный процесс, не блокирует
+  HTTP response).
 
 Backend Items 8 (catching victim display) и Item 9 (UI hook) будут
 использовать payload для invalidate ["members", "today", "balance"].
@@ -55,6 +62,43 @@ def _build_production_publisher():
     return EventPublisher(aioredis.from_url(redis_url, decode_responses=True))
 
 
+def _fetch_violator_first_name(violator_user_id: int) -> str | None:
+    """PK lookup violator по ID. Отдельный worker fetch (Variant C).
+
+    Returns:
+        first_name str если найден, иначе None (юзер удалён между
+        apply_catch и этой таской — крайне маловероятный race).
+    """
+    import asyncio
+
+    from app.core.logging import get_logger as _log
+    from app.repositories.user_repository import UserRepository
+
+    async def _get() -> str | None:
+        # Worker НЕ имеет постоянной DB-сессии (нет async_session_factory
+        # в worker процессе — celery task живёт в одной короткой корутине).
+        # Создаём сессию on-demand, закрываем после запроса.
+        from app.db.session import get_session_factory
+
+        async with get_session_factory()() as session:
+            repo = UserRepository(session)
+            user = await repo.get(violator_user_id)
+            return user.first_name if user else None
+
+    try:
+        return asyncio.run(_get())
+    except Exception as exc:  # noqa: BLE001 — enrichment failure must not break publish
+        _log("worker.publish_catch_event").warning(
+            "violator_first_name_fetch_failed",
+            extra={
+                "violator_user_id": violator_user_id,
+                "err": str(exc),
+                "err_type": exc.__class__.__name__,
+            },
+        )
+        return None
+
+
 async def _run(payload: dict) -> dict:
     """Async-логика broadcast'а. Раздельно от task wrapper для тестируемости.
 
@@ -78,11 +122,18 @@ async def _run(payload: dict) -> dict:
         )
         return {"ok": False, "skipped": False, "reason": "no_redis_configured"}
 
+    # Item 8: PK lookup violator's first_name (отдельный worker fetch).
+    # Failure в этом lookup'е не должен ломать publish — log warning, payload
+    # без violator_first_name (UI fallback на user_id).
+    violator_first_name = _fetch_violator_first_name(payload["violator_user_id"])
+
     xadd_payload = {
         "event": "catch",  # inner XADD event field (для UI маппинга)
         "habit_id": habit_id,
         "catcher_user_id": payload["catcher_user_id"],
+        "catcher_first_name": payload.get("catcher_first_name", "User"),
         "violator_user_id": payload["violator_user_id"],
+        "violator_first_name": violator_first_name,  # may be None on race
         "violator_membership_id": payload["violator_membership_id"],
         "amount": payload["amount"],
         "penalty_id": penalty_id,
@@ -132,4 +183,4 @@ if celery_app is not None:
         return asyncio.run(_run(payload))
 
 
-__all__ = ["run", "_run", "_build_production_publisher"]
+__all__ = ["run", "_run", "_build_production_publisher", "_fetch_violator_first_name"]
