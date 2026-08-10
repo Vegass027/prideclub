@@ -64,7 +64,7 @@ class RedisStreamBus:
 
     @staticmethod
     def stream_key(user_id: int, habit_id: str) -> str:
-        """Ключ стрима — идентичен `EventPublisher.stream_key` (Step 3).
+        """Ключ Redis Stream — идентичен `EventPublisher.stream_key` (Step 3).
 
         Хранится здесь (в дополнение к `worker.services.event_publisher`)
         потому что:
@@ -77,6 +77,22 @@ class RedisStreamBus:
           не через импорт.
         """
         return f"sse:user:{user_id}:{habit_id}"
+
+    @staticmethod
+    def habit_stream_key(habit_id: str) -> str:
+        """Ключ Redis Stream habit-broadcast — идентичен `EventPublisher.habit_stream_key` (Item 6).
+
+        Producer (`publish_to_habit` в worker) пишет в этот ключ,
+        consumer (`read_blocking_multiplex` в backend) читает. Контракт
+        через строки (оба image содержат одинаковую реализацию), не
+        через shared-пакет — аналогично `stream_key` выше.
+
+        Добавлен в Item 7 (SSE multiplex). Legacy clients (v1) не
+        используют этот стрим (см. handler `stream_sse_events`,
+        Variant 1 — habit-stream подписывается только при
+        `last_event_id_habit is not None`).
+        """
+        return f"sse:habit:{habit_id}"
 
     @staticmethod
     def resolve_start_id(
@@ -152,6 +168,74 @@ class RedisStreamBus:
         # У нас в streams всегда ровно один stream — берём первый элемент.
         _stream_name, entries = result[0]
         return [(entry_id, fields) for entry_id, fields in entries]
+
+    async def read_blocking_multiplex(
+        self,
+        streams: dict[str, str],
+    ) -> list[tuple[str, str, dict[str, str]]]:
+        """Multiplex: один XREAD BLOCK на НЕСКОЛЬКО стримов с независимыми
+        курсорами (Pravki-deposit-sse.md §Z-6.7, Item 7).
+
+        Args:
+            streams: `{stream_key: start_id}` — один или более ключей Redis
+                Streams с независимыми стартовыми позициями. Redis
+                поддерживает `XREAD STREAMS k1 k2 id1 id2` нативно (один
+                round-trip, один блок на все стримы одновременно).
+
+        Returns:
+            Плоский список `(stream_name, entry_id, fields)` — order НЕ
+            гарантирован между стримами (Redis spec). Генератор
+            обновляет per-stream cursor по `stream_name`.
+
+            Пустой список если block-таймаут на ВСЕ стримы одновременно
+            (любое событие на ЛЮБОМ стриме снимает блок и попадает в
+            ответ).
+
+        Backward-compat: существующий `read_blocking` не тронут. Legacy
+        клиенты (v1, без `last_event_id_habit`) вызывают `read_blocking`
+        через single-stream dict `{user_stream: id}` в generator'е — Item 7
+        не заставляет всех клиентов переходить на multiplex.
+
+        Raises:
+            Любые исключения redis (ConnectionError, timeout и т.п.)
+            пробрасываются — generator ловит в finally (cleanup → release).
+            Здесь логируем `sse_xread_multiplex_failed` с per-stream info
+            для диагностики.
+
+        Note:
+            При пустом `streams={}` метод сразу возвращает `[]` без обращения
+            к Redis — защита от race condition / missconfig.
+        """
+        if not streams:
+            return []
+
+        try:
+            result = await self._redis.xread(
+                streams,
+                count=self._count,
+                block=self._block_ms,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "sse_xread_multiplex_failed",
+                extra={
+                    "stream_keys": sorted(streams.keys()),
+                    "err": type(exc).__name__,
+                },
+            )
+            raise
+
+        if not result:
+            return []
+
+        # Redis spec: XREAD STREAMS возвращает
+        # `[(stream_name, [(entry_id, fields), ...]), ...]`.
+        # Flatten в плоский список `(stream_name, entry_id, fields)`.
+        out: list[tuple[str, str, dict[str, str]]] = []
+        for stream_name, entries in result:
+            for entry_id, fields in entries:
+                out.append((stream_name, entry_id, fields))
+        return out
 
 
 __all__ = [
