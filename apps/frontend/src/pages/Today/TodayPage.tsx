@@ -367,6 +367,19 @@ export function TodayPage() {
         </section>
       )}
 
+      {/* Pravki-bug-fixes §Z-21 (caught badge): жертва поимки за сегодня.
+          Отдельная ветка от missed — текст другой потому что сценарий разный:
+          - missed = cron `close_catch_window` списал депозит (никто не ловил).
+          - caught = другой участник поймал, штраф ушёл в приз-фонд. */}
+      {checkin.status === "caught" && (
+        <section className="mt-4 rounded-card border border-danger/30 bg-danger/10 p-4 text-sm">
+          <strong className="block text-danger">Вас поймали.</strong>
+          <span className="text-muted">
+            Вы не выполнили ежедневное задание вовремя. Штраф списан в призовой фонд клуба.
+          </span>
+        </section>
+      )}
+
       {/* Pravki-bug-fixes §Z-19 (joiner-late protection):
           юзер вступил в клуб сегодня ПОСЛЕ checkin_window_end.
           Нейтральный тон (не штрафной как missed, не зелёный как done).

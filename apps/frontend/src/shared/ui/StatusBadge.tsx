@@ -8,6 +8,10 @@ const statusConfig: Record<CheckinStatus, { label: string; classes: string; emoj
   // Pravki-bug-fixes §Z-19 (joiner-late protection):
   // нейтральный тон, без warning/danger/success — пользователь только вступил.
   joined_late: { label: "Присоединился поздно", classes: "bg-muted/15 text-muted border-muted/30", emoji: "🌙" },
+  // Pravki-bug-fixes §Z-21 (caught badge): юзер пойман другим участником за
+  // сегодняшний пропуск. Тон — danger/red, как missed (разница в тексте ниже
+  // на TodayPage). Emoji 🎯 чтобы визуально отделить от missed (❌).
+  caught: { label: "Пойман", classes: "bg-danger/15 text-danger border-danger/30", emoji: "🎯" },
 };
 
 // Defensive fallback для рассинхрона кэша браузера:

@@ -13,7 +13,10 @@ export type CheckinStatus =
   | "missed"
   | "pending"
   | "not_started"
-  | "joined_late";
+  | "joined_late"
+  // Pravki-bug-fixes §Z-21 (caught badge): юзер пойман за пропуск сегодня.
+  // PenaltyService.apply_catch пишет Checkin(status='caught') (PR Item 2).
+  | "caught";
 
 export interface User {
   id: number;
