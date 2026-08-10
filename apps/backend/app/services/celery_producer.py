@@ -22,6 +22,11 @@ _TASK_NAMES: dict[str, str] = {
     "checkin": "worker.tasks.process_checkin.run",
     "penalty": "worker.tasks.process_penalty.run",
     "payment": "worker.tasks.process_payment.run",
+    # Pravki-bug-fixes §Z-21 (Item 6): broadcast catch_event в habit-stream.
+    # Backend → worker через Variant Б из разведки Item 6 (см. Pravki-deposit-sse.md §Z-12).
+    # Order: catch_violator вызывает send_task ТОЛЬКО после session.commit(),
+    # чтобы Penalty был уже в БД (см. members.py:catch_violator).
+    "publish_catch_event": "worker.tasks.publish_catch_event.run",
 }
 
 

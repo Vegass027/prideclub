@@ -12,6 +12,7 @@ from app.api.v1.users import TelegramUserDbDep
 from app.core.constants import CheckinStatus
 from app.core.deps import RedisDep, SessionDep
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
+from app.core.logging import get_logger
 from app.models.checkin import Checkin
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
@@ -219,6 +220,16 @@ async def catch_violator(
     catcher_membership = await membership_repo.get_for_user_in_habit(user.id, habit_id)
     club_date = (await habit_repo.get(habit_id)).club_date(datetime.now(tz=UTC))  # type: ignore[union-attr]
 
+    # Pravki-bug-fixes §Z-21 (Item 6): для broadcast'а catch_event нужен
+    # violator.user_id. Достаём ДО apply_catch (в той же сессии), чтобы
+    # после commit() объект остался доступен без re-fetch.
+    violator_membership = await membership_repo.get(payload.violator_membership_id)
+    if violator_membership is None:
+        # Race: юзер удалён между pre-filter и apply_catch. Не должно
+        # случаться в норме (MembershipNotFoundError будет в service),
+        # но защищаемся явно.
+        return CatchResponse(ok=False, code="violator_membership_not_found")
+
     try:
         penalty = await service.apply_catch(
             catcher_user_id=user.id,
@@ -227,7 +238,6 @@ async def catch_violator(
             catcher_membership_id=str(catcher_membership.id) if catcher_membership else None,
         )
         await session.commit()
-        return CatchResponse(ok=True, amount=penalty.amount)
     except PenaltyAlreadyProcessedError as exc:
         await session.rollback()
         return CatchResponse(ok=False, code=exc.code)
@@ -245,3 +255,38 @@ async def catch_violator(
         if isinstance(exc, DomainError):
             return CatchResponse(ok=False, code=exc.code)
         raise
+
+    # Pravki-bug-fixes §Z-21 (Item 6): после успешного commit() Penalty
+    # уже в БД — это ФИНАНСОВЫЙ ИНВАРИАНТ, который НЕЛЬЗЯ ломать.
+    # Broadcast в habit-stream — UI-hint (см. Pravki-deposit-sse.md §Z-6):
+    # at-most-once, без ретрая. Если брокер недоступен или send_task бросает
+    # исключение — логируем warning, но НЕ ломаем HTTP-ответ catch_violator
+    # (юзер уже видит CatchResponse.ok=True, penalty в БД, что ему и нужно).
+    try:
+        from app.services.celery_producer import send_task
+
+        send_task(
+            "publish_catch_event",
+            {
+                "habit_id": habit_id,
+                "penalty_id": str(penalty.id),
+                "catcher_user_id": user.id,
+                "violator_user_id": violator_membership.user_id,
+                "violator_membership_id": payload.violator_membership_id,
+                "amount": penalty.amount,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — broadcast failure must not break HTTP response
+        log = get_logger("members.catch_violator")
+        log.warning(
+            "catch_publish_task_failed",
+            extra={
+                "habit_id": habit_id,
+                "penalty_id": str(penalty.id),
+                "err": str(exc),
+                "err_type": exc.__class__.__name__,
+            },
+        )
+        # НЕ пробрасываем исключение — catch уже успешен.
+
+    return CatchResponse(ok=True, amount=penalty.amount)
