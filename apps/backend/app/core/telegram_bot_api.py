@@ -41,5 +41,29 @@ def get_session() -> aiohttp.ClientSession:
     return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
 
-__all__ = ["get_session"]
+# === Backward-compat алиасы для main.py + deps.py (post-stash cleanup) ===
+# Stash@{0} обновил 4 файла (deps.py, telegram_bot_api.py, avatar_service.py,
+# test_avatar_service.py) но НЕ обновил main.py который импортирует
+# make_session/close_session из telegram_bot_api. А deps.py ожидает
+# get_bot_http как callable. Алиасы сохраняют обе API до отдельного PR
+# на рефакторинг main.py (убрать singleton session из lifespan, раз
+# новая модель handler-scoped).
+
+async def close_session(session: aiohttp.ClientSession) -> None:
+    """Закрывает переданную сессию (lifespan shutdown).
+
+    Идемпотентно — если сессия уже закрыта, не валится.
+    """
+    if session is not None and not session.closed:
+        await session.close()
+
+
+# make_session / get_bot_http — алиасы для единой handler-scoped фабрики.
+# main.py использует make_session() в lifespan (хотя теперь это просто
+# создаёт новую сессию без глобального состояния — caller сам хранит).
+make_session = get_session
+get_bot_http = get_session
+
+
+__all__ = ["get_session", "close_session", "make_session", "get_bot_http"]
 
