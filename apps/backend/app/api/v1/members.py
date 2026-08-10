@@ -16,6 +16,7 @@ from app.models.checkin import Checkin
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.catch_rate_limiter import RedisCatchRateLimiter
 from app.services.penalty_service import PenaltyService
@@ -68,6 +69,7 @@ async def list_members(
     habit_repo = HabitRepository(session)
     membership_repo = MembershipRepository(session)
     checkin_repo = CheckinRepository(session)
+    penalty_repo = PenaltyRepository(session)
 
     habit = await habit_repo.get(habit_id)
     if habit is None or habit.archived_at is not None:
@@ -99,6 +101,15 @@ async def list_members(
             )
         ).all()
         counts = {str(m_id): int(c) for m_id, c in rows}
+
+    # Pravki-bug-fixes §Z-21 (can_catch fix): если у юзера есть ЛЮБОЙ Penalty
+    # за club_date (caught ИЛИ window_closed_no_catch) — повторный catch даст
+    # amount=0 / penalty_already_processed, поэтому can_catch=False.
+    # Один batch-запрос по всем членам клуба (по аналогии с counts).
+    penalty_set: set[str] = await penalty_repo.ids_with_any_penalty_today(
+        membership_ids=member_ids,
+        club_date=club_date,
+    )
 
     now = datetime.now(tz=UTC)
     members: list[MemberRowOut] = []
@@ -139,7 +150,11 @@ async def list_members(
                 username=None,
                 status=status,
                 checkin_count=counts.get(str(m.id), 0),
-                can_catch=user.id != m.user_id and status == "missed",
+                can_catch=(
+                    user.id != m.user_id
+                    and status == "missed"
+                    and str(m.id) not in penalty_set
+                ),
                 photo_url=photo_url,
             )
         )

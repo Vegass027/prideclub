@@ -63,3 +63,42 @@ class PenaltyRepository:
             [membership_id], as_violator=as_violator
         )
         return result.get(str(membership_id), (0, 0))
+
+    async def ids_with_any_penalty_today(
+        self,
+        *,
+        membership_ids: list[str],
+        club_date,
+    ) -> set[str]:
+        """Возвращает {membership_id} для которых есть ЛЮБОЙ Penalty за club_date.
+
+        Pravki-bug-fixes §Z-21 (can_catch fix): даже если Checkin на
+        сегодня ещё не записан (apply_window_expired применяется раньше),
+        сам факт Penalty за день означает что юзер уже получил штраф
+        (cron `close_catch_window` или apply_catch) и повторный catch
+        даст amount=0 / penalty_already_processed — поэтому can_catch=False.
+
+        Используется в `members.py` для одного batch-запроса по всем
+        членам клуба (по аналогии с `counts`).
+        """
+        if not membership_ids:
+            return set()
+        result = await self._session.execute(
+            select(Penalty.membership_id).where(
+                Penalty.membership_id.in_(membership_ids),
+                Penalty.date == club_date,
+            )
+        )
+        return {str(m_id) for m_id, in result.all()}
+
+    async def has_any_penalty_today(
+        self,
+        *,
+        membership_id: str,
+        club_date,
+    ) -> bool:
+        """Single-membership shortcut над `ids_with_any_penalty_today`."""
+        return membership_id in await self.ids_with_any_penalty_today(
+            membership_ids=[membership_id],
+            club_date=club_date,
+        )
