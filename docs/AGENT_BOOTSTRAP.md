@@ -643,3 +643,99 @@ PostgreSQL 16 (9 миграций, 16 таблиц). Кэш + очереди = R
 VPS 4 (Германия, не РФ), nginx на хосте как reverse proxy. Деплой — rsync +
 `docker compose build` + `up -d`. Деньги — `int` копейки. Auth — двухконтурная
 (initData + service-token JWT с aud/iss/exp). Платежи = мок на фронте.
+## 11. Серия фиксов §Z-21 (2026-08-10, snapshot)
+
+> **Snapshot 2026-08-10.** Закрытая серия из 9 items + docs. Все коммиты в `feat/subscribe-and-join`.
+
+### Карта серии (все задеплоены на проде)
+
+| Item | Что | Commit |
+|---|---|---|
+| 1+2 | `can_catch` в /members видит Penalty + `Checkin(status)` при Penalty | `106734b` |
+| 3 | StatusBadge «Пойман» 🎯 + TodayPage caught-секция | `af9b22a` |
+| 4 | Бот + воркер отклоняют повторный чек-ин после поимки | `f429f80` |
+| 5 | `checkin_window_closed` с реальным временем окна | `be6702d` |
+| 6 | `publish_to_habit` + worker task `publish_catch_event` (Variant Б) | `175c3ff` |
+| 7 | SSE multiplex с двумя cursor'ами | `527f67e` |
+| 8 | catch + you_were_caught broadcasts (HTTP catch_violator only) | `cb5938d` |
+| 9 | `useHabitSse` hook (frontend) | `d94fc91` |
+| Docs | AGENT_BOOTSTRAP §8.1+§8.2+§8.3 (image-based deploy уроки) | `3a4d936` |
+| Infra | telegram_bot_api алиасы + http_factory restore (compat с stash) | `0d6855b`, `0087d15` |
+
+### Runtime user-flow (после Items 1-9)
+
+1. **Юзер открывает клуб** → `GET /habits/{id}/today` → рендер. `useHabitSse`
+   открывает multiplex SSE-стрим (`?last_event_id=$&last_event_id_habit=$`).
+
+2. **Юзер делает чек-ин** → бот pre-filter → `POST /internal/checkins/process`
+   → defense-in-depth (`CheckinJoinedLateError` / `CheckinAlreadyCaughtError`)
+   → worker `process_checkin` → XADD в `sse:user:{u}:{h}` → SSE-event
+   `checkin.accepted` → frontend `setQueryData(["today", habitId], payload)`.
+
+3. **Юзер поймал кого-то** (кнопка «Поймать») → backend `apply_catch` →
+   **ДВА `send_task` в раздельных `try/except`** (Item 8):
+   - `publish_catch_event` → worker XADD в `sse:habit:{h}` (broadcast — все
+     участники получают `catch` event).
+   - `publish_you_were_caught` → worker XADD в `sse:user:{violator}:{h}`
+     (personal для жертвы).
+   На frontend: multiplex EventSource доставляет оба event'а. `invalidateQueries`
+   для members/today/wallet/balance, haptic medium (catch) + haptic warning
+   (you_were_caught).
+
+4. **Cron `close_catch_window`** → `penalty_service.apply_window_expired`
+   пишет `Penalty(reason=WINDOW_CLOSED_NO_CATCH)` + `Checkin(status='missed')`.
+   UI пропустивших обновляется только при следующем mount через `staleTime`
+   / `refetch` (**НЕ через realtime SSE — осознанное ограничение Item 8**).
+   В cron-сценарии нет `catcher_user_id`/`catcher_first_name` для payload —
+   если broadcast нужен, потребуется отдельный Item 10.
+
+5. **Юзер пытается повторно чек-инуть после поимки** → бот pre-filter ловит
+   `caught_today` → REJECT_CAUGHT_TODAY (текст разный для apply_catch vs cron).
+   Defense-in-depth на backend: `CheckinAlreadyCaughtError`.
+
+### Архитектурные решения (Items 6-9)
+
+- **Variant Б (Item 6):** Backend → Celery task → Worker `EventPublisher`.
+  Backend НЕ знает про Redis Streams / async Redis. `include=[]` —
+  backend не импортирует worker tasks. +0 строк shared кода.
+- **Multiplex SSE (Item 7):** Один `EventSource` читает оба стрима
+  (`sse:user:{u}:{h}` + `sse:habit:{h}`) с per-stream cursor'ами.
+  Backend XREAD STREAMS multiplexes в одном round-trip. Frontend multiplexes
+  в одном EventSource.
+- **Variant 1 backward-compat (Item 7):** Legacy v1 клиент (без
+  `last_event_id_habit`) → только user-stream (habit-stream физически не
+  подписан). Drift detection warning (`sse_multiplex_drift_detected`) в
+  backend для диагностики frontend-bug'а.
+- **COLLISION-изоляция (Item 6 + Item 8):** `idempotency_key(..., event_type='caught')`
+  → `sse_published:caught:{m}:{d}` — независимый namespace от
+  `sse_published:checkin:{m}:{d}`. Утренний `checkin.rejected` не блокирует
+  вечерний `you_were_caught`.
+- **SEPARATE try/except (Item 8):** Два `send_task` в catch_violator обёрнуты
+  в раздельные try/except — если broker упал на первом, второй всё равно
+  вызывается. Тест `test_catch_handler_two_send_tasks_independent_try_except`
+  покрывает через `side_effect=[Exception, None]`.
+- **Wallet invalidate (Q2 разведки):** Frontend инвалидирует wallet в обоих
+  event-listener'ах (`catch` и `you_were_caught`). React Query dedup'ит через
+  `notifyManager.batch` + `setTimeout(0)` — безопасно (исследовано из
+  исходников, не предположение).
+
+### Тестовый baseline
+
+| Слой | Passed | Pre-existing failed | Замечание |
+|---|---|---|---|
+| Backend | 364 | 11 | admin_habits_api (нужен Redis), user_photo_endpoint (mock AvatarService) |
+| Worker | 77 | 9 | test_process_penalty и др. |
+| Bot | 40 | 0 | все зелёные |
+| Frontend | 48 | 0 | все зелёные |
+
+**20 pre-existing фейлов — baseline, не регрессии серии.** Подтверждено через
+`git stash` проверки до/после каждого Item.
+
+### Известные ограничения (НЕ в серии §Z-21)
+
+- **Cron `apply_window_expired` НЕ транслирует SSE broadcast** — осознанное
+  ограничение Item 8 (нет catcher'а в payload). При необходимости — Item 10.
+- **Платежи = мок** (backend flow есть, но bot не вызывает `send_invoice`).
+- **Sentry/Grafana/Prometheus** не задеплоены (см. §9 AGENT_BOOTSTRAP).
+- **`_b` legacy debug-файлы в `/tmp/`** — не чистил, не моя задача.
+- **2 user_photo_endpoint fail + 9 admin_habits_api fail** — pre-existing.
