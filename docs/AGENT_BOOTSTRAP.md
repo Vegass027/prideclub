@@ -269,18 +269,24 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "..."
 git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin main
 
 # Только после явного "ок" на деплой:
-# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг
+# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг.
+# ВАЖНО: backend, worker, bot — image-based контейнеры (см. §8.1 ниже).
+# Каждый сервис требует СВОЙ rsync + СВОЙ docker compose build.
+# Стейджинг /tmp/privichki_new/{backend,worker,bot} должен существовать.
 rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
 rsync -az --delete apps/worker/  privichki-prod:/tmp/privichki_new/worker/
+rsync -az --delete apps/bot/     privichki-prod:/tmp/privichki_new/bot/
 
 # 2. Применение в /app
-ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
+ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/ && rsync -az --delete /tmp/privichki_new/bot/ /app/apps/bot/'
 
-# 3. Пересборка + рестарт контейнеров
-ssh privichki-prod 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
+# 3. Пересборка + рестарт контейнеров (image-based! см. §8.1)
+# ВАЖНО: build ПЕРЕД up. Без build up возьмёт старый image со старым кодом.
+ssh privichki-prod 'cd /app/infra && docker compose build backend worker bot --no-cache && docker compose up -d backend worker bot'
 
-# 4. Проверка
+# 4. Проверка (curl-verify КАЖДОГО слоя отдельно)
 ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
+# Для worker и bot проверки — см. §8.2.
 ```
 
 `ssh privichki-prod` — алиас из `~/.ssh/config`, указывает на `root@169.58.52.78`
@@ -296,6 +302,80 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 - ❌ Прямое редактирование `/app/apps/X/...` (пропадёт при следующем rsync)
 - ❌ `rm -rf /app/**`, `docker system prune`, изменения `.env` без ок
 - ❌ `docker cp` для правки кода (пропадёт при recreate)
+
+### 8.1 Image-based контейнеры: build после rsync обязателен (2026-08-10)
+
+**Урок из Items 3+4 деплоя (см. коммиты `2012201`, `7343411` deploy):**
+
+Контейнеры **`habit-backend`, `habit-worker`, `habit-bot`** — image-based.
+Код копируется в image через `COPY` в Dockerfile (см. `infra/docker/backend.Dockerfile`,
+`worker.Dockerfile`, `bot.Dockerfile`). **Bind-mount не настроен** для `/app/apps/`.
+
+Это значит:
+
+- `rsync` обновляет файлы на host'е → контейнер их **НЕ ВИДИТ** (у контейнера свой
+  overlay с запечённой копией файлов из Dockerfile).
+- `docker compose restart` перезапускает контейнер с **тем же образом** → старый код.
+- `docker compose up -d --force-recreate` пересоздаёт контейнер, но **не
+  пересобирает image** → всё равно старый код.
+- ✅ `docker compose build <service> --no-cache && docker compose up -d <service>`
+  — единственный способ доставить новый код.
+
+**Симптом если забыл build:** `python -c "import ..."` в контейнере показывает
+старые классы, `grep new_symbol /app/...` в контейнере возвращает 0, но файл на
+host'е (в `/app/apps/...`) уже новый. **Тест:** `md5sum /app/apps/<file>` на host
+против `docker exec <container> md5sum /app/apps/<file>` внутри контейнера —
+должны совпадать; если не совпадают — образ устарел, нужен `build`.
+
+**Только `habit-frontend` — bind-mounted.** Директива `volumes: - /app/apps/frontend/dist:/usr/share/nginx/html`
+в `docker-compose.yml` означает что nginx видит свежие файлы после rsync.
+**Но** nginx кеширует open file descriptors → нужен `docker exec habit-frontend nginx -s reload`
+после rsync (не требует recreate).
+
+**Per-service rsync обязателен.** Staging `/tmp/privichki_new/<service>/` от каждого
+сервиса хранится отдельно. Если забыть rsync worker (только backend) — будет
+deploy worker из STALE staging (вчерашний код). После очистки `/tmp/` —
+staging directories исчезают → rsync молча проваливается → build даёт старый image.
+**Защита:** после `rm -rf /tmp/privichki_new` сначала `mkdir -p /tmp/privichki_new/{backend,worker,bot}`,
+потом rsync.
+
+### 8.2 curl-verify после деплоя
+
+**Не катай весь стек сразу.** После каждого restart проверяй что не отвалилось:
+
+```bash
+# Backend — health + ready + schema check
+curl -s http://127.0.0.1:8000/health; echo
+curl -s http://127.0.0.1:8000/ready; echo
+docker exec habit-backend python -B -c "
+from app.core.exceptions import CheckinAlreadyCaughtError  # пример
+print('imports work')
+"
+
+# Worker — celery inspect active (нет зависших тасок)
+docker exec habit-worker celery -A worker.celery_app inspect active | head -5
+
+# Bot — webhook reachable (405 Method Not Allowed = endpoint OK)
+curl -sI https://api.prideclub.fun/bot/webhook | head -2
+docker exec habit-bot grep new_symbol /app/apps/bot/...  # если файл поменялся
+
+# Frontend — bundle hash + cache headers
+curl -s https://app.prideclub.fun/admin/ | grep -o "/assets/admin-[A-Za-z0-9_-]*\\.js"
+curl -sI https://app.prideclub.fun/admin/ | grep -i cache-control
+```
+
+Между слоями (после backend, до worker, до bot, до frontend) — проверка нужна.
+Если что-то отвалилось (например, telegram_bot_api.py aliases), лучше поймать
+ДО того как перезапустишь следующий слой (например, bot импортирует из backend'а
+через HTTP, и если backend стартовал сломанным — bot не сможет ничего сделать).
+
+### 8.3 Debug-скрипты на проде — НЕ оставлять
+
+При ручной диагностике (smoke test / curl / token generation) часто кладутся
+временные скрипты в `/tmp` на проде (например, `gen_token_svc.py`,
+`check_task.py`). **Удалять сразу после использования.** Потенциальная
+поверхность атаки: если кто-то получит доступ к `/tmp`, скрипт для генерации
+service-token (с полным доступом к backend API) лежит готовый.
 
 ## 9. Что не работает на проде (snapshot 2026-07-23)
 
