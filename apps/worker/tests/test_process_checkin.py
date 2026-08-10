@@ -824,3 +824,215 @@ async def test_process_checkin_joined_late_no_db_writes_in_worker(worker_db) -> 
     assert tx_after == tx_before, (
         f"Transaction count changed: {tx_before} → {tx_after}"
     )
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_caught_today_returns_caught_today_code(worker_db) -> None:
+    """Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth.
+
+    Если у юзера уже есть Penalty за сегодня (любого reason: CAUGHT или
+    WINDOW_CLOSED_NO_CATCH), worker возвращает code='caught_today' независимо
+    от того, что бот в pre-filter должен был отсеять раньше.
+
+    Это симметрично test_process_checkin_joined_late_* — fallback для race /
+    bypass / старая версия бота.
+    """
+    from datetime import datetime, timezone as tz
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=2501)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        membership = await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        # Пенальти за сегодня — apply_window_expired (cron) сценарий.
+        today = datetime.now(tz=tz.utc).date()
+        await worker_db.add_penalty(
+            session,
+            violator_membership_id=membership.id,
+            catcher_membership_id=None,
+            reason="window_closed_no_catch",
+            on_date=today,
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": user.id,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 250101,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    assert result["ok"] is False, f"Expected ok=False, got: {result}"
+    assert result["code"] == "caught_today", (
+        f"Expected code='caught_today' (defense-in-depth), got: {result.get('code')}"
+    )
+    # ВАЖНО: для missed (cron) НЕ отдельный код — оба сценария идут под
+    # 'caught_today' на backend. UI различает через StatusBadge, бот —
+    # через checkin_status в HabitStateResponse.
+    # Здесь тестируем именно server-side defense, текст в bot см. в bot/tests.
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_caught_today_after_apply_catch(worker_db) -> None:
+    """Apply_catch (ПENALTY_CAUGHT) сценарий: пенальти от кэтчера, а не от cron.
+
+    Семантика идентична cron-сценарию (defense-in-depth возвращает
+    code='caught_today'), но конкретный Penalty reason другой. UI/bot
+    различают через checkin_status в HabitStateResponse, а на server-side
+    одинаковый ответ — итог тот же.
+    """
+    from datetime import datetime, timezone as tz
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=2502)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        membership = await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        today = datetime.now(tz=tz.utc).date()
+        await worker_db.add_penalty(
+            session,
+            violator_membership_id=membership.id,
+            catcher_membership_id=None,  # apply_catch может быть с catcher или без, для теста — None
+            reason="caught",
+            on_date=today,
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": user.id,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 250201,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    assert result["ok"] is False, f"Expected ok=False, got: {result}"
+    assert result["code"] == "caught_today"
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_caught_today_no_db_writes(worker_db) -> None:
+    """Penalty уже за сегодня → worker НЕ должен:
+    - создавать Checkin(status=done)
+    - создавать Penalty (race double-charge)
+    - создавать Transaction
+    - инвалидировать cache
+
+    Идемпотентный no-op на уровне данных — penalty уже списан ранее.
+    """
+    from datetime import datetime, timezone as tz
+    from worker.tasks.process_checkin import _process
+    from sqlalchemy import func, select
+
+    from app.core.constants import CheckinStatus, MembershipStatus, PenaltyReason
+    from app.models.checkin import Checkin
+    from app.models.penalty import Penalty
+    from app.models.transaction import Transaction
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=2503)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=23,
+        )
+        membership = await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        today = datetime.now(tz=tz.utc).date()
+        await worker_db.add_penalty(
+            session,
+            violator_membership_id=membership.id,
+            catcher_membership_id=None,
+            reason=PenaltyReason.WINDOW_CLOSED_NO_CATCH.value,
+            on_date=today,
+        )
+        await session.commit()
+
+    async with worker_db.session_factory() as session:
+        penalties_before = (
+            await session.execute(
+                select(func.count(Penalty.id)).where(
+                    Penalty.membership_id == membership.id,
+                    Penalty.date == today,
+                )
+            )
+        ).scalar_one()
+        checkins_before = (
+            await session.execute(
+                select(func.count(Checkin.id)).where(
+                    Checkin.membership_id == membership.id,
+                    Checkin.date == today,
+                )
+            )
+        ).scalar_one()
+        tx_before = (
+            await session.execute(select(func.count(Transaction.id)))
+        ).scalar_one()
+
+    payload = {
+        "user_id": user.id,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 250301,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    assert result["ok"] is False
+    assert result["code"] == "caught_today"
+
+    async with worker_db.session_factory() as session:
+        penalties_after = (
+            await session.execute(
+                select(func.count(Penalty.id)).where(
+                    Penalty.membership_id == membership.id,
+                    Penalty.date == today,
+                )
+            )
+        ).scalar_one()
+        checkins_after = (
+            await session.execute(
+                select(func.count(Checkin.id)).where(
+                    Checkin.membership_id == membership.id,
+                    Checkin.date == today,
+                )
+            )
+        ).scalar_one()
+        tx_after = (
+            await session.execute(select(func.count(Transaction.id)))
+        ).scalar_one()
+
+    assert penalties_after == penalties_before, (
+        f"Penalty count changed: {penalties_before} → {penalties_after}"
+    )
+    assert checkins_after == checkins_before, (
+        f"Checkin count changed: {checkins_before} → {checkins_after}"
+    )
+    assert tx_after == tx_before, (
+        f"Transaction count changed: {tx_before} → {tx_after}"
+    )

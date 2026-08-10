@@ -708,3 +708,169 @@ async def test_prefilter_joined_late_false_proceeds_to_backend() -> None:
     assert len(bot.sent) == 1
     text = bot.sent[0]["text"]
     assert "Принято" in text
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 4): caught_today prefilter
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_status_caught_uses_REJECT_CAUGHT_TODAY() -> None:
+    """status='caught' (apply_catch): caught_today=True → REJECT_CAUGHT_TODAY,
+    НЕ REJECT_ALREADY_CHECKED_IN ("уже отметился" — было бы неверно).
+
+    Тест проверяет порядок проверок: caught_today срабатывает ПЕРВЫМ,
+    даже если already_checked_in=True одновременно.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # ← оба флага True одновременно
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # NEW (Item 4):
+            "caught_today": True,  # ← это и есть условие для caught_today ветки
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Backend не вызывается — prefilter отбил.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться — caught_today prefilter"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "поймали" in text, (
+        f"Expected 'поймали' (REJECT_CAUGHT_TODAY), got: {text!r}"
+    )
+    assert "уже отметился" not in text, (
+        f"Should NOT contain 'уже отметился' (REJECT_ALREADY_CHECKED_IN), got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_status_missed_uses_REJECT_PENALTY_DAY_CLOSED() -> None:
+    """status='missed' (cron apply_window_expired, без кэтчера):
+    caught_today=True → REJECT_PENALTY_DAY_CLOSED с нейтральным тоном.
+
+    ВАЖНО: НЕ говорим «поймали» — никто не ловил, просто окно закрылось
+    со штрафом. Различение через checkin_status.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # cron-only: Checkin(status='missed') есть, Penalty(WINDOW_CLOSED_NO_CATCH) есть
+            "caught_today": True,
+            "checkin_status": "missed",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "поймали" not in text, (
+        f"Should NOT say 'поймали' for cron-only missed, got: {text!r}"
+    )
+    assert "штраф" in text, (
+        f"Expected 'штраф' (REJECT_PENALTY_DAY_CLOSED), got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_already_checked_in_status_done_uses_REJECT_ALREADY_CHECKED_IN() -> None:
+    """status='done' (юзер сам отметился): caught_today=False → пропускаем
+    caught_today ветку, попадаем в already_checked_in → REJECT_ALREADY_CHECKED_IN.
+
+    Это нормальный случай — юзер отметился, второй кружочек не нужен.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # Нет пенальти за сегодня → caught_today=False
+            "caught_today": False,
+            "checkin_status": "done",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "уже отметился" in text
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_takes_priority_over_already_checked_in() -> None:
+    """Стресс-тест порядка: даже если ОБА флага True, caught_today
+    срабатывает ПЕРВЫМ и возвращает правильный текст (не REJECT_ALREADY_CHECKED_IN).
+
+    Это ОСНОВНОЙ тест из всего Item 4 — проверка порядка.
+    Если этот тест упадёт с 'уже отметился' — значит порядок сломан.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    # Если caught_today правильно стоит ПЕРВЫМ — увидим 'поймали'.
+    # Если перепутать порядок и already_checked_in сработает первым — увидим 'уже отметился'.
+    assert "поймали" in text, (
+        f"Order broken: caught_today должен быть ДО already_checked_in. "
+        f"Got text: {text!r}"
+    )

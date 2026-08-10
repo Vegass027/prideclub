@@ -5,6 +5,7 @@ from typing import Protocol
 
 from app.core.constants import ProofType
 from app.core.exceptions import (
+    CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
     CheckinJoinedLateError,
     CheckinWindowClosedError,
@@ -259,6 +260,7 @@ async def _process(
             ProofValidationError,
             CheckinWindowClosedError,
             CheckinJoinedLateError,    # Pravki-bug-fixes §Z-19
+            CheckinAlreadyCaughtError, # Pravki-bug-fixes §Z-21 (Item 4)
             CheckinWrongTopicError,
             MembershipNotActiveError,
             MembershipNotFoundError,
@@ -383,6 +385,7 @@ if celery_app is not None:
         dont_autoretry_for=(
             CheckinAlreadyExistsError,
             CheckinJoinedLateError,    # Pravki-bug-fixes §Z-19: не ретраить — итог детерминирован.
+            CheckinAlreadyCaughtError, # Pravki-bug-fixes §Z-21 (Item 4): то же самое — deterministic.
             ProofValidationError,
             CheckinWindowClosedError,
             CheckinWrongTopicError,

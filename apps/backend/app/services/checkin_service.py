@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.core.exceptions import (
+    CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
     CheckinJoinedLateError,
     CheckinWindowClosedError,
@@ -131,6 +132,40 @@ class CheckinService:
         # race-safe: если юзер вступил между pre-filter бота и этой проверкой,
         # мы увидим актуальное состояние.
         club_date = habit.club_date(now_utc)
+
+        # Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth — если за club_date
+        # уже есть Penalty (CAUGHT или WINDOW_CLOSED_NO_CATCH), чек-ин невозможен.
+        # Бот в pre-filter должен отсеять (state.caught_today), но это fallback
+        # на race / bypass / старую версию бота / прямой вызов internal API.
+        #
+        # Семантика НЕ различает CAUGHT vs WINDOW_CLOSED_NO_CATCH на этом уровне:
+        # оба означают «штраф за день уже списан, чек-ин не принимается».
+        # Различение делается в UI через StatusBadge (Item 3) и на фронте TodayPage.
+        # Бот использует catch_today + checkin_status для разных текстов.
+        #
+        # ВАЖНО: идёт ПОСЛЕ joined_at check (выше) и ДО window check (ниже),
+        # потому что:
+        # - joined_late сначала возвращает специфический текст «ваш первый чек-ин
+        #   завтра» (а не «штраф списан»);
+        # - window-closed без cron penalty сначала возвращает «окно закрыто»
+        #   (а не «штраф списан»).
+        # Только если club_date прошёл joined_late AND прошёл window AND
+        # cron отработал (или apply_catch был) — сюда попадаем.
+        if await self._penalty_repo.has_any_penalty_today(
+            membership_id=membership.id,
+            club_date=club_date,
+        ):
+            self._logger.info(
+                "checkin_rejected_caught_today",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "membership_id": membership.id,
+                    "club_date": str(club_date),
+                },
+            )
+            raise CheckinAlreadyCaughtError()
+
         # Defensive: joined_at=None пропускается (только в тестах).
         if membership.joined_at is not None:
             joined_in_club_tz = membership.joined_at.astimezone(habit.tzinfo)

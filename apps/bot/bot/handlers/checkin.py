@@ -178,7 +178,42 @@ async def _prefilter(
         log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
         return ""
 
+    # Pravki-bug-fixes §Z-21 (Item 4): ВАЖНО — проверяем caught_today ПЕРЕД
+    # блоком already_checked_in. Семантика:
+    # - Для status='caught' оба флага = True (есть и Checkin, и Penalty),
+    #   и если caught_today checked second — бот ответит REJECT_ALREADY_CHECKED_IN
+    #   с текстом «уже отметился», что НЕВЕРНО (юзер НЕ отмечался, его поймали).
+    # - Поэтому caught_today идёт РАНЬШЕ, и для status='caught' возвращается
+    #   REJECT_CAUGHT_TODAY с правильным текстом «поймали».
+    # - Для status='missed' (cron apply_window_expired, без кэтчера) тоже
+    #   caught_today=True (Penalty есть) — но мы тогда возвращаем
+    #   REJECT_PENALTY_DAY_CLOSED с нейтральным тоном, без «поймали».
+    # - Для status='done' — caught_today=False, branch skipped → уходим в
+    #   already_checked_in ниже.
+    #
+    # Тест в test_checkin_handler.py:prefilter_caught_today_*_before_already_checked_in
+    # проверяет порядок — НЕ полагайся на память.
+    if state.get("caught_today"):
+        checkin_status = state.get("checkin_status")
+        log.info(
+            "prefilter_caught_today",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "checkin_status": checkin_status,
+            },
+        )
+        if checkin_status == "caught":
+            # apply_catch: другая жертва поймала. Текст «поймали» корректен.
+            return checkin_texts.REJECT_CAUGHT_TODAY.format(name=name)
+        # status in (None, "missed", "joined_late") → cron-only сценарий.
+        # НЕ говорим «поймали» — никто не ловил. Нейтральный тон.
+        return checkin_texts.REJECT_PENALTY_DAY_CLOSED.format(name=name)
+
     if state.get("already_checked_in"):
+        # Для status='done' — пользователь отметился сам, второй раз нельзя.
+        # Для status='joined_late' теоретически сюда попасть нельзя (joined_late
+        # имеет is_joined_late=True без Checkin, обработано ниже). Defensive.
         log.info(
             "prefilter_already_checked_in",
             extra={"user_id": user_id, "chat_id": chat_id},

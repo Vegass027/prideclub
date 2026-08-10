@@ -33,6 +33,9 @@ from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 
+# Pravki-bug-fixes §Z-21 (Item 4): для caught_today в HabitStateResponse.
+from app.repositories.penalty_repository import PenaltyRepository
+
 router = APIRouter()
 logger = get_logger("internal_bot")
 
@@ -302,6 +305,16 @@ class HabitStateResponse(BaseModel):
     is_joined_late: bool = False
     checkin_window_start: str | None = None  # "HH:MM" — для текста ответа ботом
     checkin_window_end: str | None = None
+    # Pravki-bug-fixes §Z-21 (Item 4): новые поля для различения caught vs missed.
+    # - caught_today: True если есть ЛЮБОЙ Penalty за club_date (CAUGHT или
+    #   WINDOW_CLOSED_NO_CATCH). Бот проверяет ПЕРВЫМ (ДО already_checked_in),
+    #   иначе для status='caught' сработал бы REJECT_ALREADY_CHECKED_IN с
+    #   неверным текстом "ты уже отметился".
+    # - checkin_status: str | None — статус Checkin на сегодня (если есть):
+    #   "done"|"caught"|"missed"|"joined_late"|"pending". Бот использует
+    #   для выбора текста (REJECT_CAUGHT_TODAY vs REJECT_PENALTY_DAY_CLOSED).
+    caught_today: bool = False
+    checkin_status: str | None = None
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -339,6 +352,8 @@ async def get_habit_state(
 
     already_checked_in = False
     checked_in_at: datetime | None = None
+    checkin_status: str | None = None
+    caught_today = False
     if membership is not None:
         club_date_now = habit.club_date(datetime.now(tz=UTC))
         checkin = await CheckinRepository(session).get_for_date(
@@ -348,6 +363,16 @@ async def get_habit_state(
         if checkin is not None:
             already_checked_in = True
             checked_in_at = checkin.verified_at
+            checkin_status = checkin.status.value
+        # Pravki-bug-fixes §Z-21 (Item 4): caught_today ловит ОБА сценария
+        # (CAUGHT через apply_catch И WINDOW_CLOSED_NO_CATCH через cron).
+        # Penalty для membership уже есть → бот отвечает REJECT_CAUGHT_TODAY /
+        # REJECT_PENALTY_DAY_CLOSED (см. checkin.py prefilter).
+        penalty_repo = PenaltyRepository(session)
+        caught_today = await penalty_repo.has_any_penalty_today(
+            membership_id=membership.id,
+            club_date=club_date_now,
+        )
 
     # Pravki-bug-fixes §Z-19: joined_late вычисляется здесь ОДИН РАЗ на
     # backend (общая tz-логика через habit.was_joined_after_window).
@@ -375,5 +400,8 @@ async def get_habit_state(
         is_joined_late=is_joined_late,
         checkin_window_start=habit.checkin_window_start.strftime("%H:%M"),
         checkin_window_end=habit.checkin_window_end.strftime("%H:%M"),
+        # Pravki-bug-fixes §Z-21 (Item 4): новые поля.
+        caught_today=caught_today,
+        checkin_status=checkin_status,
     )
 

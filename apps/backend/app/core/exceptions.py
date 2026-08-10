@@ -120,6 +120,21 @@ class CheckinAlreadyExistsError(DomainError):
     code = "checkin_already_exists"
 
 
+# Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth на server-side.
+# Если у membership уже есть Penalty за сегодня (CAUGHT через apply_catch
+# ИЛИ WINDOW_CLOSED_NO_CATCH через cron apply_window_expired), чек-ин
+# невозможен — окно дня закрыто со штрафом. Бот в pre-filter должен
+# отсеять раньше (state.caught_today), но это fallback на race / bypass /
+# прямой вызов internal API / старую версию бота.
+#
+# 422 (Unprocessable Entity): запрос синтаксически валидный, но
+# состояние ресурса не позволяет выполнить операцию (semantically
+# точнее чем 409 Conflict).
+class CheckinAlreadyCaughtError(DomainError):
+    status_code = 422
+    code = "caught_today"
+
+
 class CheckinInvalidProofError(DomainError):
     status_code = 400
     code = "checkin_invalid_proof"

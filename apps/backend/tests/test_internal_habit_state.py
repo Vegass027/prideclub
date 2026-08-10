@@ -39,6 +39,7 @@ from app.main import create_app
 from app.models.checkin import Checkin
 from app.models.habit import Habit
 from app.models.membership import Membership
+from app.models.penalty import Penalty
 from app.models.user import User
 
 
@@ -129,6 +130,10 @@ async def _sqlite_engine(monkeypatch: pytest.MonkeyPatch):
         await conn.run_sync(Habit.__table__.create)
         await conn.run_sync(Membership.__table__.create)
         await conn.run_sync(Checkin.__table__.create)
+        # Pravki-bug-fixes §Z-21 (Item 4): HabitStateResponse читает
+        # penalties (через PenaltyRepository.has_any_penalty_today), поэтому
+        # таблица обязательна для теста. Иначе sqlite3.OperationalError.
+        await conn.run_sync(Penalty.__table__.create)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_module._engine = engine  # noqa: SLF001
