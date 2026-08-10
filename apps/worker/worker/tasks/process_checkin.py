@@ -301,6 +301,24 @@ async def _process(
                         "worker_joined_late_race_window_fetch_failed",
                         extra={"err": str(exc), "kind": exc.__class__.__name__},
                     )
+            # Pravki-bug-fixes §Z-21 (Item 5): checkin_window_closed — то же самое.
+            # Бот pre-filter обычно ловит сам (state.is_within_checkin_window),
+            # но если race (бот bypassed / старая версия) — worker fallback
+            # возвращает window_start/end чтобы текст содержал конкретное время.
+            elif reason_code == "checkin_window_closed":
+                try:
+                    async with factory() as race_session:
+                        race_habit = await HabitRepository(race_session).get(
+                            payload["habit_id"]
+                        )
+                    if race_habit is not None:
+                        result["window_start"] = race_habit.checkin_window_start.strftime("%H:%M")
+                        result["window_end"] = race_habit.checkin_window_end.strftime("%H:%M")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "worker_window_closed_race_window_fetch_failed",
+                        extra={"err": str(exc), "kind": exc.__class__.__name__},
+                    )
             return result
         except IntegrityError as exc:
             await session.rollback()

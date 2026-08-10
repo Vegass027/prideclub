@@ -105,7 +105,14 @@ def _text_for_code(code: str | None, *, name: str = "", **kwargs) -> str:
     if code in ("wrong_topic", "checkin_wrong_topic"):
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
     if code in ("out_of_window", "checkin_window_closed"):
-        return checkin_texts.REJECT_OUT_OF_WINDOW.format(name=name)
+        # Pravki-bug-fixes §Z-21 (Item 5): передаём window_start/window_end
+        # чтобы юзер видел конкретное время окна клуба (а не статичную фразу).
+        # Worker прокидывает их в result (см. process_checkin.py:window_closed ветка).
+        return checkin_texts.REJECT_OUT_OF_WINDOW.format(
+            name=name,
+            start=kwargs.get("window_start", "?"),
+            end=kwargs.get("window_end", "?"),
+        )
     if code in ("joined_late",):
         return checkin_texts.REJECT_JOINED_LATE.format(
             name=name,
@@ -346,13 +353,15 @@ async def handle_proof(
     # Pravki-bug-fixes §Z-19: для code='joined_late' worker возвращает
     # window_start/window_end в result. Передаём их в _text_for_code чтобы
     # race-fallback дал то же сообщение что и pre-filter (с временем окна).
+    # Используем `or '?'` потому что result.get() returns None если ключа нет,
+    # а `kwargs.get(key, '?')` в _text_for_code тогда возвращает None (ключ есть, значение None).
     await _reply(
         bot,
         message,
         _text_for_code(
             code,
             name=name,
-            window_start=result.get("window_start"),
-            window_end=result.get("window_end"),
+            window_start=result.get("window_start") or "?",
+            window_end=result.get("window_end") or "?",
         ),
     )

@@ -1036,3 +1036,128 @@ async def test_process_checkin_caught_today_no_db_writes(worker_db) -> None:
     assert tx_after == tx_before, (
         f"Transaction count changed: {tx_before} → {tx_after}"
     )
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_window_closed_returns_window_fallback(worker_db) -> None:
+    """Pravki-bug-fixes §Z-21 (Item 5): checkin_window_closed возвращает
+    window_start/end для race-fallback бота (аналогично joined_late).
+
+    Worker отвергает чек-ин если пришёл после окна (race / bypass / старая
+    версия бота). Возвращает окно чтобы бот мог показать конкретное время
+    в REJECT_OUT_OF_WINDOW тексте.
+    """
+    from datetime import datetime, timezone as tz
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=3501)
+        # Окно 06:00-12:00 — тест запускается в произвольное время.
+        # Чтобы window_closed сработал, отправляем сейчас (а сейчас окно
+        # скорее всего закрыто по UTC).
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=1,  # Очень короткое окно, чтобы test запустился ВНЕ его
+        )
+        await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        await session.commit()
+
+    payload = {
+        "user_id": user.id,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 350101,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    # Главное: race-fallback для бота.
+    assert result["ok"] is False, f"Expected ok=False, got: {result}"
+    assert result["code"] == "checkin_window_closed", (
+        f"Expected code='checkin_window_closed', got: {result.get('code')}"
+    )
+    # Window times для дружественного сообщения бота.
+    assert result["window_start"] == "00:00", (
+        f"Expected window_start='00:00', got: {result.get('window_start')}"
+    )
+    assert result["window_end"] == "01:00", (
+        f"Expected window_end='01:00', got: {result.get('window_end')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_checkin_window_closed_no_db_writes(worker_db) -> None:
+    """При worker-level checkin_window_closed отказе НЕ создаются
+    Checkin/Penalty/Transaction (defense-in-depth + idempotency)."""
+    from datetime import datetime, timezone as tz
+    from zoneinfo import ZoneInfo
+    from app.models.checkin import Checkin
+    from app.models.penalty import Penalty
+    from app.models.transaction import Transaction
+    from sqlalchemy import select, func
+    from worker.tasks.process_checkin import _process
+
+    async with worker_db.session_factory() as session:
+        user = await worker_db.add_user(session, id=3502)
+        habit = await worker_db.add_habit(
+            session,
+            checkin_window_start_hour=0,
+            checkin_window_end_hour=1,
+        )
+        await worker_db.add_membership(
+            session, user_id=user.id, habit_id=habit.id
+        )
+        await session.commit()
+
+    async with worker_db.session_factory() as session:
+        checkins_before = (
+            await session.execute(select(func.count(Checkin.id)))
+        ).scalar_one()
+        penalties_before = (
+            await session.execute(select(func.count(Penalty.id)))
+        ).scalar_one()
+        tx_before = (
+            await session.execute(select(func.count(Transaction.id)))
+        ).scalar_one()
+
+    payload = {
+        "user_id": user.id,
+        "habit_id": habit.id,
+        "chat_id": habit.chat_id,
+        "proof_type": "video_note",
+        "message_id": 350201,
+        "message_sent_at": datetime.now(tz=tz.utc).isoformat(),
+        "duration_seconds": 5,
+        "message_thread_id": None,
+    }
+    result = await _process(payload, session_factory=worker_db.session_factory)
+
+    assert result["ok"] is False
+    assert result["code"] == "checkin_window_closed"
+
+    async with worker_db.session_factory() as session:
+        checkins_after = (
+            await session.execute(select(func.count(Checkin.id)))
+        ).scalar_one()
+        penalties_after = (
+            await session.execute(select(func.count(Penalty.id)))
+        ).scalar_one()
+        tx_after = (
+            await session.execute(select(func.count(Transaction.id)))
+        ).scalar_one()
+
+    assert checkins_after == checkins_before, (
+        f"Checkin count changed: {checkins_before} → {checkins_after}"
+    )
+    assert penalties_after == penalties_before, (
+        f"Penalty count changed: {penalties_before} → {penalties_after}"
+    )
+    assert tx_after == tx_before, (
+        f"Transaction count changed: {tx_before} → {tx_after}"
+    )
