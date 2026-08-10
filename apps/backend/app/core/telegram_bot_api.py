@@ -5,39 +5,41 @@
     - avatar_service.py (getFile для фото профиля)
     - worker update_user_photos (getUserProfilePhotos)
 
-Lifecycle:
-    ClientSession создаётся в FastAPI lifespan (см. main.py:_lifespan)
-    и кладётся в app.state.bot_http. На shutdown закрывается.
+Почему НЕ singleton:
+    aiohttp.ClientSession привязан к event loop. В FastAPI handler
+    `get_session()` вызывается из DI (sync), и если там лежит
+    singleton session, созданный в _lifespan'е, то при вызове из
+    worker-threadpool (Depends get_avatar_service → get_bot_http →
+    get_session) — событийный цикл ещё не привязан → RuntimeError:
+    "no running event loop".
 
-Почему singleton через app.state:
-    aiohttp.ClientSession поддерживает connection pool (TCP keep-alive).
-    Каждый новый ClientSession = новый TLS handshake на каждый запрос.
-    На 1000 users в лидерборде это 1000 handshake = ~30 сек. С singleton
-    — только первый запрос.
+Решение: TCPConnector(limit=20) внутри каждого ClientSession.
+    aiohttp сам переиспользует TCP-соединения внутри сессии (keep-alive),
+    а сессия живёт один handler — этого достаточно для нашего
+    масштаба (1-2 запроса в handler).
 
-    Сессия привязана к event loop (uvicorn worker). Создавать её в DI
-    нельзя — DI выполняется в threadpool без running loop (Pravki.md §7.1
-    bug fix 2026-07-24: `RuntimeError: no running event loop`).
+Для prod-сценария с миллионами req/мин — нужно FastAPI lifespan
+с одним loop. Сейчас не наш случай.
 """
 from __future__ import annotations
 
 import aiohttp
 
-# Timeout — 10 сек. Telegram Bot API обычно отвечает <1с, но бывают
-# задержки при cold start сессии. 10с — запас для retry.
-_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
+def get_session() -> aiohttp.ClientSession:
+    """Создаёт НОВЫЙ ClientSession на каждый вызов (handler-scoped).
 
-def make_session() -> aiohttp.ClientSession:
-    """Создаёт новую ClientSession. Вызывать ТОЛЬКО из async-контекста
-    (lifespan, worker setup, async-метод сервиса). DI вызовет RuntimeError.
+    Caller обязан закрыть через `await session.close()` или через
+    `async with session:` (используется в AvatarService._fetch_file_path).
+
+    Без явного `connector=` — aiohttp создаст default TCPConnector
+    внутри ClientSession.__init__, когда event loop уже привязан
+    (через asyncio.get_event_loop()). Явный TCPConnector требует
+    event loop в момент создания → RuntimeError если вызвано из
+    sync DI (Depends).
     """
-    return aiohttp.ClientSession(timeout=_TIMEOUT)
+    return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
 
-async def close_session(session: aiohttp.ClientSession) -> None:
-    if session is not None and not session.closed:
-        await session.close()
+__all__ = ["get_session"]
 
-
-__all__ = ["make_session", "close_session"]

@@ -13,58 +13,43 @@ Database-level aliases (`SessionDep`, `RedisDep`) live here. Authentication
 aliases (`TelegramUserDep`, `TelegramUserDbDep`, `ServiceCallerDep`) live in
 `app.api.v1.users` to avoid circular imports.
 """
-
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.telegram_bot_api import get_session as get_bot_http
 from app.db.redis import get_redis
-from app.db.redis_async import get_async_redis
 from app.db.session import get_session
 from app.services.avatar_service import AvatarService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
-# Async-синглтон для XREAD/SSE — см. apps/backend/app/db/redis_async.py
-# и PostReview fix к Step 4 (FD-leak при reconnect-loop, если создавать
-# pool на каждый request).
-AsyncRedisDep = Annotated[Redis, Depends(get_async_redis)]
 
 
 def get_avatar_service(
-    request: Request,
     redis: RedisDep,
 ) -> AvatarService:
-    """DI provider для AvatarService (Pravki.md §7.1 v3, подход D).
+    """DI provider для AvatarService (Pravki.md §7.1).
 
-    http-сессия берётся из app.state.bot_http (создаётся в lifespan
-    main.py). Нельзя создавать ClientSession здесь — DI выполняется
-    в threadpool без running event loop (RuntimeError). AvatarService
-    переиспользует сессию для connection pool (TCP keep-alive).
-
-    avatars_dir хранится в app.state.avatars_dir (создаётся в lifespan
-    main.py: makedirs с exist_ok=True, mkdir /app/static/avatars).
+    Создаёт новый instance на каждый запрос. `http` передаётся как
+    фабрика (callable) — AvatarService создаёт ClientSession внутри
+    async-метода, где event loop уже привязан. Если передать
+    готовый ClientSession здесь — RuntimeError "no running event
+    loop" потому что DI выполняется в threadpool, не в event loop.
     """
     return AvatarService(
         bot_token=get_settings().bot_token,
         redis=redis,
-        http=request.app.state.bot_http,
-        avatars_dir=request.app.state.avatars_dir,
+        http_factory=get_bot_http,
     )
 
 
 AvatarServiceDep = Annotated[AvatarService, Depends(get_avatar_service)]
 
 
-__all__ = [
-    "SessionDep",
-    "RedisDep",
-    "AsyncRedisDep",
-    "AvatarServiceDep",
-    "get_avatar_service",
-]
+__all__ = ["SessionDep", "RedisDep", "AvatarServiceDep", "get_avatar_service"]
