@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useToday, useTodayStream, useWallet } from "@/shared/hooks";
+import { useToday, useHabitSse, useWallet } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { missingKopecks } from "@/shared/utils/topupPresets";
 import { BottomNav } from "@/shared/ui/BottomNav";
@@ -73,13 +73,15 @@ export function TodayPage() {
   const [topupOpen, setTopupOpen] = useState(false);
 
   // Real-time: держим ["today", habitId] в кэше актуальным через SSE
-  // (Step 6, `feature/topic-scoped-checkin`). useToday даёт первый снимок
-  // при загрузке, useTodayStream — обновления по checkin.accepted/rejected
-  // без polling, без ручного refetch, без лишнего GET на каждый mount.
+  // multiplex (Pravki Items 7+8+9). useToday даёт первый снимок при загрузке,
+  // useHabitSse — обновления по:
+  //  - checkin.accepted/rejected (user-stream, personal)
+  //  - catch (habit-stream broadcast — у жертвы пропадает бейдж «Поймать»)
+  //  - you_were_caught (user-stream — жертва меняет статус)
+  // Без polling, без ручного refetch, без лишнего GET на каждый mount.
   // React Query сам управляет stale-инвалидацией через staleTime: 30_000
-  // в useToday; mount-форс-инвалидейт был избыточным — на масштабе 1000+
-  // юзеров это конкретная лишняя нагрузка на backend.
-  useTodayStream(habitId);
+  // в useToday.
+  useHabitSse(habitId);
 
   const handleOpenChat = () => {
     if (!data) return;

@@ -68,12 +68,17 @@ interface HarnessOpts {
   requestTokenImpl?: (habitId: string) => Promise<{ token: string; expires_at: string }>;
   onError?: (message: string) => void;
   streamBaseUrl?: string;
+  /** Item 9: invalidateQueries mock (для catch / you_were_caught handlers). */
+  invalidateQueries?: ReturnType<typeof vi.fn>;
+  /** Item 9: haptic callback mock. */
+  onHaptic?: (kind: string, value: string) => void;
 }
 
 function createHarness(opts: HarnessOpts = {}) {
   const setQueryData = vi.fn();
   // Минимальный QueryClient-стаб — только setQueryData.
-  const queryClient = { setQueryData } as unknown as QueryClient;
+  const invalidateQueries = opts.invalidateQueries ?? vi.fn();
+  const queryClient = { setQueryData, invalidateQueries } as unknown as QueryClient;
 
   const requestToken = vi.fn(
     opts.requestTokenImpl ??
@@ -92,6 +97,7 @@ function createHarness(opts: HarnessOpts = {}) {
     requestToken,
     onError: opts.onError,
     streamBaseUrl: opts.streamBaseUrl ?? "https://app.test/api/v1",
+    onHaptic: opts.onHaptic,
     setTimeoutFn: ((fn: (...args: unknown[]) => void, ms: number) =>
       setTimeout(fn, ms)) as unknown as typeof setTimeout,
     clearTimeoutFn: clearTimeout as unknown as typeof clearTimeout,
@@ -101,6 +107,7 @@ function createHarness(opts: HarnessOpts = {}) {
     controller,
     requestToken,
     setQueryData,
+    invalidateQueries,
     instances: () => MockEventSource.instances,
   };
 }
@@ -152,7 +159,7 @@ describe("createStreamController", () => {
       ["today", "habit-abc"],
       todayPayload,
     );
-    expect(harness.controller.state.lastEventId).toBe("1234-0");
+    expect(harness.controller.state.lastEventIdUser).toBe("1234-0");
     expect(harness.controller.state.attempt).toBe(0); // успех сбрасывает backoff
     // unused var lint suppression
     void setQueryData;
@@ -331,5 +338,118 @@ describe("createStreamController", () => {
 
     await vi.waitFor(() => expect(h.requestToken).toHaveBeenCalledTimes(1));
     expect(h.instances().length).toBe(1);
+  });
+});
+describe("createStreamController - Item 9 catch and you_were_caught handlers", () => {
+  it("catch event invalidates members, today, wallet, balance + haptic medium", async () => {
+    const invalidateQueries = vi.fn();
+    const h = createHarness({ invalidateQueries });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit(
+      "catch",
+      JSON.stringify({
+        event: "catch",
+        habit_id: "h-1",
+        catcher_user_id: 1,
+        violator_user_id: 2,
+        violator_membership_id: "m-2",
+        amount: 10000,
+        penalty_id: "p-1",
+      }),
+      "555-0",
+    );
+
+    const queryKeys = invalidateQueries.mock.calls.map(
+      (c) => (c[0] as { queryKey: readonly unknown[] }).queryKey[0],
+    );
+    expect(queryKeys).toEqual(
+      expect.arrayContaining(["members", "today", "wallet", "balance"]),
+    );
+    expect(invalidateQueries).toHaveBeenCalledTimes(4);
+  });
+
+  it("you_were_caught event invalidates today, wallet, balance + haptic warning", async () => {
+    const invalidateQueries = vi.fn();
+    const h = createHarness({ invalidateQueries });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit(
+      "you_were_caught",
+      JSON.stringify({
+        event: "you_were_caught",
+        habit_id: "h-1",
+        catcher_user_id: 1,
+        catcher_first_name: "Alice",
+        violator_first_name: "Victim",
+        amount: 15000,
+        penalty_id: "p-1",
+      }),
+      "777-0",
+    );
+
+    const queryKeys = invalidateQueries.mock.calls.map(
+      (c) => (c[0] as { queryKey: readonly unknown[] }).queryKey[0],
+    );
+    expect(queryKeys).toEqual(expect.arrayContaining(["today", "wallet", "balance"]));
+    expect(invalidateQueries).toHaveBeenCalledTimes(3);
+  });
+
+  it("multiplex: catch cursor (habit) and you_were_caught cursor (user) НЕЗАВИСИМЫ", async () => {
+    const h = createHarness({ invalidateQueries: vi.fn() });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit("catch", JSON.stringify({}), "habit-cursor-1");
+    h.instances()[0].emit("you_were_caught", JSON.stringify({}), "user-cursor-1");
+
+    expect(h.controller.state.lastEventIdHabit).toBe("habit-cursor-1");
+    expect(h.controller.state.lastEventIdUser).toBe("user-cursor-1");
+    expect(
+      (h.controller.state as { lastEventId?: string }).lastEventId,
+    ).toBeUndefined();
+  });
+
+  it("reconnect URL содержит ОБА cursor'а после обоих событий", async () => {
+    let n = 0;
+    const h = createHarness({
+      requestTokenImpl: async () => ({
+        token: `tok-${++n}`,
+        expires_at: "2099-01-01T00:00:00Z",
+      }),
+    });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit("checkin.accepted", JSON.stringify({}), "u-1");
+    h.instances()[0].emit("catch", JSON.stringify({}), "h-1");
+    h.instances()[0].emitError();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const second = h.instances()[1];
+    expect(second.url).toContain("last_event_id=u-1");
+    expect(second.url).toContain("last_event_id_habit=h-1");
+  });
+
+  it("checkin.accepted/rejected handlers НЕ изменились (Item 1 backward-compat)", async () => {
+    // Item 9 — additive. Старые handlers (checkin.accepted/rejected)
+    // продолжают работать: setQueryData для today, НЕ invalidateQueries.
+    const invalidateQueries = vi.fn();
+    const h = createHarness({ invalidateQueries });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    const todayPayload = { status: "done", streak_days: 5 };
+    h.instances()[0].emit(
+      "checkin.accepted",
+      JSON.stringify(todayPayload),
+      "user-cursor-123",
+    );
+
+    expect(h.setQueryData).toHaveBeenCalledTimes(1);
+    expect(h.setQueryData).toHaveBeenCalledWith(["today", "habit-abc"], todayPayload);
+    expect(invalidateQueries).not.toHaveBeenCalled();
   });
 });

@@ -27,11 +27,13 @@ vi.mock("@/shared/api", async (importOriginal) => {
   };
 });
 
-// EventSource не реализован в jsdom, а useTodayStream внутри TodayPage
-// вызывает createStreamController → new EventSource(). Мокаем useTodayStream
+// EventSource не реализован в jsdom, а useHabitSse внутри TodayPage
+// вызывает createStreamController → new EventSource(). Мокаем useHabitSse
 // целиком — для тестов Z-4.4 SSE не нужен (проверяем только wallet warning-блок).
-vi.mock("@/shared/hooks/useTodayStream", () => ({
-  useTodayStream: () => undefined,
+// Pravki §Z-21 (Item 9): useHabitSse ЗАМЕНИЛ useTodayStream (multiplex SSE,
+// catch / you_were_caught handlers). Тест смотрит только на wallet UI.
+vi.mock("@/shared/hooks/useHabitSse", () => ({
+  useHabitSse: () => undefined,
 }));
 
 import { TodayPage } from "../TodayPage";

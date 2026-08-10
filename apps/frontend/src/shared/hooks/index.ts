@@ -183,5 +183,11 @@ export function useLeaderboardClubs(tab: LeaderboardTab) {
 }
 
 export { usePhotoBlob } from "./usePhotoBlob";
+// Pravki §Z-21 (Item 9): useHabitSse ЗАМЕНЯЕТ useTodayStream. Multiplex SSE
+// (Item 7) + event handlers для catch / you_were_caught (Item 8).
+// useTodayStream оставлен как deprecated alias для backward-compat
+// (если кто-то импортирует напрямую, не сломается), но TodayPage уже
+// переключён на useHabitSse.
+export { useHabitSse } from "./useHabitSse";
 export { useTodayStream } from "./useTodayStream";
 export { useWallet } from "./useWallet";
