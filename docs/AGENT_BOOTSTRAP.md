@@ -363,6 +363,60 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 и финальные snapshot'ы планов: `Pravki-subscribe-and-join.md` §0 (Z-13..Z-18 + Z-19),
 `Pravki-deposit-sse.md` §Z-2.9 (PR #1).
 
+## 9.1. Telegram Mini App кэш на мобильном (first-aid: @WebpageBot)
+
+> Snapshot 2026-08-10. Закрыто через `@WebpageBot` после ловушки с
+> admin.prideclub.fun → user app на iOS/Android.
+
+**Симптом (паттерн):** правка фронта/маршрутизации выкатывается на прод,
+на **десктопе работает корректно** (Telegram Desktop / Chrome / Safari),
+на **мобильном Telegram** (iOS/Android) — старая версия SPA, или
+неправильный shell (user вместо admin), или `invalid_init_data` несмотря
+на то что curl на сервере возвращает правильный HTML.
+
+**Root cause:** Telegram mobile WebView держит **отдельный кэш** на
+URL-базисе, **отдельно от system browser cache**. Этот кэш:
+
+- ❌ НЕ чистится через `Settings → Data and Storage → Clear Cache` в
+  Telegram (это только media cache).
+- ❌ НЕ чистится через `Sign out → Sign in` (cache привязан к
+  installation ID, не к user session).
+- ❌ НЕ чистится через iOS `Offload App` (Offload сохраняет
+  `Library/Caches` где живёт WebView cache). Нужен **полный Delete App**.
+- ❌ Не реагирует на `Cache-Control: no-cache` от сервера для **уже
+  закешированных** ответов — директива влияет только на последующие
+  запросы после её установки.
+- ✅ Чистится через `Settings → Apps → Telegram → Storage → Clear Cache`
+  на Android (полностью, включая WebView).
+- ✅ Чистится через полный **Delete App + reinstall** на iOS.
+- ✅ Чистится через бота `@WebpageBot` — открыть в Telegram, отправить
+  URL Mini App (`https://admin.prideclub.fun/`), он отдаст свежий ответ
+  в обход WebView-кэша и force-refresh'нет его.
+
+**Алгоритм диагностики (если «на десктопе ок, на мобильном нет»):**
+
+1. `curl https://<domain>/` с сервера — что отдаётся? Если правильный
+   shell → сервер ок, проблема в WebView-кэше мобильного клиента.
+2. Открыть тот же URL в Safari/Chrome на телефоне (НЕ в Telegram).
+   Правильный shell → 100% подтверждение WebView-кэша.
+3. Применить `@WebpageBot` (быстрее всего): открыть бота → отправить
+   URL → он отдаст свежий ответ и force-refresh'нет WebView-кэш.
+4. Если `@WebpageBot` недоступен: iOS — `Settings → General → iPhone
+   Storage → Telegram → Delete App → reinstall`; Android — `Settings
+   → Apps → Telegram → Storage → Clear Cache`.
+
+**Защита на сервере (применена в `infra/nginx/frontend.nginx.conf`,
+коммит `65160c1` 2026-08-10):** `Cache-Control: no-store, no-cache,
+must-revalidate` на HTML-шеллах и SPA fallback. Bundle-файлы
+(`/assets/`) оставлены с `immutable, max-age=1y` (там content-hash).
+Не защищает от уже-закешированного, но предотвращает рецидив при
+следующем изменении маршрутизации SPA-shell'ов.
+
+**Defense-in-depth:** при ЛЮБОЙ правке `infra/nginx/frontend.nginx.conf`,
+затрагивающей SPA-shell маршрутизацию (`admin.html` ↔ `index.html`),
+предупреждать пользователя заранее: «после деплоя admin Mini App на
+мобильных может залипнуть кэш → @WebpageBot или Delete+Reinstall».
+
 ## 10. Стиль кода — короткая шпаргалка
 
 (Полный список — `docs/04-code-standards.md` и `AGENTS.md`.)
