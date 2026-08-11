@@ -16,6 +16,8 @@ from app.core.constants import CheckinRejectCode
 from app.core.exceptions import (
     CheckinAlreadyCaughtError,
     CheckinJoinedLateError,
+    CheckinMembershipLeftError,
+    CheckinMembershipPausedError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     MembershipNotActiveError,
@@ -37,6 +39,10 @@ def test_all_exception_codes_match_enum() -> None:
         (CheckinAlreadyCaughtError, CheckinRejectCode.ALREADY_CAUGHT),
         (CheckinWrongTopicError, CheckinRejectCode.WRONG_TOPIC),
         (MembershipNotFoundError, CheckinRejectCode.MEMBERSHIP_NOT_FOUND),
+        # Pravki §Z-22 (Step 3, hole #3): сплит MembershipNotActiveError
+        # на paused/left. Добавляются в Шаге 3 (в Шаге 0 этих классов не было).
+        (CheckinMembershipPausedError, CheckinRejectCode.MEMBERSHIP_PAUSED),
+        (CheckinMembershipLeftError, CheckinRejectCode.MEMBERSHIP_LEFT),
         # Legacy для catch-flow (НЕ чек-ин). MembershipNotActiveError.code
         # остаётся "membership_not_active" — он в enum для единого SoT,
         # но в чек-ин потоке НЕ используется (Шаг 3 сплитит).

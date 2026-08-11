@@ -311,6 +311,16 @@ class HabitStateResponse(BaseModel):
     # Default False = fail-safe: если state не подгрузился, лучше отказать,
     # чем принять. Backend тоже проверяет в enqueue_checkin (defense-in-depth).
     is_within_checkin_window: bool = False
+    # Pravki §Z-22 (Step 3, hole #3): membership status из БД.
+    # Бот использует в pre-filter для REJECT_MEMBERSHIP_PAUSED / LEFT
+    # (canonical #6, #7 в CheckinRejectCode). Default None = нет membership
+    # (юзер не в клубе) — бот не реагирует (фиксируется в defense-in-depth).
+    # Pravki §Z-22 (Step 3) precheck: caught_today=True AND status=paused
+    # ВОЗМОЖЕН (после penalty_service.apply_catch флипает status через
+    # recompute_pause_status). Caught_today=True AND status=left НЕВОЗМОЖЕН
+    # через apply_catch (status != ACTIVE отвергается в penalty_service.py:100).
+    # Бот prefilter отбивает на позиции #3 (ALREADY_CAUGHT) — порядок защищает.
+    membership_status: str | None = None  # "active"|"paused"|"left"|None
     # Pravki-bug-fixes §Z-21 (Item 4): новые поля для различения caught vs missed.
     # - caught_today: True если есть ЛЮБОЙ Penalty за club_date (CAUGHT или
     #   WINDOW_CLOSED_NO_CATCH). Бот проверяет ПЕРВЫМ (ДО already_checked_in),
@@ -401,6 +411,12 @@ async def get_habit_state(
     # Позиция #5 в canonical order (см. CheckinRejectCode docstring).
     is_within_checkin_window = habit.is_within_checkin_window(datetime.now(tz=UTC))
 
+    # Pravki §Z-22 (Step 3, hole #3): membership_status.
+    # canonical #6 (paused) / #7 (left) в CheckinRejectCode.
+    membership_status_value: str | None = None
+    if membership is not None:
+        membership_status_value = membership.status.value
+
     return HabitStateResponse(
         found=True,
         habit_id=str(habit.id),
@@ -413,6 +429,8 @@ async def get_habit_state(
         checkin_window_end=habit.checkin_window_end.strftime("%H:%M"),
         # Pravki §Z-22 (hole #1): окно чек-ина сейчас.
         is_within_checkin_window=is_within_checkin_window,
+        # Pravki §Z-22 (Step 3, hole #3): membership status.
+        membership_status=membership_status_value,
         # Pravki-bug-fixes §Z-21 (Item 4): новые поля.
         caught_today=caught_today,
         checkin_status=checkin_status,

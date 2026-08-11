@@ -113,6 +113,13 @@ def _text_for_code(code: str | None, *, name: str = "", **kwargs) -> str:
         # То есть bot маппинг на REJECT_WRONG_TOPIC был мёртвым кодом.
         # Теперь маппим точно по каноническому названию.
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
+    if code == "membership_paused":
+        # Pravki §Z-22 (Step 3, hole #3): race-fallback для worker
+        # (обычно бот ловит в prefilter синхронно, но если bypassed —
+        # worker fallback шлёт code='membership_paused').
+        return checkin_texts.REJECT_MEMBERSHIP_PAUSED.format(name=name)
+    if code == "membership_left":
+        return checkin_texts.REJECT_MEMBERSHIP_LEFT.format(name=name)
     if code in ("out_of_window", "checkin_window_closed"):
         # Pravki-bug-fixes §Z-21 (Item 5): передаём window_start/window_end
         # чтобы юзер видел конкретное время окна клуба (а не статичную фразу).
@@ -298,6 +305,32 @@ async def _prefilter(
             },
         )
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
+
+    # Pravki §Z-22 (Step 3, hole #3): 6. MEMBERSHIP_PAUSED / 7. MEMBERSHIP_LEFT.
+    # Canonical order v2 (см. CheckinRejectCode docstring).
+    # Идём ПОСЛЕ state-of-day (caught_today, already_checked_in, joined_late)
+    # и ПОСЛЕ WINDOW_CLOSED (#8) и WRONG_TOPIC (#9), потому что:
+    #   - для пойманного юзера показываем "поймали" (#3), а не "пополни депозит"
+    #   - для юзера вне окна показываем "окно закрыто" (#8), а не "пополни"
+    #   - для юзера в неправильном топике показываем "не тот топик" (#9)
+    # Только если все вышестоящие checks прошли — показываем membership.
+    #
+    # status=None означает "нет membership" (юзер не в клубе) — НЕ проверяем
+    # в prefilter (бот ответит только если пользователь был ранее активным).
+    # membership_not_found обрабатывается backend defense-in-depth.
+    membership_status_value = state.get("membership_status")
+    if membership_status_value == "paused":
+        log.info(
+            "prefilter_membership_paused",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_MEMBERSHIP_PAUSED.format(name=name)
+    if membership_status_value == "left":
+        log.info(
+            "prefilter_membership_left",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_MEMBERSHIP_LEFT.format(name=name)
 
     if detected_type is None:
         # Defense — F.video_note|F.photo|F.text уже отфильтровали.

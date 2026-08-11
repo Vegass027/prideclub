@@ -144,6 +144,8 @@ def _make_photo_message() -> FakeMessage:
 # Pravki §Z-22 (hole #2): checkin_topic_thread_id=12 (matches FakeMessage
 # default message_thread_id=12) — wrong_topic pre-filter тоже пропускает.
 # Для тестов с "неправильный топик" — задают явно другой thread_id.
+# Pravki §Z-22 (Step 3, hole #3): membership_status="active" — prefilter
+# paused/left пропускает. Для тестов с "paused/left" — задают явно.
 _DEFAULT_OK_STATE: dict[str, Any] = {
     "found": True,
     "habit_id": "any",
@@ -152,6 +154,7 @@ _DEFAULT_OK_STATE: dict[str, Any] = {
     "already_checked_in": False,
     "checked_in_at": None,
     "is_within_checkin_window": True,
+    "membership_status": "active",
 }
 
 
@@ -1292,4 +1295,201 @@ async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
     assert "топик" not in text.lower(), (
         f"WRONG_TOPIC не должен выиграть у WINDOW_CLOSED "
         f"(canonical order #9 < #8). Got: {text!r}"
+    )
+
+
+# ============================================================================
+# Pravki §Z-22 (Step 3, hole #3): bot pre-filter для paused/left сплита.
+#
+# Canonical order v2: позиции #6 (MEMBERSHIP_PAUSED) и #7 (MEMBERSHIP_LEFT).
+# Идут ПОСЛЕ state-of-day (#3-5 caught_today/already_checked_in/joined_late)
+# и ПОСЛЕ WRONG_TOPIC (#9), потому что для пойманного юзера показываем
+# "поймали" — не "пополни депозит".
+#
+# ОБЯЗАТЕЛЬНЫЕ тесты (по precheck Шага 3):
+# 1. pure paused (без caught_today)
+# 2. pure left (без caught_today)
+# 3. combo caught_today=True + paused=True → REJECT_CAUGHT_TODAY
+#    (caught_today приоритет #3 > #6, физически возможен после
+#    apply_catch → recompute_pause_status).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_membership_paused_returns_REJECT_MEMBERSHIP_PAUSED() -> None:
+    """status=paused → REJECT_MEMBERSHIP_PAUSED, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "паузе" in text.lower(), f"Expected 'паузе' в REJECT_MEMBERSHIP_PAUSED, got: {text!r}"
+    assert "пополни" in text.lower() or "депозит" in text.lower(), (
+        f"Expected 'пополни депозит' (recovery path) в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для paused, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_membership_left_returns_REJECT_MEMBERSHIP_LEFT() -> None:
+    """status=left → REJECT_MEMBERSHIP_LEFT, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "left",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "участник" in text.lower(), (
+        f"Expected 'участник' в REJECT_MEMBERSHIP_LEFT, got: {text!r}"
+    )
+    assert "вступи" in text.lower() or "мини-апп" in text.lower(), (
+        f"Expected 'вступи заново через мини-апп' (recovery path) в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_membership_paused() -> None:
+    """COMBO: caught_today=True + membership_status=paused.
+
+    Физически возможен (после apply_catch → recompute_pause_status).
+    Юзер должен увидеть "поймали" (canonical #3 выше #6), а не
+    "пополни депозит" — иначе потеряется финансовая информация.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # status='caught' = checkin + penalty
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",  # автопауза после обнуления депозита
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у MEMBERSHIP_PAUSED (#6)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у paused. "
+        f"Иначе юзер увидит 'пополни депозит' вместо 'поймали, штраф списан' — "
+        f"потеря финансовой информации. Got: {text!r}"
+    )
+    assert "паузе" not in text.lower(), (
+        f"REJECT_MEMBERSHIP_PAUSED не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_membership_left() -> None:
+    """COMBO: caught_today=True + membership_status=left.
+
+    Технически достижимо через membership_service.leave() после поимки,
+    но prefilter всё равно отбивает на позиции #3 (ALREADY_CAUGHT) —
+    защита по canonical order. Тест задокументирован как инвариант: см.
+    checkin_service.py комментарий рядом с проверкой статуса.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "left",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у MEMBERSHIP_LEFT (#7)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у left. Got: {text!r}"
+    )
+    assert "участник" not in text.lower(), (
+        f"REJECT_MEMBERSHIP_LEFT не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_priority_over_membership_paused() -> None:
+    """Canonical order v2: #8 WINDOW_CLOSED > #6 MEMBERSHIP_PAUSED.
+
+    Если оба нарушены (юзер paused И вне окна) — показываем окно,
+    потому что это более специфичная информация (конкретное время),
+    чем "пополни депозит" (общая инструкция).
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "membership_status": "paused",  # оба нарушены
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "12:00" in text
+    assert "паузе" not in text.lower(), (
+        f"paused не должен выиграть у WINDOW_CLOSED (canonical #6 < #8). Got: {text!r}"
     )

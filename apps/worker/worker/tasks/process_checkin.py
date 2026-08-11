@@ -8,6 +8,8 @@ from app.core.exceptions import (
     CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
     CheckinJoinedLateError,
+    CheckinMembershipLeftError,
+    CheckinMembershipPausedError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     MembershipNotActiveError,
@@ -262,7 +264,9 @@ async def _process(
             CheckinJoinedLateError,    # Pravki-bug-fixes §Z-19
             CheckinAlreadyCaughtError, # Pravki-bug-fixes §Z-21 (Item 4)
             CheckinWrongTopicError,
-            MembershipNotActiveError,
+            CheckinMembershipPausedError, # Pravki §Z-22 (Step 3, hole #3)
+            CheckinMembershipLeftError,   # Pravki §Z-22 (Step 3, hole #3)
+            MembershipNotActiveError,     # legacy для catch-flow (НЕ чек-ин)
             MembershipNotFoundError,
         ) as exc:
             await session.rollback()
@@ -407,7 +411,9 @@ if celery_app is not None:
             ProofValidationError,
             CheckinWindowClosedError,
             CheckinWrongTopicError,
-            MembershipNotActiveError,
+            CheckinMembershipPausedError, # Pravki §Z-22 (Step 3): deterministic
+            CheckinMembershipLeftError,   # Pravki §Z-22 (Step 3): deterministic
+            MembershipNotActiveError,      # legacy для catch-flow
             MembershipNotFoundError,
         ),
         retry_backoff=True,

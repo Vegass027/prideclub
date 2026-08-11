@@ -11,6 +11,7 @@ from app.core.constants import CheckinRejectCode
 from app.core.deps import SessionDep
 from app.core.logging import get_logger
 from app.repositories.habit_repository import HabitRepository
+from app.repositories.membership_repository import MembershipRepository
 from app.services.celery_producer import send_task
 
 router = APIRouter()
@@ -79,6 +80,51 @@ async def enqueue_checkin(
     habit = await HabitRepository(session).get_by_chat_id(payload.chat_id)
     if habit is None:
         return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.HABIT_NOT_FOUND.value)
+
+    # Pravki §Z-22 (Step 3, hole #3) — позиция #2/#3/#4 в canonical order v2.
+    # Membership lookup идёт РАНЬШЕ window/topic, потому что membership
+    # state — structural (юзер вообще в клубе?). Если membership отсутствует
+    # или paused/left — никакие window/topic checks не имеют смысла.
+    #
+    # NB: caught_today=True AND status=paused ВОЗМОЖЕН (см. precheck Шага 3).
+    # Здесь эта пара не фильтруется — caught_today обрабатывается в worker's
+    # process_checkin (race-fallback). Bot prefilter ловит caught_today РАНЬШЕ
+    # paused (canonical #3 выше #6), так что в практике юзер не доходит до
+    # paused-проверки если его поймали.
+    membership_repo = MembershipRepository(session)
+    membership = await membership_repo.get_for_user_in_habit(
+        user_id=payload.user_id, habit_id=habit.id
+    )
+    if membership is None:
+        log.info(
+            "checkin_enqueue_membership_not_found",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.MEMBERSHIP_NOT_FOUND.value)
+    if membership.status.value == "paused":
+        log.info(
+            "checkin_enqueue_membership_paused",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.MEMBERSHIP_PAUSED.value)
+    if membership.status.value == "left":
+        log.info(
+            "checkin_enqueue_membership_left",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.MEMBERSHIP_LEFT.value)
 
     # Pravki §Z-22 (hole #1) — позиция #8 в canonical order v2 (state-of-day
     # #3-5 идут ПЕРЕД time/location; см. CheckinRejectCode docstring).

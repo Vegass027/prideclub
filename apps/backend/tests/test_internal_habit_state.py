@@ -473,3 +473,109 @@ class TestHabitStateEndpoint:
         assert len(body["checkin_window_end"]) == 5
         assert body["checkin_window_start"][2] == ":"
         assert body["checkin_window_end"][2] == ":"
+
+    # Pravki §Z-22 (Step 3, hole #3): membership_status в state.
+    # Бот использует в prefilter для REJECT_MEMBERSHIP_PAUSED/LEFT.
+    def test_habit_state_membership_status_active(
+        self, app: Any, service_token: str, setup_basic: dict[str, Any]
+    ) -> None:
+        """Default fixture: status=active → 'active'."""
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={
+                    "chat_id": setup_basic["chat_id"],
+                    "user_id": setup_basic["user_id"],
+                },
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "active"
+
+    def test_habit_state_membership_status_paused(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=paused → 'paused' в state."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s, chat_id=-1004348250990, proof_types=["video_note"]
+                )
+                m = Membership(user_id=user.id, habit_id=habit.id, status="paused")
+                s.add(m)
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "paused"
+
+    def test_habit_state_membership_status_left(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=left → 'left' в state."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s, chat_id=-1004348250991, proof_types=["video_note"]
+                )
+                m = Membership(user_id=user.id, habit_id=habit.id, status="left")
+                s.add(m)
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "left"
+
+    def test_habit_state_membership_status_null_when_no_membership(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Юзер без membership → membership_status=None (для бота: skip
+        проверку paused/left, но defense-in-depth в backend всё равно
+        отвергнет с membership_not_found).
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 111222333)
+                habit = await _make_habit(s, proof_types=["video_note"])
+                # намеренно НЕ создаём membership
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] is None

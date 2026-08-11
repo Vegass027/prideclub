@@ -9,6 +9,8 @@ from app.core.exceptions import (
     CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
     CheckinJoinedLateError,
+    CheckinMembershipLeftError,
+    CheckinMembershipPausedError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     HabitArchivedError,
@@ -90,6 +92,31 @@ class CheckinService:
         membership = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
         if membership is None:
             raise MembershipNotFoundError()
+
+        # Pravki §Z-22 (Step 3, hole #3): сплит MembershipNotActiveError →
+        # CheckinMembershipPausedError / CheckinMembershipLeftError.
+        #
+        # ИНВАРИАНТЫ (см. precheck Шага 3):
+        # - caught_today=True AND status=paused ВОЗМОЖЕН:
+        #   penalty_service.apply_catch пишет Penalty → flush → recompute_pause_status
+        #   флипает ACTIVE→PAUSED (deposit < penalty после списания штрафа).
+        #   В этом случае юзер видит REJECT_CAUGHT_TODAY (canonical #3 выше #6).
+        # - caught_today=True AND status=left НЕВОЗМОЖЕН через apply_catch /
+        #   apply_window_expired (оба reject non-ACTIVE, lines 100-101 / 215-216
+        #   penalty_service.py). Технически достижим через membership_service.leave()
+        #   ПОСЛЕ поимки (юзер увидел пенальти и нажал "выйти"), но prefilter всё равно
+        #   отбивает на позиции #3 (ALREADY_CAUGHT выше #7 MEMBERSHIP_LEFT).
+        # - status=paused → recovery: topup deposit в мини-аппе (авто-возобновится).
+        # - status=left → recovery: rejoin через Marketplace (НЕ topup).
+        # Сплит важен: бот даёт разные тексты (пополни vs rejoin), потому что
+        # кнопки разные.
+        if membership.status.value == "paused":
+            raise CheckinMembershipPausedError()
+        if membership.status.value == "left":
+            raise CheckinMembershipLeftError()
+        # Defensive: MembershipNotActiveError оставлен для catch-flow (НЕ чек-ин).
+        # Если в enum добавится новый статус (например, "banned") — упадём в
+        # нижестоящий MembershipNotActiveError, который 400 + generic text.
         if membership.status.value != "active":
             raise MembershipNotActiveError()
 

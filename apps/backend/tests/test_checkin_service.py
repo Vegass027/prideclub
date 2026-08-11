@@ -8,7 +8,6 @@ import pytest
 from app.core.constants import CheckinStatus, MembershipStatus, ProofType
 from app.core.exceptions import (
     CheckinWindowClosedError,
-    MembershipNotActiveError,
 )
 from app.models.checkin import Checkin
 from app.services.checkin_service import CheckinService
@@ -105,6 +104,14 @@ async def test_checkin_idempotent_same_day() -> None:
 
 @pytest.mark.asyncio
 async def test_checkin_rejects_paused_membership() -> None:
+    """Pravki §Z-22 (Step 3, hole #3): paused → CheckinMembershipPausedError.
+
+    Раньше (до Шага 3) этот же тест ассертил MembershipNotActiveError.
+    После сплита — отдельный код paused/left, потому что тексты для юзера
+    разные (пополни депозит vs вступи заново).
+    """
+    from app.core.exceptions import CheckinMembershipPausedError
+
     habit = make_habit()
     habit_repo = FakeHabitRepo()
     habit_repo.add(habit)
@@ -122,7 +129,7 @@ async def test_checkin_rejects_paused_membership() -> None:
         penalty_repo=penalty_repo,
     )
 
-    with pytest.raises(MembershipNotActiveError):
+    with pytest.raises(CheckinMembershipPausedError) as exc_info:
         await service.process_checkin(
             user_id=1,
             habit_id=str(habit.id),
@@ -130,6 +137,40 @@ async def test_checkin_rejects_paused_membership() -> None:
             proof_message_id=1,
             now_utc=datetime.now(tz=UTC),
         )
+    assert exc_info.value.code == "membership_paused"
+
+
+@pytest.mark.asyncio
+async def test_checkin_rejects_left_membership() -> None:
+    """Pravki §Z-22 (Step 3, hole #3): left → CheckinMembershipLeftError."""
+    from app.core.exceptions import CheckinMembershipLeftError
+
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.LEFT
+    )
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    with pytest.raises(CheckinMembershipLeftError) as exc_info:
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),
+            proof_message_id=1,
+            now_utc=datetime.now(tz=UTC),
+        )
+    assert exc_info.value.code == "membership_left"
 
 
 @pytest.mark.asyncio

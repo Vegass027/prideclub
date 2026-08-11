@@ -269,6 +269,32 @@ class CheckinJoinedLateError(DomainError):
     code = CheckinRejectCode.JOINED_LATE.value
 
 
+# Pravki §Z-22 (Step 3, hole #3): сплит MembershipNotActiveError.
+# До этого момента checkin_service.py бросал единый MembershipNotActiveError
+# для status in (paused, left), и бот не мог различить "пополни депозит" vs
+# "rejoin" — был один generic текст. Теперь:
+#   - MembershipPaused: deposit < penalty этого клуба (автопауза через
+#     recompute_pause_status). Recovery: topup deposit в мини-аппе.
+#   - MembershipLeft: юзер сам вышел из клуба (явное действие, нельзя
+#     восстановить через topup — нужно заново Subscribe/Join).
+#
+# MembershipNotActiveError ОСТАВЛЯЕМ для catch-flow (см. MembersPage.tsx
+# CATCH_ERROR_LABELS) — там сплит на paused/left не нужен (catch-flow
+# работает только с активными, но если попадёт non-active — generic).
+class CheckinMembershipPausedError(DomainError):
+    """422: membership.status == PAUSED (deposit < penalty этого клуба)."""
+
+    status_code = 422
+    code = CheckinRejectCode.MEMBERSHIP_PAUSED.value
+
+
+class CheckinMembershipLeftError(DomainError):
+    """422: membership.status == LEFT (юзер вышел из клуба)."""
+
+    status_code = 422
+    code = CheckinRejectCode.MEMBERSHIP_LEFT.value
+
+
 class InsufficientDepositChoiceError(DomainError):
     """422: deposit_amount_kopecks < habit.penalty_amount при subscribe_and_join.
 

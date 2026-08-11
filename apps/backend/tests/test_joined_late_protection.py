@@ -37,9 +37,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.constants import CheckinStatus, MembershipStatus, ProofType
+from app.core.constants import MembershipStatus, ProofType
 from app.core.exceptions import CheckinJoinedLateError, CheckinWindowClosedError
-from app.core.logging import get_logger
 from app.models.membership import Membership
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage
@@ -52,7 +51,6 @@ from tests.fakes import (
     FakeSession,
     make_habit,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -463,7 +461,14 @@ async def test_normal_user_in_window_unchanged() -> None:
 
 @pytest.mark.asyncio
 async def test_old_member_paused_no_joined_late() -> None:
-    """PAUSED юзер → MembershipNotActiveError (НЕ joined_late)."""
+    """Pravki §Z-22 (Step 3, hole #3): PAUSED юзер → CheckinMembershipPausedError (НЕ joined_late).
+
+    Раньше (до Шага 3) этот тест ассертил MembershipNotActiveError.
+    После сплита — paused даёт CheckinMembershipPausedError, чтобы
+    бот мог дать специфичный текст ("пополни депозит").
+    """
+    from app.core.exceptions import CheckinMembershipPausedError
+
     habit = _make_habit_with_window(
         window_start_h=6, window_start_m=0,
         window_end_h=12, window_end_m=0,
@@ -488,10 +493,8 @@ async def test_old_member_paused_no_joined_late() -> None:
         penalty_repo=penalty_repo,
     )
 
-    from app.core.exceptions import MembershipNotActiveError
-
     now_utc = datetime.now(tz=UTC)
-    with pytest.raises(MembershipNotActiveError):
+    with pytest.raises(CheckinMembershipPausedError):
         await svc.process_checkin(
             user_id=42, habit_id=str(habit.id),
             proof=_proof(now_utc),
@@ -582,15 +585,6 @@ async def test_joined_late_midnight_window_22_06_correct() -> None:
         joined_at=joined_at_msk_23,
     )
     membership_repo.add(membership)
-
-    checkin_repo = FakeCheckinRepo()
-    penalty_repo = FakePenaltyRepo()
-    svc = _build_service(
-        habit_repo=habit_repo,
-        membership_repo=membership_repo,
-        checkin_repo=checkin_repo,
-        penalty_repo=penalty_repo,
-    )
 
     # Тест логики was_joined_after_window для окна через полночь:
     # joined 23:00 MSK → НЕ после окна (23:00 внутри [22:00..23:59])

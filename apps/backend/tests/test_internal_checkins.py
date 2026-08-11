@@ -36,6 +36,7 @@ from app.core.security import generate_service_token
 from app.db import session as session_module
 from app.main import create_app
 from app.models.habit import Habit
+from app.models.membership import Membership
 from app.models.user import User
 
 
@@ -121,6 +122,7 @@ async def _sqlite_engine(monkeypatch: pytest.MonkeyPatch):
     async with engine.begin() as conn:
         await conn.run_sync(User.__table__.create)
         await conn.run_sync(Habit.__table__.create)
+        await conn.run_sync(Membership.__table__.create)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_module._engine = engine  # noqa: SLF001
@@ -156,6 +158,14 @@ async def _make_user(s, telegram_id: int) -> User:
     s.add(u)
     await s.flush()
     return u
+
+
+async def _make_membership(s, *, user_id: int, habit_id: Any, status: str) -> Membership:
+    """Helper для Шага 3 — создаёт Membership с произвольным status."""
+    m = Membership(user_id=user_id, habit_id=habit_id, status=status)
+    s.add(m)
+    await s.flush()
+    return m
 
 
 async def _make_habit(
@@ -220,15 +230,18 @@ class TestEnqueueCheckinWindowClosed:
 
         async def _seed():
             async with session_module._session_factory() as s:
-                await _make_user(s, 7295309649)
+                user = await _make_user(s, 7295309649)
                 habit = await _make_habit(
                     s,
                     chat_id=-1004348250990,
                     checkin_window_start=dt_time(0, 0),
                     checkin_window_end=dt_time(0, 0, 1),
                 )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
+                )
                 await s.commit()
-                return habit.chat_id
+            return habit.chat_id
 
         chat_id = asyncio.run(_seed())
 
@@ -259,15 +272,18 @@ class TestEnqueueCheckinWindowClosed:
 
         async def _seed():
             async with session_module._session_factory() as s:
-                await _make_user(s, 7295309649)
+                user = await _make_user(s, 7295309649)
                 habit = await _make_habit(
                     s,
                     chat_id=-1000000000001,
                     checkin_window_start=dt_time(0, 0),
                     checkin_window_end=dt_time(23, 59, 59),
                 )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
+                )
                 await s.commit()
-                return habit.chat_id
+            return habit.chat_id
 
         chat_id = asyncio.run(_seed())
 
@@ -323,13 +339,16 @@ class TestEnqueueCheckinWrongTopic:
 
         async def _seed():
             async with session_module._session_factory() as s:
-                await _make_user(s, 7295309649)
+                user = await _make_user(s, 7295309649)
                 habit = await _make_habit(
                     s,
                     chat_id=-1000000000002,
                     checkin_window_start=dt_time(0, 0),
                     checkin_window_end=dt_time(23, 59, 59),
                     checkin_topic_thread_id=42,
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
                 )
                 await s.commit()
                 return habit.chat_id
@@ -357,13 +376,16 @@ class TestEnqueueCheckinWrongTopic:
 
         async def _seed():
             async with session_module._session_factory() as s:
-                await _make_user(s, 7295309649)
+                user = await _make_user(s, 7295309649)
                 habit = await _make_habit(
                     s,
                     chat_id=-1000000000003,
                     checkin_window_start=dt_time(0, 0),
                     checkin_window_end=dt_time(23, 59, 59),
                     checkin_topic_thread_id=42,
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
                 )
                 await s.commit()
                 return habit.chat_id
@@ -395,13 +417,16 @@ class TestEnqueueCheckinWrongTopic:
 
         async def _seed():
             async with session_module._session_factory() as s:
-                await _make_user(s, 7295309649)
+                user = await _make_user(s, 7295309649)
                 habit = await _make_habit(
                     s,
                     chat_id=-1000000000004,
                     checkin_window_start=dt_time(0, 0),
                     checkin_window_end=dt_time(23, 59, 59),
                     checkin_topic_thread_id=None,
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
                 )
                 await s.commit()
                 return habit.chat_id
@@ -410,7 +435,7 @@ class TestEnqueueCheckinWrongTopic:
 
         with patch(
             "app.api.v1.internal_checkins.send_task", return_value="task-legacy"
-        ) as mock_send:
+        ):
             with TestClient(app) as client:
                 # message_thread_id в General (None) — тоже принимается
                 r = client.post(
@@ -422,4 +447,158 @@ class TestEnqueueCheckinWrongTopic:
         body = r.json()
         assert body["ok"] is True
         assert body["task_id"] == "task-legacy"
+
+
+class TestEnqueueCheckinMembershipStatus:
+    """Pravki §Z-22 (Step 3, hole #3): synchronous reject for paused/left/not_found."""
+
+    def test_membership_paused_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=paused → ok=False, code="membership_paused",
+        send_task НЕ вызван.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000005,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="paused"
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "membership_paused"
+        mock_send.assert_not_called()
+
+    def test_membership_left_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=left → ok=False, code="membership_left",
+        send_task НЕ вызван.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000006,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="left"
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "membership_left"
+        mock_send.assert_not_called()
+
+    def test_membership_not_found_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Нет membership для (user, habit) → ok=False, code="membership_not_found",
+        send_task НЕ вызван.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000007,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                # Намеренно НЕ создаём membership
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "membership_not_found"
+        mock_send.assert_not_called()
+
+    def test_membership_active_enqueues_normally(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Happy path: status=active → ok=True, send_task ВЫЗВАЛСЯ."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000008,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch(
+            "app.api.v1.internal_checkins.send_task", return_value="task-ok"
+        ) as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task_id"] == "task-ok"
+        mock_send.assert_called_once()
         mock_send.assert_called_once()
