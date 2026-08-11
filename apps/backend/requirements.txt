@@ -1,30 +1,30 @@
-fastapi==0.115.5
-python-multipart==0.0.20  # для file uploads (admin uploads)
-uvicorn[standard]==0.32.1
-sqlalchemy[asyncio]==2.0.36
-asyncpg==0.30.0
-psycopg2-binary==2.9.10
-alembic==1.14.0
-pydantic==2.10.3
-pydantic-settings==2.7.0
-python-dotenv==1.0.1
+fastapi==0.141.1
+python-multipart==0.0.32  # для file uploads (admin uploads)
+uvicorn[standard]==0.52.1
+sqlalchemy[asyncio]==2.0.51
+asyncpg==0.31.0
+psycopg2-binary==2.9.12
+alembic==1.19.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-dotenv==1.2.2
 redis==5.2.1
-PyJWT==2.10.1
-aiohttp==3.11.11
+PyJWT==2.13.0
+aiohttp==3.14.3
 httpx==0.28.1
 structlog==24.4.0
-prometheus-client==0.21.1
-sentry-sdk[fastapi]==2.19.2
-celery==5.4.0  # producer-only: backend кладёт задачи в очередь через send_task
+prometheus-client==0.26.0
+sentry-sdk[fastapi]==2.66.1
+celery==5.6.3  # producer-only: backend кладёт задачи в очередь через send_task
 
 # dev / test / lint
 pytest==8.3.4
 pytest-asyncio==0.25.0
 pytest-cov==6.0.0
-ruff==0.8.6
+ruff==0.16.2
 mypy==1.14.0
 black==24.10.0
 faker==33.1.0
-fakeredis==2.26.1
-lupa==2.2  # Lua runtime для fakeredis (EVAL/EVALSHA в rate-limiter тестах)
-aiosqlite==0.20.0
+fakeredis==2.37.0
+lupa==2.8  # Lua runtime для fakeredis (EVAL/EVALSHA в rate-limiter тестах)
+aiosqlite==0.22.1
