@@ -601,4 +601,86 @@ class TestEnqueueCheckinMembershipStatus:
         assert body["ok"] is True
         assert body["task_id"] == "task-ok"
         mock_send.assert_called_once()
+
+
+class TestEnqueueCheckinForwarded:
+    """Pravki §Z-22 (Step 4, hole #4): synchronous reject for forwarded messages."""
+
+    def test_forwarded_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """payload.is_forwarded=True → ok=False, code="forwarded",
+        send_task НЕ вызван.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000009,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                payload = _payload_chat_id(chat_id)
+                payload["is_forwarded"] = True
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=payload,
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "forwarded"
+        mock_send.assert_not_called()
+
+    def test_not_forwarded_enqueues_normally(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """payload.is_forwarded=False (default) → ok=True, send_task ВЫЗВАЛСЯ."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000010,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                await _make_membership(
+                    s, user_id=user.id, habit_id=habit.id, status="active"
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch(
+            "app.api.v1.internal_checkins.send_task", return_value="task-not-forwarded"
+        ) as mock_send:
+            with TestClient(app) as client:
+                # is_forwarded НЕ передаётся — default False в pydantic
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task_id"] == "task-not-forwarded"
         mock_send.assert_called_once()

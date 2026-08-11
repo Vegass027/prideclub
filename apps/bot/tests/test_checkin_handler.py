@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -41,6 +42,9 @@ class FakeMessage:
     text: str | None = None
     photo: Any = None
     video_note: FakeVideoNote | None = None
+    # Pravki §Z-22 (Step 4, hole #4): forward_date != None означает
+    # пересланное сообщение. None = оригинал (default).
+    forward_date: Any = None
 
     @property
     def chat(self) -> _FakeChat:
@@ -178,6 +182,8 @@ def test_parse_proof_video_note() -> None:
     assert payload["duration_seconds"] == 5
     assert payload["chat_id"] == msg.chat_id
     assert payload["message_thread_id"] == msg.message_thread_id
+    # Pravki §Z-22 (Step 4, hole #4): is_forwarded added to payload.
+    assert payload["is_forwarded"] is False
 
 
 def test_parse_proof_text() -> None:
@@ -186,6 +192,7 @@ def test_parse_proof_text() -> None:
     assert payload is not None
     assert payload["proof_type"] == "text"
     assert payload["text"] == "чек"
+    assert payload["is_forwarded"] is False
 
 
 def test_parse_proof_photo() -> None:
@@ -193,6 +200,16 @@ def test_parse_proof_photo() -> None:
     payload = _parse_proof(msg)  # type: ignore[arg-type]
     assert payload is not None
     assert payload["proof_type"] == "photo"
+    assert payload["is_forwarded"] is False
+
+
+def test_parse_proof_forwarded_message() -> None:
+    """Pravki §Z-22 (Step 4, hole #4): forward_date != None → is_forwarded=True."""
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    payload = _parse_proof(msg)  # type: ignore[arg-type]
+    assert payload is not None
+    assert payload["is_forwarded"] is True
 
 
 # ---------- _text_for_code --------------------------------------------------
@@ -1492,4 +1509,158 @@ async def test_prefilter_window_closed_priority_over_membership_paused() -> None
     assert "12:00" in text
     assert "паузе" not in text.lower(), (
         f"paused не должен выиграть у WINDOW_CLOSED (canonical #6 < #8). Got: {text!r}"
+    )
+
+
+# ============================================================================
+# Pravki §Z-22 (Step 4, hole #4): bot pre-filter для forwarded messages.
+#
+# Сценарий: message.forward_date != None (пересланное сообщение в Telegram).
+# Бот должен ответить REJECT_FORWARDED, не дожидаясь worker'а.
+#
+# Canonical order v2: позиция #10 (после WINDOW_CLOSED #8, WRONG_TOPIC #9,
+# MEMBERSHIP_PAUSED #6, MEMBERSHIP_LEFT #7).
+#
+# Особенность: forward_date доступен ТОЛЬКО в aiogram Message (Telegram
+# update). Backend его не получает в state, только в payload.is_forwarded.
+# Поэтому для FORWARDED bot prefilter — ОБЯЗАТЕЛЬНЫЙ (а не defense-in-depth).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_forwarded_returns_REJECT_FORWARDED() -> None:
+    """message.forward_date != None → REJECT_FORWARDED, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)  # любой не-None
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "пересланные видео" in text.lower(), (
+        f"Expected 'пересланные видео' в REJECT_FORWARDED, got: {text!r}"
+    )
+    assert "своё" in text.lower() or "живое" in text.lower(), (
+        f"Expected action hint 'запиши своё / живое' в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для forwarded, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_not_forwarded_proceeds() -> None:
+    """message.forward_date=None (default) → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ."""
+    msg = _make_video_note_message()
+    msg.forward_date = None  # default FakeMessage, но для явности
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил, идём к backend.post
+    assert len(backend.calls) == 1
+    assert "Принято" in bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_forwarded() -> None:
+    """Canonical order v2: #3 ALREADY_CAUGHT > #10 FORWARDED.
+
+    Пойманный юзер прислал пересланное видео (странно, но race возможен).
+    Юзер должен увидеть "поймали" (финансовая информация важнее),
+    а не "пересланные видео".
+    """
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у FORWARDED (#10)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у forwarded. Got: {text!r}"
+    )
+    assert "пересланные" not in text.lower(), (
+        f"REJECT_FORWARDED не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_priority_over_forwarded() -> None:
+    """Canonical order v2: #8 WINDOW_CLOSED > #10 FORWARDED.
+
+    Окно закрыто И сообщение переслано — "окно закрыто" (специфичнее)
+    важнее, чем "пересланные видео" (общая инструкция).
+    """
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "membership_status": "active",
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "12:00" in text
+    assert "пересланные" not in text.lower(), (
+        f"FORWARDED не должен выиграть у WINDOW_CLOSED (canonical #10 < #8). Got: {text!r}"
     )

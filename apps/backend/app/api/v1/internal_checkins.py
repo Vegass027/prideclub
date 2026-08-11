@@ -40,6 +40,12 @@ class CheckinEnqueueRequest(BaseModel):
     message_sent_at: datetime
     text: str | None = None
     duration_seconds: int | None = None
+    # Pravki §Z-22 (Step 4, hole #4): mark for forwarded messages.
+    # forwarding_signature приходит только из Telegram update (aiogram Message),
+    # и backend получает его как payload.is_forwarded (bool). Worker тоже
+    # валидирует через proof_validator (forward_date != None), но это defense
+    # in depth — основная проверка в bot prefilter.
+    is_forwarded: bool = False
 
 
 class CheckinEnqueueResponse(BaseModel):
@@ -161,6 +167,23 @@ async def enqueue_checkin(
         )
         return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.WRONG_TOPIC.value)
 
+    # Pravki §Z-22 (Step 4, hole #4) — позиция #10 в canonical order v2.
+    # Пересланные сообщения (forward_date != None в aiogram Message) не
+    # принимаются — защита от cheat'а (юзер может просто переслать чужое
+    # видео-кружок). Bot prefilter уже должен ловить это (на стороне бота
+    # есть message.forward_date), но defense-in-depth здесь — для bypassed
+    # bot / прямого вызова / race.
+    if payload.is_forwarded:
+        log.info(
+            "checkin_enqueue_forwarded",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.FORWARDED.value)
+
     task_id = send_task(
         "checkin",
         {
@@ -173,6 +196,7 @@ async def enqueue_checkin(
             "message_sent_at": payload.message_sent_at.isoformat(),
             "text": payload.text,
             "duration_seconds": payload.duration_seconds,
+            "is_forwarded": payload.is_forwarded,
         },
     )
 

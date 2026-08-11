@@ -75,6 +75,11 @@ def _parse_proof(message: Message) -> dict[str, Any] | None:
         "message_thread_id": getattr(message, "message_thread_id", None),
         "message_id": message.message_id,
         "message_sent_at": sent_at.isoformat(),
+        # Pravki §Z-22 (Step 4, hole #4): forward_date != None означает
+        # пересланное сообщение. Backend defense-in-depth в enqueue_checkin
+        # режет такие payload'ы без отправки в worker. Bot prefilter ловит
+        # ДО POST'а (см. prefilter_forwarded в _prefilter()).
+        "is_forwarded": getattr(message, "forward_date", None) is not None,
     }
     if message.video_note:
         return {
@@ -331,6 +336,20 @@ async def _prefilter(
             extra={"user_id": user_id, "chat_id": chat_id},
         )
         return checkin_texts.REJECT_MEMBERSHIP_LEFT.format(name=name)
+
+    # Pravki §Z-22 (Step 4, hole #4): 10. FORWARDED — позиция #10 в canonical order v2.
+    # Пересланные сообщения (forward_date != None в aiogram Message) не
+    # принимаются — антифрод (юзер может переслать чужое видео-кружок).
+    # Bot prefilter проверяет message.forward_date НАПРЯМУЮ (только aiogram
+    # Message имеет forward_date — backend его не получает в state, только
+    # в payload.is_forwarded). Поэтому для FORWARDED bot prefilter —
+    # обязательный (не defense-in-depth), в отличие от других позиций.
+    if getattr(message, "forward_date", None) is not None:
+        log.info(
+            "prefilter_forwarded",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_FORWARDED.format(name=name)
 
     if detected_type is None:
         # Defense — F.video_note|F.photo|F.text уже отфильтровали.
