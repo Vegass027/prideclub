@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.core.constants import ProofType
+from app.core.constants import CheckinRejectCode, ProofType
 
 
 @dataclass(slots=True, frozen=True)
@@ -40,23 +40,23 @@ def validate_proof_media(message: ProofMessage, *, max_age_seconds: int = 60) ->
     pt = message.proof_type
     if pt == ProofType.VIDEO_NOTE:
         if message.video_note_duration is None:
-            raise ProofValidationError("wrong_type")
+            raise ProofValidationError(CheckinRejectCode.WRONG_TYPE.value)
         if message.video_note_duration < 3:
-            raise ProofValidationError("too_short")
+            raise ProofValidationError(CheckinRejectCode.TOO_SHORT.value)
     elif pt == ProofType.PHOTO:
         if message.photo_sizes <= 0:
-            raise ProofValidationError("wrong_type")
+            raise ProofValidationError(CheckinRejectCode.WRONG_TYPE.value)
     elif pt == ProofType.TEXT:
         if not (message.text and message.text.strip()):
-            raise ProofValidationError("empty")
+            raise ProofValidationError(CheckinRejectCode.EMPTY_TEXT.value)
     else:
-        raise ProofValidationError("wrong_type")
+        raise ProofValidationError(CheckinRejectCode.WRONG_TYPE.value)
 
     if message.forward_date is not None:
-        raise ProofValidationError("forwarded")
+        raise ProofValidationError(CheckinRejectCode.FORWARDED.value)
 
     if message.message_date is not None:
 
         delta = (datetime.now(tz=UTC) - message.message_date).total_seconds()
         if delta < -5 or delta > max_age_seconds:
-            raise ProofValidationError("stale_message")
+            raise ProofValidationError(CheckinRejectCode.STALE_MESSAGE.value)

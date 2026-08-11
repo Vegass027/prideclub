@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.constants import CheckinRejectCode
+
 
 class DomainError(Exception):
     status_code: int = 400
@@ -63,12 +65,12 @@ class ServiceTokenExpiredError(DomainError):
 
 class MembershipNotFoundError(DomainError):
     status_code = 404
-    code = "membership_not_found"
+    code = CheckinRejectCode.MEMBERSHIP_NOT_FOUND.value
 
 
 class MembershipNotActiveError(DomainError):
     status_code = 400
-    code = "membership_not_active"
+    code = CheckinRejectCode.MEMBERSHIP_NOT_ACTIVE.value
 
 
 class SseStreamForbiddenError(DomainError):
@@ -107,17 +109,17 @@ class TooManySseConnectionsError(DomainError):
 
 class HabitNotFoundError(DomainError):
     status_code = 404
-    code = "habit_not_found"
+    code = CheckinRejectCode.HABIT_NOT_FOUND.value
 
 
 class CheckinWindowClosedError(DomainError):
     status_code = 400
-    code = "checkin_window_closed"
+    code = CheckinRejectCode.WINDOW_CLOSED.value
 
 
 class CheckinAlreadyExistsError(DomainError):
     status_code = 409
-    code = "checkin_already_exists"
+    code = CheckinRejectCode.ALREADY_CHECKED_IN.value
 
 
 # Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth на server-side.
@@ -132,7 +134,7 @@ class CheckinAlreadyExistsError(DomainError):
 # точнее чем 409 Conflict).
 class CheckinAlreadyCaughtError(DomainError):
     status_code = 422
-    code = "caught_today"
+    code = CheckinRejectCode.ALREADY_CAUGHT.value
 
 
 class CheckinInvalidProofError(DomainError):
@@ -209,7 +211,7 @@ class CheckinWrongTopicError(DomainError):
     """Сообщение пришло не из того топика, что привязан к клубу."""
 
     status_code = 422
-    code = "not_checkin_topic"
+    code = CheckinRejectCode.WRONG_TOPIC.value
 
 
 class PhotoUnavailableError(DomainError):
@@ -260,11 +262,11 @@ class CheckinJoinedLateError(DomainError):
     серверная защита против race / старого бота / прямого вызова), и в
     CheckinService.get_today_status (для статуса в TodayResponse).
 
-    code = "joined_late" — бот мапит его в дружественное сообщение с
-    временем окна клуба (см. apps/bot/bot/handlers/checkin_texts.py).
+    code = CheckinRejectCode.JOINED_LATE.value — бот мапит его в дружественное
+    сообщение с временем окна клуба (см. apps/bot/bot/handlers/checkin_texts.py).
     """
     status_code = 422
-    code = "joined_late"
+    code = CheckinRejectCode.JOINED_LATE.value
 
 
 class InsufficientDepositChoiceError(DomainError):

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from app.core.constants import CheckinRejectCode
 from app.core.exceptions import (
     CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
@@ -118,7 +119,7 @@ class CheckinService:
         if proof.proof_type.value not in (habit.proof_types or []):
             from app.services.proof_validator import ProofValidationError
 
-            raise ProofValidationError("wrong_type")
+            raise ProofValidationError(CheckinRejectCode.WRONG_TYPE.value)
 
         # Pravki-bug-fixes §Z-19 (joiner-late protection): симметричная серверная
         # защита от race / старого бота / прямого вызова / etc.

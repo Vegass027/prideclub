@@ -67,6 +67,73 @@ class ServiceCaller(StrEnum):
     WORKER = "worker"
 
 
+class CheckinRejectCode(StrEnum):
+    """Единый source of truth для reject-кодов чек-ина.
+
+    Используется:
+    - exceptions.py: class.code = CheckinRejectCode.X.value
+    - proof_validator.py: raise ProofValidationError(CheckinRejectCode.X.value)
+    - bot: для type-safety в _text_for_code и для шаблонов
+    - frontend: зеркальный enum в apps/frontend/src/shared/types/checkinReject.ts
+
+    Канонический порядок проверок (bot prefilter + backend defense-in-depth
+    в enqueue_checkin) — ОБЯЗАН быть идентичным с обеих сторон. Иначе при
+    одновременном нарушении нескольких условий пользователь увидит разные
+    тексты в чате и в мини-аппе для одной ситуации (дрейф, который мы
+    выкорчёвываем этой серией). Правило для шагов 1-4:
+
+      Structural (где/когда — дешёвые по вычислению, но "фундаментальные"):
+        1. HABIT_NOT_FOUND        (habit не существует)
+        2. MEMBERSHIP_NOT_FOUND   (membership отсутствует)
+        3. MEMBERSHIP_PAUSED      (status=paused — deposit < penalty)
+        4. MEMBERSHIP_LEFT        (status=left — юзер вышел)
+        5. WINDOW_CLOSED          (вне окна чек-ина в TZ клуба)
+        6. WRONG_TOPIC            (topic_thread_id не совпадает)
+        7. FORWARDED              (forward_date != None)
+
+      State-of-day (что уже записано — дороже по логике, зависит от БД):
+        8. ALREADY_CAUGHT         (есть Penalty за club_date)
+            — раньше ALREADY_CHECKED_IN, потому что для status='caught'
+              оба флага True; если already_checked_in checked first —
+              бот ответит "уже отметился" вместо "поймали".
+        9. ALREADY_CHECKED_IN     (есть Checkin за club_date)
+       10. JOINED_LATE            (joined_at сегодня после закрытия окна)
+            — последним среди state-of-day, потому что это structural
+              новичок (его вообще не должно быть в потоке чек-ина, но
+              JoinButton / race может сюда привести).
+
+      Proof validation (дешёвая, после всех structural + state-of-day):
+       11. WRONG_TYPE / TOO_SHORT / STALE_MESSAGE / EMPTY_TEXT  (proof)
+
+    Позиции 8-10 — это СУЩЕСТВУЮЩИЙ порядок бота (см. checkin.py:203-236),
+    мы НЕ его меняем, а лишь добавляем позиции 2-7. Менять порядок
+    было бы регрессом.
+
+    Pravki §Z-22 (prefilter holes, 5-round fix).
+    """
+
+    # 1. Structural — habit / membership
+    HABIT_NOT_FOUND = "habit_not_found"
+    MEMBERSHIP_NOT_FOUND = "membership_not_found"
+    # 2. Membership status (legacy "membership_not_active" остаётся для catch-flow)
+    MEMBERSHIP_NOT_ACTIVE = "membership_not_active"
+    MEMBERSHIP_PAUSED = "membership_paused"
+    MEMBERSHIP_LEFT = "membership_left"
+    # 3. Time / location
+    WINDOW_CLOSED = "checkin_window_closed"
+    WRONG_TOPIC = "not_checkin_topic"
+    FORWARDED = "forwarded"
+    # 4. State already applied (CATCHED first — semantic priority)
+    ALREADY_CAUGHT = "caught_today"
+    ALREADY_CHECKED_IN = "checkin_already_exists"
+    JOINED_LATE = "joined_late"
+    # 5. Proof validation
+    WRONG_TYPE = "wrong_type"
+    TOO_SHORT = "too_short"
+    STALE_MESSAGE = "stale_message"
+    EMPTY_TEXT = "empty"
+
+
 class PenaltyConfig:
     """Константы механики штрафов."""
 
