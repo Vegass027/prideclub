@@ -982,17 +982,19 @@ async def test_prefilter_checkin_window_closed_falls_back_on_missing_window() ->
 
 
 # ============================================================================
-# Pravki §Z-22 (hole #1): bot pre-filter для checkin_window_closed (НОВЫЙ,
-# синхронный, ПЕРЕД post(/internal/checkins/process)).
+# Pravki §Z-22 (hole #1): bot pre-filter для checkin_window_closed.
 #
 # Сценарий: бот получил state от backend /get_habit_state, в котором
 # is_within_checkin_window=False (backend посчитал через habit.is_within_checkin_window).
 # Бот должен ответить REJECT_OUT_OF_WINDOW с window_start/end из state
 # и НЕ вызывать backend.post() (никакого send_task).
 #
-# ВАЖНО: state-of-day checks (caught_today, already_checked_in) — позиции 8-10
-# в canonical order (см. CheckinRejectCode docstring). Бот их НЕ проверяет
-# если уже зашёл в WINDOW_CLOSED (раньше по canonical приоритету).
+# Canonical order v2 (после ревизии Шага 1.1): state-of-day checks
+# (caught_today, already_checked_in, joined_late) идут ПЕРЕД WINDOW_CLOSED.
+# Причина: поймать можно ТОЛЬКО того, кто пропустил окно, значит
+# caught_today=True почти ВСЕГДА сопровождается is_within_checkin_window=False.
+# Для 95% пойманных участников WINDOW_CLOSED первым был бы бессмысленной
+# потерей информации. Поэтому caught_today ВЫИГРЫВАЕТ.
 # ============================================================================
 
 
@@ -1037,13 +1039,22 @@ async def test_prefilter_window_closed_returns_REJECT_OUT_OF_WINDOW() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prefilter_window_closed_priority_over_state_of_day() -> None:
-    """is_within_checkin_window=False ВЫИГРЫВАЕТ у caught_today/already_checked_in.
+async def test_prefilter_caught_today_priority_over_window_closed() -> None:
+    """caught_today=True ВЫИГРЫВАЕТ у is_within_checkin_window=False.
 
-    Positional priority по canonical order (см. CheckinRejectCode docstring):
-    WINDOW_CLOSED (5) идёт ПЕРЕД ALREADY_CAUGHT (10) и ALREADY_CHECKED_IN (11).
-    Если юзер пойман сегодня И прислал вне окна — он узнает о закрытом окне,
-    а не о дубликате (бессмысленно — даже если б засчитали, не в то окно).
+    Pravki §Z-22 (hole #1) canonical order v2: state-of-day идёт ПЕРЕД
+    time/location. Это инверсия первой попытки (где WINDOW_CLOSED был #5,
+    state-of-day — #8-10). Реальный сценарий: поймать можно ТОЛЬКО того,
+    кто уже не в окне, значит caught_today=True почти ВСЕГДА имеет
+    is_within_checkin_window=False. Юзер должен увидеть:
+
+        "сегодня вас уже поймали за пропуск, штраф списан"
+
+    а не бесполезное "окно закрыто" (для пойманного это вторично —
+    деньги уже списаны, действие "пополни депозит" не помогает).
+
+    Ревизия ордера зафиксирована в этом тесте + в docstring enum'а +
+    в test_checkin_reject_code_order_matches_documented_priority.
     """
     msg = _make_video_note_message()
     bot = FakeBot()
@@ -1053,11 +1064,11 @@ async def test_prefilter_window_closed_priority_over_state_of_day() -> None:
             "habit_id": "h1",
             "proof_types": ["video_note"],
             "checkin_topic_thread_id": 12,
-            "already_checked_in": True,  # оба нарушены — пойман + окно закрыто
+            "already_checked_in": True,  # тоже True (status='caught' = checkin + penalty)
             "checked_in_at": None,
             "is_joined_late": False,
-            "is_within_checkin_window": False,
-            "caught_today": True,  # и это тоже
+            "is_within_checkin_window": False,  # оба нарушены
+            "caught_today": True,
             "checkin_status": "caught",
             "checkin_window_start": "06:00",
             "checkin_window_end": "12:00",
@@ -1066,13 +1077,16 @@ async def test_prefilter_window_closed_priority_over_state_of_day() -> None:
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
-    # WINDOW_CLOSED выигрывает — юзер узнаёт о закрытом окне, а не "поймали"
+    # CAUGHT_TODAY выигрывает — юзер узнаёт что пойман, не "окно закрыто"
     text = bot.sent[0]["text"]
-    assert "окно" in text.lower(), f"Expected окно-текст, got: {text!r}"
-    assert "06:00" in text and "12:00" in text, f"Expected window times, got: {text!r}"
-    assert "поймали" not in text.lower(), (
-        f"Не должен сработать REJECT_CAUGHT_TODAY — приоритет WINDOW_CLOSED выше. "
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у WINDOW_CLOSED для пойманного юзера. "
+        f"Если 'поймали' не в тексте — order сломан (revert от v2 к v1). "
         f"Got: {text!r}"
+    )
+    assert "окно" not in text.lower(), (
+        f"REJECT_OUT_OF_WINDOW не должен выиграть — для пойманного это "
+        f"маскирует финансовое последствие. Got: {text!r}"
     )
 
 

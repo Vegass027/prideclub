@@ -185,28 +185,6 @@ async def _prefilter(
         log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
         return ""
 
-    # Pravki §Z-22 (hole #1): 5. WINDOW_CLOSED — позиция #5 в canonical order.
-    # Проверяем ПЕРЕД state-of-day (caught_today/already_checked_in, позиции 8-10).
-    # Обоснование: window_closed — structural condition (TZ клуба: "сейчас
-    # 13:00, окно 06:00-12:00"). caught_today/already_checked_in — состояние
-    # дня. Если оба нарушены — пользователь узнает о закрытом окне, а не о
-    # дубликате (бессмысленно — даже если б засчитали, не в то окно).
-    # Backend в HabitStateResponse уже посчитал is_within_checkin_window
-    # через habit.is_within_checkin_window — бот НЕ дублирует tz-логику.
-    #
-    # False (= окно закрыто) → REJECT_OUT_OF_WINDOW со временем.
-    # Default в HabitStateResponse = False (fail-safe).
-    if state.get("is_within_checkin_window") is False:
-        log.info(
-            "prefilter_window_closed",
-            extra={"user_id": user_id, "chat_id": chat_id},
-        )
-        return checkin_texts.REJECT_OUT_OF_WINDOW.format(
-            name=name,
-            start=state.get("checkin_window_start", "?"),
-            end=state.get("checkin_window_end", "?"),
-        )
-
     # Pravki-bug-fixes §Z-21 (Item 4): ВАЖНО — проверяем caught_today ПЕРЕД
     # блоком already_checked_in. Семантика:
     # - Для status='caught' оба флага = True (есть и Checkin, и Penalty),
@@ -219,6 +197,15 @@ async def _prefilter(
     #   REJECT_PENALTY_DAY_CLOSED с нейтральным тоном, без «поймали».
     # - Для status='done' — caught_today=False, branch skipped → уходим в
     #   already_checked_in ниже.
+    #
+    # Pravki §Z-22 (hole #1): canonical order v2 (после ревизии).
+    # state-of-day (caught_today, already_checked_in, is_joined_late) идёт
+    # ПЕРЕД WINDOW_CLOSED. Причина: поймать можно ТОЛЬКО того, кто пропустил
+    # окно, значит caught_today=True почти ВСЕГДА сопровождается
+    # is_within_checkin_window=False. Если бы WINDOW_CLOSED шёл первым,
+    # пойманный увидел бы бесполезное "окно закрыто" вместо специфичного
+    # "поймали, штраф списан". Тест test_prefilter_caught_today_priority_over_window_closed
+    # фиксирует этот контракт.
     #
     # Тест в test_checkin_handler.py:prefilter_caught_today_*_before_already_checked_in
     # проверяет порядок — НЕ полагайся на память.
@@ -261,6 +248,24 @@ async def _prefilter(
             extra={"user_id": user_id, "chat_id": chat_id},
         )
         return checkin_texts.REJECT_JOINED_LATE.format(
+            name=name,
+            start=state.get("checkin_window_start", "?"),
+            end=state.get("checkin_window_end", "?"),
+        )
+
+    # Pravki §Z-22 (hole #1): WINDOW_CLOSED — идёт ПОСЛЕ state-of-day
+    # (caught_today, already_checked_in, joined_late). См. большой комментарий
+    # выше. Backend в HabitStateResponse уже посчитал is_within_checkin_window
+    # через habit.is_within_checkin_window — бот НЕ дублирует tz-логику.
+    #
+    # False (= окно закрыто) → REJECT_OUT_OF_WINDOW со временем.
+    # Default в HabitStateResponse = False (fail-safe).
+    if state.get("is_within_checkin_window") is False:
+        log.info(
+            "prefilter_window_closed",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_OUT_OF_WINDOW.format(
             name=name,
             start=state.get("checkin_window_start", "?"),
             end=state.get("checkin_window_end", "?"),

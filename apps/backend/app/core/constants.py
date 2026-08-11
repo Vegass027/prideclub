@@ -80,54 +80,74 @@ class CheckinRejectCode(StrEnum):
     в enqueue_checkin) — ОБЯЗАН быть идентичным с обеих сторон. Иначе при
     одновременном нарушении нескольких условий пользователь увидит разные
     тексты в чате и в мини-аппе для одной ситуации (дрейф, который мы
-    выкорчёвываем этой серией). Правило для шагов 1-4:
+    выкорчёвываем этой серией).
 
-      Structural (где/когда — дешёвые по вычислению, но "фундаментальные"):
-        1. HABIT_NOT_FOUND        (habit не существует)
-        2. MEMBERSHIP_NOT_FOUND   (membership отсутствует)
-        3. MEMBERSHIP_PAUSED      (status=paused — deposit < penalty)
-        4. MEMBERSHIP_LEFT        (status=left — юзер вышел)
-        5. WINDOW_CLOSED          (вне окна чек-ина в TZ клуба)
-        6. WRONG_TOPIC            (topic_thread_id не совпадает)
-        7. FORWARDED              (forward_date != None)
+    Принцип приоритета: для каждой пары кодов побеждает тот, чей текст
+    даёт юзеру БОЛЕЕ СПЕЦИФИЧНУЮ и БОЛЕЕ ПОЛЕЗНУЮ информацию. Не
+    абстрактная категория ("structural первее state-of-day"), а
+    прагматика copy.
 
-      State-of-day (что уже записано — дороже по логике, зависит от БД):
-        8. ALREADY_CAUGHT         (есть Penalty за club_date)
-            — раньше ALREADY_CHECKED_IN, потому что для status='caught'
-              оба флага True; если already_checked_in checked first —
-              бот ответит "уже отметился" вместо "поймали".
-        9. ALREADY_CHECKED_IN     (есть Checkin за club_date)
-       10. JOINED_LATE            (joined_at сегодня после закрытия окна)
-            — последним среди state-of-day, потому что это structural
-              новичок (его вообще не должно быть в потоке чек-ина, но
-              JoinButton / race может сюда привести).
+    Ревизия Шага 1.1 (после первого прогона): категоризация
+    "structural vs state-of-day" была ОШИБОЧНОЙ. Конкретный кейс из
+    Item 4 / §Z-21: поймать можно ТОЛЬКО того, кто не отметился в окно,
+    значит caught_today=True ВСЕГДА сопровождается is_within_checkin_window=False.
+    Если первый попадёт WINDOW_CLOSED (старая ошибка структурной
+    категоризации), юзер увидит бесполезное "окно закрыто" вместо
+    конкретного "поймали, штраф списан". Реальный сценарий — 95%
+    пойманных участников. Фикс: state-of-day идёт РАНЬШЕ time/location.
 
-      Proof validation (дешёвая, после всех structural + state-of-day):
-       11. WRONG_TYPE / TOO_SHORT / STALE_MESSAGE / EMPTY_TEXT  (proof)
+    Категории (по приоритету сообщения, не по типу проверки):
 
-    Позиции 8-10 — это СУЩЕСТВУЮЩИЙ порядок бота (см. checkin.py:203-236),
-    мы НЕ его меняем, а лишь добавляем позиции 2-7. Менять порядок
-    было бы регрессом.
+      I. Fundamental errors (юзер в неправильном контексте):
+        1. HABIT_NOT_FOUND        (не тот чат)
+        2. MEMBERSHIP_NOT_FOUND   (не участник)
+
+      II. "Too late" (принятие решения финально — деньги/штраф):
+        3. ALREADY_CAUGHT         (штраф списан — самое специфичное)
+            — важнее ALREADY_CHECKED_IN (для status='caught' оба
+              флага True; если already_checked_in first — бот
+              скажет "уже отметился" вместо "поймали").
+        4. ALREADY_CHECKED_IN     (уже отметился — нельзя второй раз)
+        5. JOINED_LATE            (новичок, у которого день уже
+              фактически провалился — первый чек-ин будет завтра)
+
+      III. Wrong setup (нужно действие чтобы получить доступ):
+        6. MEMBERSHIP_PAUSED      (пополни депозит)
+        7. MEMBERSHIP_LEFT        (вступи в клуб заново)
+
+      IV. "Wrong time/topic" (можно исправить перепосылкой/ожиданием):
+        8. WINDOW_CLOSED          (окно закрыто — жди завтра)
+        9. WRONG_TOPIC            (не тот топик — пошли в правильный)
+       10. FORWARDED              (пересланное — запиши своё)
+
+      V. Proof validation (дешёвая, на техническом уровне):
+       11. WRONG_TYPE / TOO_SHORT / STALE_MESSAGE / EMPTY_TEXT
+
+    Позиции 3-5 — это СУЩЕСТВУЮЩИЙ порядок бота (см. checkin.py), мы
+    НЕ его меняем. WINDOW_CLOSED/WRONG_TOPIC/FORWARDED (категория IV)
+    идут ПОСЛЕ них, потому что для пойманного/отметившегося/нового
+    участника time/location — вторичная информация по сравнению с
+    "что с ним произошло".
 
     Pravki §Z-22 (prefilter holes, 5-round fix).
     """
 
-    # 1. Structural — habit / membership
+    # I. Fundamental errors
     HABIT_NOT_FOUND = "habit_not_found"
     MEMBERSHIP_NOT_FOUND = "membership_not_found"
-    # 2. Membership status (legacy "membership_not_active" остаётся для catch-flow)
-    MEMBERSHIP_NOT_ACTIVE = "membership_not_active"
-    MEMBERSHIP_PAUSED = "membership_paused"
-    MEMBERSHIP_LEFT = "membership_left"
-    # 3. Time / location
-    WINDOW_CLOSED = "checkin_window_closed"
-    WRONG_TOPIC = "not_checkin_topic"
-    FORWARDED = "forwarded"
-    # 4. State already applied (CATCHED first — semantic priority)
+    # II. Too late (state-of-day, по decreasing specificity)
     ALREADY_CAUGHT = "caught_today"
     ALREADY_CHECKED_IN = "checkin_already_exists"
     JOINED_LATE = "joined_late"
-    # 5. Proof validation
+    # III. Wrong setup (actionable — top up / rejoin)
+    MEMBERSHIP_NOT_ACTIVE = "membership_not_active"  # legacy, остаётся для catch-flow
+    MEMBERSHIP_PAUSED = "membership_paused"
+    MEMBERSHIP_LEFT = "membership_left"
+    # IV. Wrong time/topic
+    WINDOW_CLOSED = "checkin_window_closed"
+    WRONG_TOPIC = "not_checkin_topic"
+    FORWARDED = "forwarded"
+    # V. Proof validation
     WRONG_TYPE = "wrong_type"
     TOO_SHORT = "too_short"
     STALE_MESSAGE = "stale_message"

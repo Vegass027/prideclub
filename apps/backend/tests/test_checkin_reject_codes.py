@@ -115,22 +115,31 @@ def test_proof_validator_codes_are_enum_values() -> None:
 def test_checkin_reject_code_order_matches_documented_priority() -> None:
     """Документированный в docstring enum порядок = фактический порядок
     итерации. Защита от тихого рефакторинга, который переставил ключи
-    и нарушил canonical priority (1-11).
+    и нарушил canonical priority v2.
 
     Порядок в StrEnum = порядок итерации == порядок объявления в Python.
+    V2 (после ревизии Шага 1.1): state-of-day идёт ПЕРЕД time/location,
+    потому что для пойманного/отметившегося/нового участника текст
+    "поймали" / "уже отметился" / "ты новичок" важнее, чем
+    "окно закрыто".
     """
     expected_order = [
+        # I. Fundamental errors
         "habit_not_found",
         "membership_not_found",
-        "membership_not_active",
-        "membership_paused",
-        "membership_left",
-        "checkin_window_closed",
-        "not_checkin_topic",
-        "forwarded",
+        # II. Too late (state-of-day)
         "caught_today",
         "checkin_already_exists",
         "joined_late",
+        # III. Wrong setup (actionable)
+        "membership_not_active",
+        "membership_paused",
+        "membership_left",
+        # IV. Wrong time/topic
+        "checkin_window_closed",
+        "not_checkin_topic",
+        "forwarded",
+        # V. Proof validation
         "wrong_type",
         "too_short",
         "stale_message",
