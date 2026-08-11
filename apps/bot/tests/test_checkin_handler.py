@@ -35,7 +35,7 @@ class FakeVideoNote:
 class FakeMessage:
     chat_id: int = -1004467477629
     message_id: int = 42
-    message_thread_id: int = 4
+    message_thread_id: int = 12
     from_user_id: int = 7295309649
     date: Any = None
     text: str | None = None
@@ -141,6 +141,9 @@ def _make_photo_message() -> FakeMessage:
 # Pre-filter (PR №9) default state: всё ОК — все типы разрешены, чек-ин ещё не сделан.
 # Pravki §Z-22 (hole #1): is_within_checkin_window=True — окно открыто,
 # pre-filter пропускает. Для тестов с "вне окна" — задают явно False.
+# Pravki §Z-22 (hole #2): checkin_topic_thread_id=12 (matches FakeMessage
+# default message_thread_id=12) — wrong_topic pre-filter тоже пропускает.
+# Для тестов с "неправильный топик" — задают явно другой thread_id.
 _DEFAULT_OK_STATE: dict[str, Any] = {
     "found": True,
     "habit_id": "any",
@@ -203,9 +206,17 @@ def test_text_for_code_too_short() -> None:
 
 
 def test_text_for_code_wrong_topic() -> None:
+    """Pravki §Z-22 (hole #2) DRIFT FIX: только канонический 'not_checkin_topic'
+    маппится в REJECT_WRONG_TOPIC. Старые алиасы ('wrong_topic',
+    'checkin_wrong_topic') теперь падают в REJECT_UNKNOWN — раньше они
+    были в коде, но ничего не делали (worker шлёт канонический код).
+    """
     expected = checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
-    assert _text_for_code("wrong_topic", name="Test") == expected
-    assert _text_for_code("checkin_wrong_topic", name="Test") == expected
+    # Канонический — маппится
+    assert _text_for_code("not_checkin_topic", name="Test") == expected
+    # Старые алиасы — теперь REJECT_UNKNOWN
+    assert _text_for_code("wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
+    assert _text_for_code("checkin_wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN  # noqa: E501
 
 
 def test_text_for_code_out_of_window() -> None:
@@ -292,14 +303,37 @@ async def test_handle_proof_too_short_sends_rejection() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_proof_wrong_topic_sends_rejection() -> None:
+    """Pravki §Z-22 (hole #2) DRIFT FIX: code должен быть "not_checkin_topic"
+    (канонический), не "wrong_topic" (мёртвый magic-string).
+
+    Раньше test работал с "wrong_topic" потому что _text_for_code принимал
+    алиасы `("wrong_topic", "checkin_wrong_topic")` — но это была
+    компенсация broken-контракта. После фикса только канонический код
+    шлётся worker'ом и признаётся ботом.
+    """
     msg = _make_video_note_message()
     bot = FakeBot()
-    backend = _ok_backend({"ok": False, "task_id": None, "code": "wrong_topic"})
+    backend = _ok_backend({"ok": False, "task_id": None, "code": "not_checkin_topic"})
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
     assert bot.sent[0]["text"] == checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
+
+
+def test_text_for_code_wrong_topic_uses_canonical_code() -> None:
+    """Pravki §Z-22 (hole #2): DRIFT FIX проверка.
+
+    Старый magic-string `("wrong_topic", "checkin_wrong_topic")` больше
+    НЕ валиден. Теперь только канонический "not_checkin_topic" маппится
+    в REJECT_WRONG_TOPIC. Это закрывает дрейф между bot/worker/backend.
+    """
+    # Канонический — маппится
+    expected = checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
+    assert _text_for_code("not_checkin_topic", name="Test") == expected
+    # Старые алиасы — теперь падают в REJECT_UNKNOWN (нет skeleton-text)
+    assert _text_for_code("wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
+    assert _text_for_code("checkin_wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -1114,3 +1148,148 @@ async def test_prefilter_window_closed_falls_back_on_missing_window_times() -> N
     text = bot.sent[0]["text"]
     assert "?" in text, f"Expected '?' fallback, got: {text!r}"
     assert "окно" in text.lower(), f"Expected окно-текст, got: {text!r}"
+
+
+# ============================================================================
+# Pravki §Z-22 (hole #2): bot pre-filter для not_checkin_topic.
+#
+# Сценарий: state.checkin_topic_thread_id=42, message.message_thread_id=99
+# (например, юзер шлёт в General вместо топика «Чек-ины»). Бот должен
+# ответить REJECT_WRONG_TOPIC и НЕ вызывать backend.post().
+#
+# Canonical order v2: позиция #9 (после WINDOW_CLOSED #8). Оба из
+# категории IV (Wrong time/topic).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_returns_REJECT_WRONG_TOPIC() -> None:
+    """state.checkin_topic_thread_id=42, message.message_thread_id=99
+    → REJECT_WRONG_TOPIC, backend.post НЕ вызывается.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # отличается от state (default FakeMessage = 4)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,  # ожидаемый topic
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот ответил REJECT_WRONG_TOPIC
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "топик" in text.lower(), f"Expected топик-текст, got: {text!r}"
+    assert "↩" in text, f"Expected reply-префикс, got: {text!r}"
+
+    # Backend.post НЕ вызывался
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться при wrong topic, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_correct_topic_proceeds() -> None:
+    """message.message_thread_id == state.checkin_topic_thread_id
+    → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 42  # matches state
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил, идём к backend.post
+    assert len(backend.calls) == 1, (
+        f"backend.post должен вызываться, got calls: {backend.calls!r}"
+    )
+    # bot отправил "Принято" (т.к. fake response = {"ok": True})
+    assert len(bot.sent) == 1
+    assert "Принято" in bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_no_topic_thread_id_legacy_accepts_any() -> None:
+    """state.checkin_topic_thread_id IS NULL (legacy pre-migration 010)
+    → любой message_thread_id (включая None для General) принимается.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # произвольный
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": None,  # legacy — без топиков
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил (legacy-режим)
+    assert len(backend.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
+    """Canonical order v2: #9 WRONG_TOPIC после #8 WINDOW_CLOSED.
+
+    Если оба окна нарушены (юзер шлёт не в тот топик И вне окна),
+    WINDOW_CLOSED срабатывает первым (canonical order #8 выше #9).
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # WINDOW_CLOSED (#8) выигрывает у WRONG_TOPIC (#9)
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "06:00" in text and "12:00" in text
+    assert "топик" not in text.lower(), (
+        f"WRONG_TOPIC не должен выиграть у WINDOW_CLOSED "
+        f"(canonical order #9 < #8). Got: {text!r}"
+    )

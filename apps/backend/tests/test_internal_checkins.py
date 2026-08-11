@@ -164,6 +164,7 @@ async def _make_habit(
     chat_id: int,
     checkin_window_start: dt_time,
     checkin_window_end: dt_time,
+    checkin_topic_thread_id: int | None = None,
 ) -> Habit:
     from app.core.constants import ProofType
 
@@ -181,18 +182,18 @@ async def _make_habit(
         prize_pool=0,
         is_active=True,
         chat_topic_thread_id=None,
-        checkin_topic_thread_id=None,
+        checkin_topic_thread_id=checkin_topic_thread_id,
     )
     s.add(h)
     await s.flush()
     return h
 
 
-def _payload_chat_id(chat_id: int) -> dict[str, Any]:
+def _payload_chat_id(chat_id: int, message_thread_id: int | None = None) -> dict[str, Any]:
     return {
         "user_id": 7295309649,
         "chat_id": chat_id,
-        "message_thread_id": None,
+        "message_thread_id": message_thread_id,
         "proof_type": "video_note",
         "message_id": 12345,
         "message_sent_at": datetime.now(tz=UTC).isoformat(),
@@ -307,3 +308,118 @@ class TestEnqueueCheckinWindowClosed:
         assert body["ok"] is False
         assert body["code"] == "habit_not_found"
         mock_send.assert_not_called()
+
+
+class TestEnqueueCheckinWrongTopic:
+    """Pravki §Z-22 (hole #2): synchronous reject when wrong topic."""
+
+    def test_wrong_topic_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """habit.checkin_topic_thread_id=42, payload.message_thread_id=99
+        → ok=False, code="not_checkin_topic", send_task НЕ вызван.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000002,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                    checkin_topic_thread_id=42,
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id, message_thread_id=99),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "not_checkin_topic"
+        mock_send.assert_not_called()
+
+    def test_correct_topic_enqueues_normally(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Thread_id совпадает → ok=True, send_task ВЫЗВАЛСЯ."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000003,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                    checkin_topic_thread_id=42,
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch(
+            "app.api.v1.internal_checkins.send_task", return_value="task-abc"
+        ) as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id, message_thread_id=42),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task_id"] == "task-abc"
+        mock_send.assert_called_once()
+
+    def test_no_topic_thread_id_legacy_accepts_any(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """habit.checkin_topic_thread_id IS NULL (legacy pre-migration 010):
+        любой message_thread_id (включая None для General) принимается.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000004,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                    checkin_topic_thread_id=None,
+                )
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with patch(
+            "app.api.v1.internal_checkins.send_task", return_value="task-legacy"
+        ) as mock_send:
+            with TestClient(app) as client:
+                # message_thread_id в General (None) — тоже принимается
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id, message_thread_id=None),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task_id"] == "task-legacy"
+        mock_send.assert_called_once()

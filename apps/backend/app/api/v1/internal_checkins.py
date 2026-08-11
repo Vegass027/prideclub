@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -13,6 +14,20 @@ from app.repositories.habit_repository import HabitRepository
 from app.services.celery_producer import send_task
 
 router = APIRouter()
+
+
+def checkin_topic_thread_id_mismatch(habit: Any, message_thread_id: int | None) -> bool:
+    """True если сообщение пришло не из ожидаемого топика.
+
+    legacy-режим (habit.checkin_topic_thread_id IS NULL): НЕ считается
+    ошибкой — топиков нет, любой message_thread_id (включая None для
+    General) принимается. Это для клубов, созданных до миграции 010
+    (habit_topics).
+    """
+    expected = getattr(habit, "checkin_topic_thread_id", None)
+    if expected is None:
+        return False
+    return message_thread_id != expected
 
 
 class CheckinEnqueueRequest(BaseModel):
@@ -65,8 +80,8 @@ async def enqueue_checkin(
     if habit is None:
         return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.HABIT_NOT_FOUND.value)
 
-    # Pravki §Z-22 (hole #1) — позиция #5 в canonical order (после #1 habit,
-    # #2 membership, #3 paused, #4 left — те появятся в Шаге 3).
+    # Pravki §Z-22 (hole #1) — позиция #8 в canonical order v2 (state-of-day
+    # #3-5 идут ПЕРЕД time/location; см. CheckinRejectCode docstring).
     if not habit.is_within_checkin_window(datetime.now(tz=UTC)):
         log.info(
             "checkin_enqueue_window_closed",
@@ -82,6 +97,23 @@ async def enqueue_checkin(
             window_start=habit.checkin_window_start.strftime("%H:%M"),
             window_end=habit.checkin_window_end.strftime("%H:%M"),
         )
+
+    # Pravki §Z-22 (hole #2) — позиция #9 в canonical order v2.
+    # checkin_topic_thread_id проверяется только если он задан (Topic-scoped
+    # клубы). Если habit.checkin_topic_thread_id IS NULL — клуб работает в
+    # legacy-режиме (без топиков), любой message_thread_id принимается.
+    if checkin_topic_thread_id_mismatch(habit, payload.message_thread_id):
+        log.info(
+            "checkin_enqueue_wrong_topic",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+                "expected": habit.checkin_topic_thread_id,
+                "got": payload.message_thread_id,
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.WRONG_TOPIC.value)
 
     task_id = send_task(
         "checkin",

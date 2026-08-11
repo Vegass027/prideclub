@@ -14,10 +14,13 @@ router = Router(name="checkin")
 log = get_logger("bot.checkin")
 
 
-# Коды успеха (запрос ушёл в Celery). На оба шлём одинаковое подтверждение.
+# Pravki §Z-22 (hole #2): DRIFT FIX — раньше _SUCCESS_CODES и _SILENT_CODES
+# использовали magic strings, которые могли дрейфовать от backend enum.
+# Эти литералы должны совпадать с CheckinRejectCode.X.value (backend) и
+# с apps/frontend/src/shared/types/checkinReject.ts (frontend). Защита от
+# дрейфа — ручная review: если добавляешь новый код в enum, обнови эти
+# _SUCCESS_CODES / _SILENT_CODES здесь тоже.
 _SUCCESS_CODES: frozenset[str] = frozenset({"ok", "checkin_already_exists"})
-
-# Коды, при которых сообщение пользователю можно слать (не чужой чат).
 _SILENT_CODES: frozenset[str] = frozenset({"habit_not_found"})
 
 
@@ -102,7 +105,13 @@ def _text_for_code(code: str | None, *, name: str = "", **kwargs) -> str:
         return checkin_texts.REJECT_FORWARDED.format(name=name)
     if code in ("too_short",):
         return checkin_texts.REJECT_TOO_SHORT.format(name=name)
-    if code in ("wrong_topic", "checkin_wrong_topic"):
+    if code == "not_checkin_topic":
+        # Pravki §Z-22 (hole #2): DRIFT FIX — раньше здесь был magic-string
+        # `("wrong_topic", "checkin_wrong_topic")`, который НИКОГДА не
+        # срабатывал, потому что worker шлёт канонический "not_checkin_topic"
+        # (apps/backend/app/core/constants.py:CheckinRejectCode.WRONG_TOPIC.value).
+        # То есть bot маппинг на REJECT_WRONG_TOPIC был мёртвым кодом.
+        # Теперь маппим точно по каноническому названию.
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
     if code in ("out_of_window", "checkin_window_closed"):
         # Pravki-bug-fixes §Z-21 (Item 5): передаём window_start/window_end
@@ -150,6 +159,7 @@ def _allowed_list_text(proof_types: list[str]) -> list[str]:
 
 async def _prefilter(
     backend: BackendClient,
+    message: Message,
     chat_id: int,
     user_id: int,
     detected_type: str | None,
@@ -271,6 +281,24 @@ async def _prefilter(
             end=state.get("checkin_window_end", "?"),
         )
 
+    # Pravki §Z-22 (hole #2): 9. WRONG_TOPIC — позиция #9 в canonical order v2.
+    # Сравниваем message_thread_id из Telegram-сообщения с ожидаемым
+    # checkin_topic_thread_id из state. Если checkin_topic_thread_id IS NULL
+    # (legacy-режим без топиков) — любой thread_id принимается, branch skipped.
+    state_thread_id = state.get("checkin_topic_thread_id")
+    sent_thread_id = getattr(message, "message_thread_id", None)
+    if state_thread_id is not None and sent_thread_id != state_thread_id:
+        log.info(
+            "prefilter_wrong_topic",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "expected": state_thread_id,
+                "got": sent_thread_id,
+            },
+        )
+        return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
+
     if detected_type is None:
         # Defense — F.video_note|F.photo|F.text уже отфильтровали.
         return checkin_texts.REJECT_UNSUPPORTED_TYPE.format(name=name)
@@ -323,6 +351,7 @@ async def handle_proof(
     # Pre-filter (PR №7.5): для video_note проверяем длительность.
     prefilter_reply = await _prefilter(
         backend=backend,
+        message=message,
         chat_id=message.chat.id,
         user_id=message.from_user.id,
         detected_type=detected_type,
