@@ -305,6 +305,12 @@ class HabitStateResponse(BaseModel):
     is_joined_late: bool = False
     checkin_window_start: str | None = None  # "HH:MM" — для текста ответа ботом
     checkin_window_end: str | None = None
+    # Pravki §Z-22 (hole #1): вычисляется через habit.is_within_checkin_window(now).
+    # Бот проверяет в pre-filter и отвечает REJECT_OUT_OF_WINDOW, чтобы юзер
+    # услышал "окно закрыто" синхронно, а не "Принято" → ложное ожидание.
+    # Default False = fail-safe: если state не подгрузился, лучше отказать,
+    # чем принять. Backend тоже проверяет в enqueue_checkin (defense-in-depth).
+    is_within_checkin_window: bool = False
     # Pravki-bug-fixes §Z-21 (Item 4): новые поля для различения caught vs missed.
     # - caught_today: True если есть ЛЮБОЙ Penalty за club_date (CAUGHT или
     #   WINDOW_CLOSED_NO_CATCH). Бот проверяет ПЕРВЫМ (ДО already_checked_in),
@@ -390,6 +396,11 @@ async def get_habit_state(
         if joined_in_club_tz.date() == club_date_now:
             is_joined_late = habit.was_joined_after_window(membership.joined_at)
 
+    # Pravki §Z-22 (hole #1): вычисляем is_within_checkin_window ОДИН РАЗ
+    # на backend (tz-логика через habit), бот получает готовый bool.
+    # Позиция #5 в canonical order (см. CheckinRejectCode docstring).
+    is_within_checkin_window = habit.is_within_checkin_window(datetime.now(tz=UTC))
+
     return HabitStateResponse(
         found=True,
         habit_id=str(habit.id),
@@ -400,6 +411,8 @@ async def get_habit_state(
         is_joined_late=is_joined_late,
         checkin_window_start=habit.checkin_window_start.strftime("%H:%M"),
         checkin_window_end=habit.checkin_window_end.strftime("%H:%M"),
+        # Pravki §Z-22 (hole #1): окно чек-ина сейчас.
+        is_within_checkin_window=is_within_checkin_window,
         # Pravki-bug-fixes §Z-21 (Item 4): новые поля.
         caught_today=caught_today,
         checkin_status=checkin_status,

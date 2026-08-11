@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.api.v1.users import ServiceCallerDep
+from app.core.constants import CheckinRejectCode
 from app.core.deps import SessionDep
 from app.core.logging import get_logger
 from app.repositories.habit_repository import HabitRepository
@@ -29,6 +30,12 @@ class CheckinEnqueueResponse(BaseModel):
     ok: bool
     task_id: str | None = None
     code: str | None = None
+    # Pravki §Z-22 (hole #1): window_start/window_end для бота, который
+    # получил reject от backend defense-in-depth (а не через race-fallback
+    # worker'а). Поля опциональные — бот их маппит в REJECT_OUT_OF_WINDOW
+    # если есть, иначе fallback на '?'.
+    window_start: str | None = None
+    window_end: str | None = None
 
 
 @router.post("/checkins/process", response_model=CheckinEnqueueResponse)
@@ -39,9 +46,14 @@ async def enqueue_checkin(
 ) -> CheckinEnqueueResponse:
     """Internal endpoint: бот → backend → Celery worker.
 
-    НИКАКОЙ валидации медиа/window здесь — только маршрутизация по chat_id → habit_id
-    и постановка задачи в очередь. Валидация и запись — в worker-таске `process_checkin.run`
-    (см. docs/02 §4).
+    Pravki §Z-22 (hole #1): добавлена SYNCHRONOUS defense-in-depth для
+    checkin_window_closed. Бот pre-filter уже должен ловить окно сам
+    (state.is_within_checkin_window, см. internal_bot.py), но если бот
+    bypassed / старая версия / прямой вызов — backend режет синхронно,
+    чтобы бот не успел ответить "Принято" и юзер не ждал ложно.
+
+    Worker-таска тоже проверяет окно (race-fallback для оставшихся
+    случаев), но это уже не основной путь.
 
     Возвращаем быстрый ack, чтобы бот не таймаутил на пиках (07:00 утра).
 
@@ -51,7 +63,25 @@ async def enqueue_checkin(
 
     habit = await HabitRepository(session).get_by_chat_id(payload.chat_id)
     if habit is None:
-        return CheckinEnqueueResponse(ok=False, code="habit_not_found")
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.HABIT_NOT_FOUND.value)
+
+    # Pravki §Z-22 (hole #1) — позиция #5 в canonical order (после #1 habit,
+    # #2 membership, #3 paused, #4 left — те появятся в Шаге 3).
+    if not habit.is_within_checkin_window(datetime.now(tz=UTC)):
+        log.info(
+            "checkin_enqueue_window_closed",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+            },
+        )
+        return CheckinEnqueueResponse(
+            ok=False,
+            code=CheckinRejectCode.WINDOW_CLOSED.value,
+            window_start=habit.checkin_window_start.strftime("%H:%M"),
+            window_end=habit.checkin_window_end.strftime("%H:%M"),
+        )
 
     task_id = send_task(
         "checkin",

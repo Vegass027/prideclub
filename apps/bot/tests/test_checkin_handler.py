@@ -139,6 +139,8 @@ def _make_photo_message() -> FakeMessage:
 
 
 # Pre-filter (PR №9) default state: всё ОК — все типы разрешены, чек-ин ещё не сделан.
+# Pravki §Z-22 (hole #1): is_within_checkin_window=True — окно открыто,
+# pre-filter пропускает. Для тестов с "вне окна" — задают явно False.
 _DEFAULT_OK_STATE: dict[str, Any] = {
     "found": True,
     "habit_id": "any",
@@ -146,6 +148,7 @@ _DEFAULT_OK_STATE: dict[str, Any] = {
     "checkin_topic_thread_id": 12,
     "already_checked_in": False,
     "checked_in_at": None,
+    "is_within_checkin_window": True,
 }
 
 
@@ -921,6 +924,7 @@ async def test_prefilter_checkin_window_closed_passes_window_times() -> None:
             "already_checked_in": False,
             "checked_in_at": None,
             "is_joined_late": False,
+            "is_within_checkin_window": True,  # race-fallback: pre-filter пропустил, worker отверг
             "checkin_window_start": "06:00",
             "checkin_window_end": "12:00",
         },
@@ -958,6 +962,7 @@ async def test_prefilter_checkin_window_closed_falls_back_on_missing_window() ->
             "already_checked_in": False,
             "checked_in_at": None,
             "is_joined_late": False,
+            "is_within_checkin_window": True,  # race-fallback: pre-filter пропустил, worker отверг
             # start/end ОТСУТСТВУЮТ (как и в worker response ниже) — fallback на '?'
         },
         response={
@@ -974,3 +979,124 @@ async def test_prefilter_checkin_window_closed_falls_back_on_missing_window() ->
     text = bot.sent[0]["text"]
     # Fallback '?' вместо KeyError
     assert "?" in text, f"Expected '?' fallback, got: {text!r}"
+
+
+# ============================================================================
+# Pravki §Z-22 (hole #1): bot pre-filter для checkin_window_closed (НОВЫЙ,
+# синхронный, ПЕРЕД post(/internal/checkins/process)).
+#
+# Сценарий: бот получил state от backend /get_habit_state, в котором
+# is_within_checkin_window=False (backend посчитал через habit.is_within_checkin_window).
+# Бот должен ответить REJECT_OUT_OF_WINDOW с window_start/end из state
+# и НЕ вызывать backend.post() (никакого send_task).
+#
+# ВАЖНО: state-of-day checks (caught_today, already_checked_in) — позиции 8-10
+# в canonical order (см. CheckinRejectCode docstring). Бот их НЕ проверяет
+# если уже зашёл в WINDOW_CLOSED (раньше по canonical приоритету).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_returns_REJECT_OUT_OF_WINDOW() -> None:
+    """is_within_checkin_window=False → REJECT_OUT_OF_WINDOW без backend.post.
+
+    Закрывает Pravki §Z-22 (hole #1): раньше бот отвечал "Принято" → worker
+    отвергал async → юзер получал ложный acknowledge. Теперь синхронно.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # <-- вот он, баг #1
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот ответил REJECT_OUT_OF_WINDOW
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "06:00" in text, f"Expected '06:00' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+    assert "12:00" in text, f"Expected '12:00' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+    assert "окно" in text.lower(), f"Expected 'окно' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+
+    # Backend.post НЕ вызывался — никаких send_task, никакого "Принято" юзеру
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться при closed window, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_priority_over_state_of_day() -> None:
+    """is_within_checkin_window=False ВЫИГРЫВАЕТ у caught_today/already_checked_in.
+
+    Positional priority по canonical order (см. CheckinRejectCode docstring):
+    WINDOW_CLOSED (5) идёт ПЕРЕД ALREADY_CAUGHT (10) и ALREADY_CHECKED_IN (11).
+    Если юзер пойман сегодня И прислал вне окна — он узнает о закрытом окне,
+    а не о дубликате (бессмысленно — даже если б засчитали, не в то окно).
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # оба нарушены — пойман + окно закрыто
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,
+            "caught_today": True,  # и это тоже
+            "checkin_status": "caught",
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # WINDOW_CLOSED выигрывает — юзер узнаёт о закрытом окне, а не "поймали"
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected окно-текст, got: {text!r}"
+    assert "06:00" in text and "12:00" in text, f"Expected window times, got: {text!r}"
+    assert "поймали" not in text.lower(), (
+        f"Не должен сработать REJECT_CAUGHT_TODAY — приоритет WINDOW_CLOSED выше. "
+        f"Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_falls_back_on_missing_window_times() -> None:
+    """Если state не содержит checkin_window_start/end — fallback на '?' (НЕ KeyError)."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,
+            # checkin_window_start/end отсутствуют (старый backend)
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "?" in text, f"Expected '?' fallback, got: {text!r}"
+    assert "окно" in text.lower(), f"Expected окно-текст, got: {text!r}"
