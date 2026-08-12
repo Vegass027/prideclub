@@ -382,8 +382,56 @@ async def handle_domain_error(request: Request, exc: DomainError):
     return JSONResponse(status_code=exc.status_code, content={"code": exc.code})
 ```
 
----
+### 7.1 Pre-filter pattern (bot + backend + frontend mapper) — Pravki §Z-22
 
+**Проблема (история):** бот отвечал «Принято» синхронно, до того как воркер
+асинхронно успевал проверить что окно чек-ина уже закрыто / клуб поймал /
+сообщение переслано / membership на паузе. Юзер получал ложный acknowledge,
+после чего штраф сгорал молча. Тот же шаблон давал raw-код
+`checkin_window_closed` в мини-аппе через SSE `checkin.rejected`.
+
+**Решение — three-tier pattern (canonical order v2):**
+
+```
+                 bot prefilter          backend defense-in-depth        worker
+                 (sync, в чате)         (sync, в enqueue_checkin)       (async race-fallback)
+   caught       REJECT_CAUGHT_TODAY    ok=False, code=caught_today     exc.code="caught_today"
+   paused       REJECT_MEMBERSHIP_…    ok=False, code=membership_paused …
+   window       REJECT_OUT_OF_WINDOW   ok=False, code=window_closed+    exc.code="checkin_window_closed"
+   wrong_topic  REJECT_WRONG_TOPIC     ok=False, code=not_checkin_topic  exc.code="not_checkin_topic"
+   forwarded    REJECT_FORWARDED       ok=False, code=forwarded          exc.code="forwarded"
+
+   frontend mapper (apps/frontend/src/shared/texts/checkinReject.ts):
+   code → REJECT_* (14 кодов покрыто, fallback REJECT_UNKNOWN)
+```
+
+**Принципы:**
+1. **Canonical priority v2** (categories, по убыванию специфичности copy):
+   - I. Fundamental (`habit_not_found`, `membership_not_found`)
+   - II. Too late (`caught_today`, `checkin_already_exists`, `joined_late`)
+   - III. Wrong setup (`membership_paused`, `membership_left`)
+   - IV. Wrong time/topic (`window_closed`, `wrong_topic`, `forwarded`)
+   - V. Proof validation (`wrong_type`, `too_short`, `stale_message`, `empty`)
+2. **Source of truth:** backend `CheckinRejectCode` enum + TS mirror + tests
+   против drift (см. `test_checkin_reject_codes.py:test_all_exception_codes_match_enum`).
+3. **Canonical order зафиксирован тестом:**
+   `test_checkin_reject_code_order_matches_documented_priority` падает, если кто-то
+   переставит ключи в enum без обновления docstring. Это защита от тихого
+   рефакторинга.
+4. **Combo-тесты обязательны** для пар типа `caught_today + paused` — это
+   физически возможный сценарий (после `apply_catch` → `recompute_pause_status`).
+5. **Исключение:** для `forwarded` bot prefilter ОБЯЗАТЕЛЬНЫЙ (не defense-in-depth),
+   потому что `forward_date` доступен только в aiogram Message (Telegram update),
+   не в HabitStateResponse.
+
+**Не закрыто этой серией (для контекста):**
+- `caught_today` vs `missed` в worker SSE payload — worker шлёт `reason=caught_today`
+  для обеих ситуаций (caught vs cron-only). Различие доступно только в bot prefilter
+  через `state.checkin_status`. Frontend mapper использует общий текст «поймали»
+  на оба случая (финансово одинаковый результат, см. docs/09 §1.1 known
+  inconsistencies).
+
+---
 ## 8. Новые привычки — только данными, без изменения кода
 
 ```python

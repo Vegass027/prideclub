@@ -253,6 +253,46 @@ PRIMARY KEY (user_id, offer_version_id)
 Уникальный индекс `(membership_id, date)` в `checkins`. Повторная попытка в тот же день
 идемпотентно возвращает существующую запись.
 
+### 4.0. Pre-filter exceptions (Pravki §Z-22, 5-round fix)
+
+Полный набор доменных исключений, используемых в чек-ин пути
+(backend → bot → frontend mapper). Single source of truth — `CheckinRejectCode`
+enum в `apps/backend/app/core/constants.py`, mirror в
+`apps/frontend/src/shared/types/checkinReject.ts`. Drifts защита:
+`test_all_exception_codes_match_enum` (backend) + ручной review в
+`apps/frontend/src/shared/types/__tests__/checkinReject.test.ts`.
+
+| Exception | `code` (canonical) | Где бросается |
+|---|---|---|
+| `HabitNotFoundError` | `habit_not_found` | backend `enqueue_checkin` (нет клуба по chat_id) |
+| `CheckinWindowClosedError` | `checkin_window_closed` | backend `enqueue_checkin` + worker `process_checkin` |
+| `CheckinAlreadyExistsError` | `checkin_already_exists` | worker (duplicate checkin_id) |
+| `CheckinAlreadyCaughtError` | `caught_today` | worker (есть Penalty за club_date) |
+| `CheckinWrongTopicError` | `not_checkin_topic` | backend `enqueue_checkin` + worker (Topic-scoped club) |
+| `CheckinJoinedLateError` | `joined_late` | worker (joined_today после закрытия окна) |
+| `CheckinMembershipPausedError` | `membership_paused` | backend `enqueue_checkin` + worker `process_checkin` |
+| `CheckinMembershipLeftError` | `membership_left` | backend `enqueue_checkin` + worker `process_checkin` |
+| `MembershipNotFoundError` | `membership_not_found` | backend `enqueue_checkin` + worker |
+| `MembershipNotActiveError` (legacy) | `membership_not_active` | catch-flow (`/events/stream`, legacy hook); НЕ чек-ин |
+| `ProofValidationError("forwarded")` | `forwarded` | `proof_validator.validate_proof_media()` |
+| `ProofValidationError("too_short")` | `too_short` | `proof_validator` (video_note < 3 сек) |
+| `ProofValidationError("wrong_type")` | `wrong_type` | `proof_validator` (тип не в `habit.proof_types`) |
+| `ProofValidationError("empty")` | `empty` | `proof_validator` (text empty) |
+| `ProofValidationError("stale_message")` | `stale_message` | `proof_validator` (message_date > 60s ago или из будущего) |
+
+**Canonical order v2** (порядок проверок в bot prefilter И backend defense-in-depth
+должен совпадать — `test_checkin_reject_code_order_matches_documented_priority`):
+
+1. **Structural / fundamental** — `habit_not_found`, `membership_not_found`
+2. **Too late** (финансовый итог дня) — `caught_today`, `checkin_already_exists`, `joined_late`
+3. **Wrong setup** (actionable: topup / rejoin) — `membership_paused`, `membership_left`
+4. **Wrong time/topic** (перепосылкой/ожиданием) — `checkin_window_closed`, `not_checkin_topic`, `forwarded`
+5. **Proof validation** — `wrong_type`, `too_short`, `stale_message`, `empty`
+
+Принцип приоритета: для каждой пары побеждает более специфичный текст (комбо-тесты
+для `caught_today + paused/left/window_closed` зафиксированы в `apps/bot/tests/test_checkin_handler.py`).
+Подробнее — `docs/04-code-standards.md` §7.1 "Pre-filter pattern".
+
 ### 4.2. Валидация медиа
 ```python
 def validate_proof_media(message: Message, proof_type: ProofType) -> tuple[bool, str | None]:

@@ -394,12 +394,26 @@ service-token (с полным доступом к backend API) лежит го�
   Что осталось моком: **отсутствие реального `bot.send_invoice`** — на проде нет
   `PROVIDER_TOKEN`, бот не вызывает Telegram Payment API, деньги «списываются»
   без взаимодействия с Telegram. Это отдельная задача (см. Pravki-subscribe-and-join.md §6).
-- 🟡 **Z-19 joiner-late protection** — реализован (commit `497d01d`, 2026-08-09), но
-  отдельная документация в `docs/` не обновлена. Защита: `HabitStateResponse.is_joined_late`
-  + bot pre-filter + worker `CheckinJoinedLateError` (см. `apps/worker/worker/tasks/process_checkin.py:160`
-  и `apps/bot/bot/handlers/checkin.py:177`). 3 уровня защиты подтверждены автотестами
-  (12 backend + 2 worker + 3 bot). Frontend: блок на TodayPage для статуса `joined_late`.
-  TODO: задокументировать в `docs/09-prod-readiness.md §1.1` (отдельная задача ритуала).
+- ✅ **Pravki §Z-22: prefilter holes 5-round fix** (закрыто 2026-08-12,
+  серия `b4f8974` → `2eda062` → `3e7f1ee` → `4272cfa` → `92a05be` → `6cf22f2` → `b4cc923`) —
+  foundation `CheckinRejectCode` enum с drift-test, закрыты 4 дырки
+  (checkin_window_closed / not_checkin_topic с DRIFT FIX мёртвого magic-string /
+  membership_paused + membership_left сплит / forwarded с особенностью `forward_date`
+  только в aiogram Message). Three-tier защита: bot prefilter sync + backend defense-in-depth
+  в `enqueue_checkin` + frontend mapper в `checkinReject.ts`. Canonical priority v2
+  по специфичности copy: state-of-day выше time/location выше proof validation.
+  Combo-тесты для `caught_today + paused/left/window_closed` зафиксированы.
+  Закрыт оригинальный дырявый паттерн "бот отвечает Принято синхронно, worker
+  отвергает async" — раньше юзер получал ложный acknowledge. Закрыт баг
+  "мини-апп показывает raw-code через SSE" — теперь mapper переводит в
+  human-readable. Подробности — `docs/04-code-standards.md §7.1`,
+  `docs/06-data-model.md §4.0`, `docs/09-prod-readiness.md §1.1`.
+- 🟡 **Известное несоответствие: бот и мини-апп показывают РАЗНЫЕ формулировки
+  для `caught_today` (cron `apply_window_expired` vs `apply_catch`).** Worker SSE payload
+  `{reason, message}` НЕ содержит `checkin_status` — фронт не может отличить
+  "поймали" от "штраф списан, никто не поймал". Бот различает через `state.checkin_status`.
+  Финансово одинаково, копия разная. Подробности — `docs/09-prod-readiness.md §3`.
+  Отдельный PR для расширения `_publish_checkin_rejected` + mapper.
 - ❌ **Бэкапы не развёрнуты.** `backup_cron.sh` готов, нет `aws` CLI, нет
   `S3_*` env, нет cron-задачи. Текущая защита — только volume `habit-club_pgdata`.
 - ❌ **Sentry = no-op** (DSN пуст). Grafana не развёрнута. Кастомных Prometheus-метрик нет.
