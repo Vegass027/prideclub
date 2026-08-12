@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { TodayResponse } from "@/shared/types";
+import { checkinRejectText } from "@/shared/texts/checkinReject";
 
 /** Backoff между reconnect-попытками, в миллисекундах. */
 const BACKOFFS_MS = [1000, 2000, 5000, 10000] as const;
@@ -151,14 +152,31 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
 
     source.addEventListener("checkin.rejected", (e) => {
       if (e.lastEventId) lastEventIdUser = e.lastEventId;
-      let message = "Чек-ин отклонён";
+      // Pravki §Z-22 (Step 5, hole #2): frontend mapper, симметричный
+      // apps/bot/bot/handlers/checkin_texts.py. Раньше фронт пассивно
+      // показывал payload.message (raw code вроде "checkin_window_closed")
+      // — теперь маппим code → human-readable text.
+      //
+      // Worker шлёт payload {reason, code, message, window_start, window_end}.
+      // Берём reason (canonical) если есть, fallback на code, fallback на null.
+      let code: string | null = null;
+      let window_start: string | undefined;
+      let window_end: string | undefined;
       try {
-        const payload = JSON.parse(e.data) as { message?: string };
-        if (payload.message) message = payload.message;
+        const payload = JSON.parse(e.data) as {
+          reason?: string;
+          code?: string;
+          window_start?: string;
+          window_end?: string;
+        };
+        code = payload.reason ?? payload.code ?? null;
+        window_start = payload.window_start;
+        window_end = payload.window_end;
       } catch {
-        // не JSON — дефолт
+        // не JSON — mapper fallback на REJECT_UNKNOWN
       }
-      onError(message);
+      const text = checkinRejectText(code, { window_start, window_end });
+      onError(text);
     });
 
     // Item 9: you_were_caught — personal для жертвы (user-stream).

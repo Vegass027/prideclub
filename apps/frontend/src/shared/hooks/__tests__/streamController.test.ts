@@ -82,7 +82,7 @@ function createHarness(opts: HarnessOpts = {}) {
 
   const requestToken = vi.fn(
     opts.requestTokenImpl ??
-      (async (_habitId: string) => ({
+      (async () => ({
         token: "tok-1",
         expires_at: "2099-01-01T00:00:00Z",
       })),
@@ -165,7 +165,11 @@ describe("createStreamController", () => {
     void setQueryData;
   });
 
-  it("checkin.rejected → onError с message из payload", async () => {
+  it("checkin.rejected → onError с mapped text (НЕ raw code)", async () => {
+    // Pravki §Z-22 (Step 5, hole #2): фронт маппит code → text,
+    // а не показывает payload.message сырым.
+    // Worker шлёт {reason, code, message, window_start, window_end};
+    // mapper использует reason (canonical) + window_start/end.
     const onError = vi.fn();
     const h = createHarness({ onError });
     h.controller.start();
@@ -173,13 +177,46 @@ describe("createStreamController", () => {
 
     h.instances()[0].emit(
       "checkin.rejected",
-      JSON.stringify({ message: "Окно чек-ина закрыто" }),
+      JSON.stringify({
+        reason: "checkin_window_closed",
+        // message намеренно КАНОНИЧЕСКИЙ (как шлёт worker).
+        // mapper всё равно переводит в human-readable.
+        message: "checkin_window_closed",
+        window_start: "06:00",
+        window_end: "12:00",
+      }),
     );
 
-    expect(onError).toHaveBeenCalledWith("Окно чек-ина закрыто");
+    const callArg = onError.mock.calls[0][0] as string;
+    expect(callArg).toContain("06:00"); // mapper подставил время
+    expect(callArg).toContain("12:00");
+    expect(callArg.toLowerCase()).toContain("окно");
+    // Главный инвариант: НЕ raw code
+    expect(callArg).not.toMatch(/^↩\s*checkin_window_closed/);
+    expect(callArg).not.toMatch(/[a-z_]+_closed$/i);
   });
 
-  it("checkin.rejected с битым JSON → onError с дефолтным сообщением", async () => {
+  it("checkin.rejected → onError с mapped text для membership_paused", async () => {
+    const onError = vi.fn();
+    const h = createHarness({ onError });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit(
+      "checkin.rejected",
+      JSON.stringify({
+        reason: "membership_paused",
+        message: "membership_paused",
+      }),
+    );
+
+    const callArg = onError.mock.calls[0][0] as string;
+    expect(callArg.toLowerCase()).toContain("паузе");
+    expect(callArg.toLowerCase()).toContain("депозит");
+  });
+
+  it("checkin.rejected с битым JSON → onError с REJECT_UNKNOWN", async () => {
+    // Pravki §Z-22 (Step 5): битый JSON → mapper fallback на UNKNOWN.
     const onError = vi.fn();
     const h = createHarness({ onError });
     h.controller.start();
@@ -187,7 +224,23 @@ describe("createStreamController", () => {
 
     h.instances()[0].emit("checkin.rejected", "{not-json");
 
-    expect(onError).toHaveBeenCalledWith("Чек-ин отклонён");
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("Не получилось"));
+  });
+
+  it("checkin.rejected с unknown code → onError с REJECT_UNKNOWN", async () => {
+    // Pravki §Z-22 (Step 5): неизвестный code → mapper fallback,
+    // а не просто показ raw code.
+    const onError = vi.fn();
+    const h = createHarness({ onError });
+    h.controller.start();
+    await vi.waitFor(() => expect(h.instances().length).toBe(1));
+
+    h.instances()[0].emit(
+      "checkin.rejected",
+      JSON.stringify({ reason: "some_new_code_not_in_enum_yet" }),
+    );
+
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("Не получилось"));
   });
 
   it("onerror → close + backoff 1s → новый EventSource с НОВЫМ токеном", async () => {
