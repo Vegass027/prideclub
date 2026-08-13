@@ -2,7 +2,19 @@ export type ProofType = "video_note" | "photo" | "text";
 
 export type MembershipStatus = "active" | "paused" | "left";
 
-export type CheckinStatus = "done" | "missed" | "pending" | "not_started";
+export type CheckinStatus =
+  | "done"
+  | "missed"
+  | "pending"
+  | "not_started"
+  // Pravki §Z-22 follow-up fix: backend DB enum checkin_status
+  // (см. apps/backend/app/core/constants.py + alembic миграции с расширением)
+  // включает 'caught' и 'joined_late'. /api/v1/habits/{id}/members
+  // возвращает existing.status.value напрямую — без фильтра на frontend
+  // статусы. 'caught' возникает после apply_catch на жертве, и до этого
+  // фикса StatusBadge с `Record<CheckinStatus, ...>` падал на undefined.
+  | "caught"
+  | "joined_late";
 
 export interface User {
   id: number;

@@ -5,6 +5,11 @@ const statusConfig: Record<CheckinStatus, { label: string; classes: string; emoj
   missed: { label: "Просрочено", classes: "bg-danger/15 text-danger border-danger/30", emoji: "❌" },
   pending: { label: "Ожидает выполнения", classes: "bg-warning/15 text-warning border-warning/30", emoji: "⏳" },
   not_started: { label: "Не начато", classes: "bg-muted/15 text-muted border-muted/30", emoji: "💤" },
+  // Pravki §Z-22 follow-up fix: после apply_catch на жертве в БД пишется
+  // Checkin(status='caught'). /members endpoint возвращает это как status,
+  // и StatusBadge падал на undefined (lookup в Record). Добавлены бейджи.
+  caught: { label: "Пойман", classes: "bg-danger/15 text-danger border-danger/30", emoji: "🎯" },
+  joined_late: { label: "Опоздал к окну", classes: "bg-warning/15 text-warning border-warning/30", emoji: "🕐" },
 };
 
 interface StatusBadgeProps {
