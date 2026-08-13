@@ -19,6 +19,8 @@ from app.schemas import (
     HabitOut,
     MarketplaceResponse,
     MembershipOut,
+    MyHabitOut,
+    MyHabitsListResponse,
     TodayResponse,
 )
 from app.services.checkin_service import CheckinService
@@ -127,20 +129,30 @@ async def today(
     )
 
 
-@router.get("/me/habits", response_model=MarketplaceResponse)
+@router.get("/me/habits", response_model=MyHabitsListResponse)
 async def my_habits(
     session: SessionDep,
     user: TelegramUserDbDep,
-) -> MarketplaceResponse:
+) -> MyHabitsListResponse:
     """Список клубов, в которых состоит пользователь.
 
-    Используется в глобальном habit picker'е: если клубов >1 — редиректим
-    на /my-habits, если 1 — Today откроется напрямую.
+    Используется в:
+    - Global habit picker (`OnboardingPage` / redirect logic): если клубов >1
+      — редиректим на /my-habits, если 1 — Today откроется напрямую.
+    - ProfilePage "Мои клубы" — бейдж «Членство до {date}» и кнопка
+      «Пополнить» рядом (feature/paused-member-ux).
+    - MarketplacePage — `isJoined` flag для «Открыть клуб» vs «Вступить».
+
+    Feature/paused-member-ux: возвращает ВСЕ не-LEFT membership'ы
+    (ACTIVE + PAUSED), плюс для каждой — `membership_status` и
+    `subscription_until` для badge'а. PAUSED-юзер с пустым депозитом
+    теперь видит свой клуб и кнопку «Пополнить» — иначе застревает
+    на странице без понимания что делать.
     """
     repo = HabitRepository(session)
-    rows = await repo.list_for_user(user.id)
+    rows = await repo.list_for_user_with_membership(user.id)
     items = [
-        HabitOut(
+        MyHabitOut(
             id=str(h.id),
             title=h.title,
             description=h.description,
@@ -159,7 +171,10 @@ async def my_habits(
             telegram_invite_link=h.telegram_invite_link,
             checkin_topic_thread_id=h.checkin_topic_thread_id,
             chat_topic_thread_id=h.chat_topic_thread_id,
+            # Membership context (feature/paused-member-ux):
+            membership_status=m.status.value,
+            subscription_until=m.subscription_until,
         )
-        for h in rows
+        for h, m in rows
     ]
-    return MarketplaceResponse(items=items)
+    return MyHabitsListResponse(items=items)

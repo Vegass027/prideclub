@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import MembershipStatus
 from app.models.habit import Habit
 from app.models.membership import Membership
 
@@ -103,18 +104,61 @@ class HabitRepository:
         return [(h, c) for h, c in (await self._session.execute(stmt)).all()]
 
     async def list_for_user(self, user_id: int) -> list[Habit]:
-        """Клубы, в которых состоит пользователь (active memberships)."""
+        """Клубы, в которых состоит пользователь (active memberships).
+
+        Фильтр строго ACTIVE. Используется leaderboard endpoints
+        (apps/backend/app/api/v1/leaderboard.py:597, :644) — там важно
+        НЕ показывать клубы с PAUSED/LEFT юзерами, иначе streak
+        leaderboard будет показывать «сломанные» серии и ломать
+        ранжирование.
+
+        Для UI-кнопок (Marketplace «Открыть клуб», Profile «Мои клубы»)
+        используй `list_for_user_with_membership` — там PAUSED тоже
+        нужен (paused-юзер должен видеть свой клуб, чтобы пополнить
+        депозит).
+        """
         stmt = (
             select(Habit)
             .join(Membership, Membership.habit_id == Habit.id)
             .where(
                 Membership.user_id == user_id,
-                Membership.status == "active",
+                Membership.status == MembershipStatus.ACTIVE,
                 Habit.is_active.is_(True),
             )
             .order_by(Habit.created_at)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_for_user_with_membership(
+        self, user_id: int
+    ) -> list[tuple[Habit, Membership]]:
+        """Клубы пользователя + сами membership-row'ы (status, subscription_until).
+
+        Feature/paused-member-ux: для /me/habits нужен membership_status
+        и subscription_until, чтобы отрендерить badge "Членство до {date}"
+        и показать paused-состояние. Один JOIN, без N+1.
+
+        Возвращает ACTIVE + PAUSED (status != LEFT). LEFT исключён — это
+        явный action юзера (leave), и "вернуть в клуб" через /me/habits
+        нельзя (нужен POST /join с проверкой deposit).
+
+        Habit-picker логика (1 club → Today, >1 → my-habits) корректно
+        работает и для paused юзеров: paused user с 1 клубом попадает
+        на Today, где видит баннер "пополни депозит".
+        """
+        stmt = (
+            select(Habit, Membership)
+            .join(Membership, Membership.habit_id == Habit.id)
+            .where(
+                Membership.user_id == user_id,
+                Membership.status != MembershipStatus.LEFT,
+                Habit.is_active.is_(True),
+            )
+            .order_by(Habit.created_at)
+        )
+        return [
+            (h, m) for h, m in (await self._session.execute(stmt)).all()
+        ]
 
     async def add_to_prize_pool(self, habit_id: str, amount: int) -> None:
         """Атомарный инкремент prize_pool.

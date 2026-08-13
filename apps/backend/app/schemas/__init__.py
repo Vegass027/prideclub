@@ -80,6 +80,73 @@ class MembershipOut(BaseModel):
     joined_at: datetime
 
 
+class MyHabitOut(HabitOut):
+    """HabitOut + membership-context для GET /api/v1/me/habits.
+
+    Feature/paused-member-ux: возвращает ВСЕ membership'ы пользователя,
+    включая PAUSED (раньше бэк фильтровал только ACTIVE — Sofia
+    с пустым депозитом не видела свой клуб ни в Marketplace, ни в
+    "Мои клубы"). LEFT по-прежнему исключён (явное действие юзера,
+    не silent re-join).
+
+    `joined_at` намеренно НЕ возвращаем — UI badge показывает только
+    "Членство до {subscription_until}", дата вступления не нужна
+    (избыточная информация на карточке).
+    """
+
+    membership_status: str  # "active" | "paused"
+    subscription_until: date | None = None
+
+
+class MyHabitsListResponse(BaseModel):
+    items: list[MyHabitOut]
+
+
+# ---------------------------------------------------------------------------
+# Pravki-subscribe-and-join.md §Z-12.1: POST /api/v1/payments/subscribe
+# (feature/subscribe-and-join, конфликтовало с feature/paused-member-ux).
+# Эти схемы нужны payments.py (SubscribeRequest/Response), который остаётся
+# без изменений в этой ветке — мы только добавляем MyHabitOut выше. Но
+# чтобы prod (где payments.py использует SubscribeRequest) не падал при
+# импорте, восстанавливаем здесь.
+# ---------------------------------------------------------------------------
+
+
+class SubscribeRequest(BaseModel):
+    """Request для объединённой оплаты «подписка + депозит + создание ACTIVE membership».
+
+    Pravki-subscribe-and-join.md §Z-12.1:
+    - `subscription_accepted` — server-side gate (см. §Z-13.1 матрица). Допустимо
+      True и False если у юзера есть активная подписка (existing.subscription_until >= today).
+      Если подписки нет — должно быть True, иначе 422.
+    - `idempotency_key` — client-generated UUID4 (uuid4 из фронта), позволяет safe-retry
+      без двойного списания. Префикс «subscribe:» добавляется на backend для отделения
+      от idempotency_key обычных topup'ов.
+    """
+
+    habit_id: str
+    deposit_amount_kopecks: int = Field(gt=0, le=10_000_000)
+    subscription_accepted: bool
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class SubscribeResponse(BaseModel):
+    """Response для объединённой оплаты.
+
+    Pravki-subscribe-and-join.md §Z-13.3: `charged_subscription` показывает,
+    списали ли price_month (True) или только депозит (False — была активная
+    подписка, не трогаем). UI использует это для adaptive alert после успеха.
+    """
+
+    ok: bool = True
+    transaction_id: str
+    membership_id: str
+    new_deposit_balance: int
+    subscription_until: date
+    total_charged_kopecks: int
+    charged_subscription: bool
+
+
 class CheckinStatusOut(BaseModel):
     """Статус чек-ина пользователя в клубе + сводная статистика.
 

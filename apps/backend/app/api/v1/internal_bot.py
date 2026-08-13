@@ -32,6 +32,7 @@ from app.db.redis import get_redis
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.user_repository import UserRepository
 
 router = APIRouter()
 logger = get_logger("internal_bot")
@@ -293,6 +294,19 @@ class HabitStateResponse(BaseModel):
     checkin_topic_thread_id: int | None = None
     already_checked_in: bool = False
     checked_in_at: datetime | None = None
+    # Feature/paused-member-ux: бот prefilter должен отвечать
+    # "пополни депозит" для PAUSED-членов, а не общее "окно закрыто".
+    # Default None = нет membership → бот НЕ реагирует (defense-in-depth
+    # в /checkins/process всё равно отвергнет no_membership).
+    membership_status: str | None = None  # "active" | "paused" | "left" | None
+    # Депозит пользователя (копейки). Нужен для REJECT_PAUSED_OR_WINDOW
+    # текста "{balance} из {penalty}". Default 0 = если state не подгрузился,
+    # defense-in-depth в /checkins/process всё равно отвергнет.
+    deposit_balance: int = 0
+    # Штраф клуба (копейки). Нужен боту для той же copy "{balance} из
+    # {penalty}". Default 0 = если клуб не подгрузился, бот покажет
+    # "из 0,00 ₽" (не критично, defence-in-depth).
+    penalty_amount: int = 0
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -328,6 +342,10 @@ async def get_habit_state(
         user_id=user_id, habit_id=habit.id
     )
 
+    # Feature/paused-member-ux: deposit_balance юзера — для бота copy.
+    user_repo = UserRepository(session)
+    user_row = await user_repo.get(user_id)
+
     already_checked_in = False
     checked_in_at: datetime | None = None
     if membership is not None:
@@ -347,5 +365,10 @@ async def get_habit_state(
         checkin_topic_thread_id=habit.checkin_topic_thread_id,
         already_checked_in=already_checked_in,
         checked_in_at=checked_in_at,
+        # Feature/paused-member-ux: для бота — paused-юзер должен получить
+        # "пополни депозит", а не общее "окно закрыто".
+        membership_status=membership.status.value if membership is not None else None,
+        deposit_balance=user_row.deposit_balance if user_row is not None else 0,
+        penalty_amount=habit.penalty_amount,
     )
 

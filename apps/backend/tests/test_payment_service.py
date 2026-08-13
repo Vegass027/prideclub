@@ -326,3 +326,150 @@ async def test_payment_with_none_habit_id_skips_membership_lookup() -> None:
     assert len(session.transactions) == 1
     assert tx.related_membership_id is None
     assert u.deposit_balance == 30_000
+
+
+# ---------------------------------------------------------------------------
+# Paused-member UX (feature/paused-member-ux): blocker test.
+#
+# Сценарий Sofia: deposit=0, membership в habit была paused
+# (deposit < penalty). После topup recompute_pause_status должен
+# выставить status=active (если новый deposit >= penalty).
+#
+# Если этот тест упадёт — кнопка "Пополнить" будет увеличивать
+# баланс, но не возвращать юзера в активный статус. PR
+# feature/paused-member-ux без этого фикса бесполезен.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_topup_resumes_paused_membership() -> None:
+    """Blocker test для feature/paused-member-ux.
+
+    Воспроизводит сценарий Sofia из бага:
+      - Юзер deposit=0, membership в habit paused (penalty 50₽).
+      - Юзер жмёт «Пополнить» в Profile → POST /api/v1/payments/topup.
+      - Ожидаем: deposit +=, membership.status = active.
+
+    Логика в PaymentService._apply: после `u.deposit_balance += amount`
+    вызывается `MembershipService.recompute_pause_status(user_id)`, который
+    проходит по всем не-LEFT memberships и переставляет status на основе
+    `deposit >= penalty_amount`. Этот тест ловит регрессию если кто-то
+    удалит этот вызов (был уже случай в архиве — фиксируем контракт).
+    """
+    from app.models.user import User
+
+    # 1. Юзер с пустым депозитом
+    u = User(id=42, first_name="Sofia", deposit_balance=0)
+    user_repo = _FakeUserRepo({42: u})
+
+    # 2. Membership paused (deposit < penalty) — типичное состояние после
+    #    apply_catch / topup до фикса UX
+    m_paused = Membership(
+        id=str(uuid4()),
+        user_id=42,
+        habit_id="habit-probegka",
+        status=MembershipStatus.PAUSED,
+    )
+
+    session = _FakeSession()
+    session.users[42] = u
+    session.memberships[m_paused.id] = m_paused
+
+    # 3. Хак session.execute:
+    #    - transactions idempotency lookup → None (первый раз)
+    #    - user lock → наш юзер
+    #    - get_for_user_in_habit → m_paused (нужно для related_membership_id)
+    #    - recompute_pause_status SELECT (Membership, penalty) → [(m_paused, 50_00)]
+    original_execute = session.execute
+
+    async def execute_paused_topup(stmt):
+        text = str(stmt)
+        if "transactions" in text and "idempotency_key" in text:
+            return _Result(scalar=None)
+        if "FROM memberships" in text and "habits" in text:
+            # recompute_pause_status: SELECT m, h.penalty_amount FROM memberships JOIN habits
+            return _Result(rows=[(m_paused, 50_00)])
+        if "memberships" in text and "users.id" not in text:
+            # get_for_user_in_habit — scalar lookup
+            return _Result(scalar=m_paused)
+        if "users" in text and "deposit_balance" in text:
+            return _Result(scalar=u)
+        return await original_execute(stmt)
+
+    session.execute = execute_paused_topup  # type: ignore[assignment]
+
+    # 4. Topup: +200₽ (deposit 0 → 200₽, penalty 50₽, должен стать active)
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
+    await service.confirm_deposit_topup(
+        charge_id="charge-sofia-resume",
+        user_id=42,
+        habit_id=None,  # глобальный topup из ProfilePage
+        amount_kopecks=200_00,
+    )
+
+    # 5. Assertions
+    assert u.deposit_balance == 200_00, (
+        f"deposit should be 200₽ after topup, got {u.deposit_balance / 100:.2f}₽"
+    )
+    assert m_paused.status == MembershipStatus.ACTIVE, (
+        "after topup, paused membership must be resumed to ACTIVE "
+        "(deposit 200₽ >= penalty 50₽). Если тут PAUSED — "
+        "recompute_pause_status не вызывается или неправильно пересчитывает. "
+        "Без этого фикса кнопка 'Пополнить' в Profile не возвращает юзера в клуб."
+    )
+
+
+@pytest.mark.asyncio
+async def test_topup_does_not_resume_when_still_below_penalty() -> None:
+    """Topup меньше penalty → membership остаётся PAUSED.
+
+    Защита от ложно-положительного test_topup_resumes_paused_membership.
+    Если бы recompute_pause_status флипал PAUSED→ACTIVE безусловно —
+    юзер с deposit=10₽ и penalty=50₽ стал бы ACTIVE и потерял бы штраф
+    на первом же пропуске. Логика: status = ACTIVE ТОЛЬКО если
+    deposit >= penalty_amount.
+    """
+    from app.models.user import User
+
+    u = User(id=42, first_name="Sofia", deposit_balance=0)
+    user_repo = _FakeUserRepo({42: u})
+    m_paused = Membership(
+        id=str(uuid4()),
+        user_id=42,
+        habit_id="habit-probegka",
+        status=MembershipStatus.PAUSED,
+    )
+    session = _FakeSession()
+    session.users[42] = u
+    session.memberships[m_paused.id] = m_paused
+
+    original_execute = session.execute
+
+    async def execute_partial(stmt):
+        text = str(stmt)
+        if "transactions" in text and "idempotency_key" in text:
+            return _Result(scalar=None)
+        if "FROM memberships" in text and "habits" in text:
+            return _Result(rows=[(m_paused, 50_00)])  # penalty 50₽
+        if "memberships" in text and "users.id" not in text:
+            return _Result(scalar=m_paused)
+        if "users" in text and "deposit_balance" in text:
+            return _Result(scalar=u)
+        return await original_execute(stmt)
+
+    session.execute = execute_partial  # type: ignore[assignment]
+
+    service = PaymentService(session, user_repo=user_repo)  # type: ignore[arg-type]
+    # Topup только 10₽ — меньше penalty 50₽ → membership должна остаться paused
+    await service.confirm_deposit_topup(
+        charge_id="charge-sofia-partial",
+        user_id=42,
+        habit_id=None,
+        amount_kopecks=10_00,
+    )
+
+    assert u.deposit_balance == 10_00
+    assert m_paused.status == MembershipStatus.PAUSED, (
+        "topup меньше penalty не должен resume'ить membership "
+        "(иначе юзер становится ACTIVE без coverage штрафа)"
+    )

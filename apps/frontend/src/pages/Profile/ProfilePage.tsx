@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useBalance, useMyHabits } from "@/shared/hooks";
-import { formatDateTime, formatKopecks, transactionTypeLabel } from "@/shared/utils/format";
+import { formatDateTime, formatKopecks, formatShortDate, transactionTypeLabel } from "@/shared/utils/format";
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
@@ -126,14 +126,44 @@ export function ProfilePage() {
                           <p className="mt-0.5 line-clamp-1 text-xs text-muted">{h.description}</p>
                         )}
                       </div>
+                      {/* Feature/paused-member-ux: paused-юзер видит иконку ⏸,
+                          чтобы понимать почему membership не активно. */}
+                      {h.membership_status === "paused" && (
+                        <span
+                          className="shrink-0 rounded-full bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning"
+                          title="Участие на паузе — нет депозита"
+                        >
+                          ⏸ пауза
+                        </span>
+                      )}
                     </div>
-                    <Button
-                      onClick={() => navigate(`/habits/${h.id}/today`)}
-                      variant="secondary"
-                      className="min-h-0 w-full px-3 py-1.5 text-xs"
-                    >
-                      Открыть клуб →
-                    </Button>
+                    {/* Feature/paused-member-ux: badge "Членство до {date}".
+                        ISO date → DD.MM.YYYY для UX. joined_at НЕ показываем
+                        (по решению UX: избыточно). */}
+                    {h.subscription_until && (
+                      <p className="mb-2 text-[11px] text-muted">
+                        Членство до {formatShortDate(h.subscription_until)}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={() => navigate(`/habits/${h.id}/today`)}
+                        variant="secondary"
+                        className="min-h-0 flex-1 px-3 py-1.5 text-xs"
+                      >
+                        Открыть клуб →
+                      </Button>
+                      {/* Короткий путь к пополнению из "Мои клубы" — feature/paused-member-ux.
+                          TopUpModal уже подключён (строка 178), просто открываем его.
+                          Никаких JoinPayModal — обычный мок-payout на любую сумму. */}
+                      <Button
+                        onClick={() => setTopUpOpen(true)}
+                        variant="primary"
+                        className="min-h-0 px-3 py-1.5 text-xs"
+                      >
+                        Пополнить
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </li>

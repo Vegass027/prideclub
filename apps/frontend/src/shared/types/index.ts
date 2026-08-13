@@ -32,6 +32,24 @@ export interface Habit {
   chat_topic_thread_id: number | null;
 }
 
+/**
+ * Feature/paused-member-ux: Habit + membership context для /api/v1/me/habits.
+ *
+ * Возвращает ACTIVE + PAUSED клубы юзера (LEFT исключён на бэкенде).
+ * `membership_status` нужен для UI (бейдж "⏸ пауза" в Profile).
+ * `subscription_until` — для badge "Членство до {date}".
+ *
+ * joined_at НЕ возвращается бэкендом (избыточно для карточки).
+ */
+export interface MyHabit extends Habit {
+  membership_status: "active" | "paused";
+  subscription_until: string | null;  // ISO date "YYYY-MM-DD"
+}
+
+export interface MyHabitsList {
+  items: MyHabit[];
+}
+
 export interface Membership {
   id: string;
   user_id: number;

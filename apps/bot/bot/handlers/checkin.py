@@ -146,8 +146,11 @@ async def _prefilter(
     - "text with {name}" — ответить пользователю и НЕ слать в backend.
 
     Порядок проверок (от более критичных к менее):
-    1) тип в allowed_proof_types — если нет, отвечаем про тип
-    2) специфичные ограничения типа: длительность кружка >= 3 сек
+    1) PAUSED (feature/paused-member-ux) — депозит пуст, юзер на паузе.
+       Объединённая copy "пополни депозит + окно закрыто". Идёт ПЕРВЫМ —
+       для paused-юзера любые проверки типа/длительности бессмысленны.
+    2) тип в allowed_proof_types — если нет, отвечаем про тип
+    3) специфичные ограничения типа: длительность кружка >= 3 сек
        (PR №7.5) — иначе worker отвергнет асинхронно с code=too_short,
        а юзер уже увидит ложное «Принято».
 
@@ -166,6 +169,30 @@ async def _prefilter(
     if not state.get("found"):
         log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
         return ""
+
+    # Feature/paused-member-ux: PAUSED-юзер должен получить объединённое
+    # сообщение "пополни депозит + окно закрыто", а не REJECT_OUT_OF_WINDOW
+    # или REJECT_ALREADY_CHECKED_IN. Идёт ПЕРЕД всеми проверками, потому
+    # что для paused-юзера они неприменимы — даже если он "уже отметился"
+    # вчера, сегодня он всё равно на паузе и не может двинуться дальше
+    # без пополнения депозита.
+    if state.get("membership_status") == "paused":
+        log.info(
+            "prefilter_paused",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "deposit_balance": state.get("deposit_balance"),
+                "penalty_amount": state.get("penalty_amount"),
+            },
+        )
+        return checkin_texts.REJECT_PAUSED_OR_WINDOW.format(
+            name=name,
+            balance=_format_kopecks_for_bot(state.get("deposit_balance", 0)),
+            penalty=_format_kopecks_for_bot(state.get("penalty_amount", 0)),
+            start=state.get("checkin_window_start", "?"),
+            end=state.get("checkin_window_end", "?"),
+        )
 
     if state.get("already_checked_in"):
         log.info(
@@ -207,6 +234,16 @@ async def _prefilter(
 
     # Всё ок — пропускаем.
     return None
+
+
+def _format_kopecks_for_bot(kopecks: int) -> str:
+    """Format kopecks → "X,XX ₽" для текста бота (русская локаль).
+
+    Минимальный helper — фронт у себя форматирует через Intl.NumberFormat,
+    но в боте тащить Intl ради одного сообщения — overkill.
+    """
+    rubles = kopecks / 100
+    return f"{rubles:.2f} ₽".replace(".", ",")
 
 
 @router.message(F.video_note | F.photo | F.text)

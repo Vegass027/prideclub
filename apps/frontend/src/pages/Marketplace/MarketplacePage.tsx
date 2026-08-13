@@ -9,9 +9,14 @@ import { Skeleton } from "@/shared/ui/Skeleton";
 
 export function MarketplacePage() {
   const { data, isLoading, isError, error, refetch } = useMarketplace();
+  // Feature/paused-member-ux: /me/habits теперь возвращает ACTIVE + PAUSED
+  // клубы с membership_status. Используем как источник истины для isJoined
+  // (юзер видит "Открыть клуб" даже если депозит пуст и membership paused).
   const { data: myHabits } = useMyHabits();
 
-  const joinedIds = new Set((myHabits?.items ?? []).map((h) => h.id));
+  const myClubsById = new Map(
+    (myHabits?.items ?? []).map((h) => [h.id, h] as const),
+  );
 
   if (isLoading) {
     return (
@@ -62,10 +67,13 @@ export function MarketplacePage() {
       ) : (
         <ul className="flex flex-col gap-3">
           {items.map((h) => {
-            const isJoined = joinedIds.has(h.id);
+            const myClub = myClubsById.get(h.id);
             return (
               <li key={h.id}>
-                <HabitListItem habit={h} isJoined={isJoined} />
+                <HabitListItem
+                  habit={h}
+                  membershipStatus={myClub?.membership_status ?? null}
+                />
               </li>
             );
           })}
@@ -78,10 +86,16 @@ export function MarketplacePage() {
 
 interface HabitListItemProps {
   habit: import("@/shared/types").Habit;
-  isJoined: boolean;
+  /**
+   * Feature/paused-member-ux: статус membership'а юзера в этом клубе.
+   * "active" | "paused" → рендерим «Открыть клуб» (без join-flow).
+   * null → юзер не в клубе, рендерим JoinButton.
+   */
+  membershipStatus: "active" | "paused" | null;
 }
 
-function HabitListItem({ habit, isJoined }: HabitListItemProps) {
+function HabitListItem({ habit, membershipStatus }: HabitListItemProps) {
+  const isMember = membershipStatus !== null;
   return (
     <article className="overflow-hidden rounded-card border border-white/5 bg-surface shadow-card">
       {habit.photo_url ? (
@@ -122,7 +136,14 @@ function HabitListItem({ habit, isJoined }: HabitListItemProps) {
         <Stat label="Окно" value={`${habit.checkin_window_start.slice(0, 5)}–${habit.checkin_window_end.slice(0, 5)}`} />
         <Stat label="Призовой фонд" value={formatKopecks(habit.prize_pool)} success />
       </dl>
-      {isJoined ? (
+      {/*
+        Feature/paused-member-ux:
+        - isMember (active или paused) → "Открыть клуб" без join-flow.
+          Paused-юзер попадёт на Today, где увидит баннер "пополни депозит"
+          и кнопку "💰 Пополнить депозит" (см. TodayPage §Z-4.3).
+        - !isMember → JoinButton с обычным JoinPayModal flow.
+      */}
+      {isMember ? (
         <Button
           onClick={() => (window.location.href = `/habits/${habit.id}/today`)}
           variant="secondary"

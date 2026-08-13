@@ -7,6 +7,7 @@ import type {
   LeaderboardResponse,
   MarketplaceResponse,
   MembersResponse,
+  MyHabitsList,
   TodayResponse,
   TopupResponse,
   WalletResponse,
@@ -23,7 +24,9 @@ export const habitsApi = {
     apiClient.post<{ ok: boolean }>(`/habits/${habitId}/join`).then((r) => r.data),
   leave: (habitId: string) =>
     apiClient.post<{ ok: boolean }>(`/habits/${habitId}/leave`).then((r) => r.data),
-  mine: () => apiClient.get<MarketplaceResponse>("/me/habits").then((r) => r.data),
+  // Feature/paused-member-ux: возвращает ACTIVE + PAUSED клубы с
+  // membership_status / subscription_until. См. MyHabit в types/index.ts.
+  mine: () => apiClient.get<MyHabitsList>("/me/habits").then((r) => r.data),
 };
 
 export const membersApi = {

@@ -23,6 +23,24 @@ export const formatDate = (isoString: string): string => {
   });
 };
 
+export const formatShortDate = (isoString: string): string => {
+  /** DD.MM.YYYY для badge'ов ("Членство до 05.09.2026").
+   *
+   * Принимает ISO-строку вида "2026-09-05" (date-only, без TZ) или
+   * полный ISO datetime. Для date-only парсим вручную чтобы избежать
+   * TZ-сдвига (new Date("2026-09-05") в UTC-зоне = "2026-09-04" в Москве).
+   */
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoString);
+  if (dateOnlyMatch) {
+    const [, y, m, d] = dateOnlyMatch;
+    return `${d}.${m}.${y}`;
+  }
+  const date = new Date(isoString);
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${day}.${month}.${date.getFullYear()}`;
+};
+
 export const formatDateTime = (isoString: string): string => {
   const date = new Date(isoString);
   return date.toLocaleString("ru-RU", {
