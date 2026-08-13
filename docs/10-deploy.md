@@ -297,6 +297,22 @@ Overlay filesystem не позволяет «directory → file» замещен
       - "127.0.0.1:5173:80"
 ```
 
+> **Побочный эффект workaround'а (2026-08-13, Pravki-static):** bind-mount
+> `/app/apps/frontend/dist → /usr/share/nginx/html` перекрывает volume
+> `club_uploads → /usr/share/nginx/html/static` (volume монтируется
+> «в пустоту», т.к. в dist/ нет подпапки `static`). В результате frontend-nginx
+> возвращает 404 на `GET /static/uploads/club_photos/*` (фото/гифки клубов
+> не отображаются в форме редактирования и на user-страницах).
+>
+> **Симптом закрыт** (commit `89e6bfe`): в `infra/nginx/nginx.prideclub.conf`
+> добавлен блок `location ^~ /static/ { proxy_pass http://habit_backend; }` для
+> `app.prideclub.fun`, `prideclub.fun`, `admin.prideclub.fun`. Backend через
+> FastAPI StaticFiles (`apps/backend/app/main.py:166`) уже корректно отдаёт
+> файлы из volume `club_uploads` с правильным `Content-Type`.
+> Применение: `scp infra/nginx/nginx.prideclub.conf privichki-prod:/etc/nginx/sites-enabled/habit-club && ssh privichki-prod 'nginx -t && nginx -s reload'`.
+> **Первопричина не закрыта** — нужно вернуть `build:` для `frontend` после
+> диагностики overlay-конфликта.
+
 **Deploy процедура (frontend):**
 
 ```bash

@@ -458,6 +458,17 @@ service-token (с полным доступом к backend API) лежит го�
   применён (commit `4a390e1`): `image: nginx:1.27-alpine` + volume mount на bundle.
   Диагностика первопричины — отдельная задача (см. `docs/10-deploy.md` §runbook
   после фикса этого snapshot'а).
+  > **Snapshot 2026-08-13 (Pravki-static):** workaround `4a390e1` создал побочный баг —
+  > bind-mount `/app/apps/frontend/dist → /usr/share/nginx/html` перекрыл volume
+  > `club_uploads → /usr/share/nginx/html/static`, и frontend-nginx перестал видеть
+  > фото/гифки клубов (`GET /static/uploads/club_photos/*.gif → 404` на
+  > `app.prideclub.fun`). **Симптом закрыт** (commit `89e6bfe` на
+  > `feature/paused-member-ux`): добавлен `location ^~ /static/ { proxy_pass
+  > http://habit_backend; }` в `infra/nginx/nginx.prideclub.conf` для
+  > `app.prideclub.fun`, `prideclub.fun`, `admin.prideclub.fun` — backend через
+  > FastAPI StaticFiles уже корректно отдаёт файлы из `club_uploads` volume
+  > (`apps/backend/app/main.py:166`). **Первопричина не закрыта** — нужно
+  > вернуть `build:` для `frontend` (см. отдельную задачу).
 - ⚠️ **Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE**
   (2026-08-09, НЕ закрыто). `docker compose run --rm backend alembic upgrade head`
   стартует контейнер, но не пишет в БД — миграция висит. Workaround: ручной
