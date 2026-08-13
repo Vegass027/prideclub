@@ -323,7 +323,46 @@ export function TodayPage() {
                 </button>
               )}
             </>
+          ) : membership.status === "paused" ? (
+            // Fix follow-up (feature/paused-member-ux): paused-юзер ТОЖЕ состоит
+            // в клубе — membership не LEFT, есть subscription_until. Раньше эта
+            // ветка попадала в "иначе" и показывала активную кнопку "Присоединиться",
+            // что вводило в заблуждение (юзер уже в клубе, просто на паузе из-за
+            // пустого депозита). Теперь — disabled badge с пояснением + ссылка на группу.
+            <>
+              <h3 className="mb-2 text-sm font-semibold text-text">
+                Клуб в Telegram
+              </h3>
+              <Button
+                disabled
+                aria-disabled="true"
+                className="w-full"
+              >
+                ⏸ Участие на паузе
+              </Button>
+              <p className="mt-2 text-xs text-muted">
+                Пополни депозит на баннере выше, чтобы вернуться к чек-инам.
+                Чат клуба по-прежнему доступен ниже.
+              </p>
+              {habit.telegram_invite_link && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    hapticImpact("light");
+                    openChatRoot(
+                      habit.chat_id,
+                      habit.telegram_invite_link ?? null,
+                    );
+                  }}
+                  className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-surface px-4 py-2 text-sm font-medium text-text transition hover:border-white/20"
+                >
+                  💬 Открыть группу
+                </button>
+              )}
+            </>
           ) : (
+            // LEFT (или любой другой не-ACTIVE/PAUSED статус): юзер действительно
+            // не состоит в клубе. Показываем join-flow.
             <>
               <h3 className="mb-2 text-sm font-semibold text-text">
                 Клуб в Telegram

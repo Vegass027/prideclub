@@ -149,20 +149,28 @@ export function ProfilePage() {
                       <Button
                         onClick={() => navigate(`/habits/${h.id}/today`)}
                         variant="secondary"
-                        className="min-h-0 flex-1 px-3 py-1.5 text-xs"
+                        // Fix follow-up: когда "Пополнить" рядом — кнопка "Открыть клуб"
+                        // становится уже (равная ширина). Когда её нет — растягивается.
+                        className={`min-h-0 px-3 py-1.5 text-xs ${
+                          h.membership_status === "paused" ? "flex-1" : "w-full"
+                        }`}
                       >
                         Открыть клуб →
                       </Button>
-                      {/* Короткий путь к пополнению из "Мои клубы" — feature/paused-member-ux.
-                          TopUpModal уже подключён (строка 178), просто открываем его.
-                          Никаких JoinPayModal — обычный мок-payout на любую сумму. */}
-                      <Button
-                        onClick={() => setTopUpOpen(true)}
-                        variant="primary"
-                        className="min-h-0 px-3 py-1.5 text-xs"
-                      >
-                        Пополнить
-                      </Button>
+                      {/* Fix follow-up: показывать "Пополнить" только для PAUSED
+                          (т.е. когда депозита не хватает). Для ACTIVE — депозит уже
+                          покрывает штраф, отдельная кнопка избыточна — на TodayPage
+                          есть баннер + кнопка «💰 Пополнить депозит» если понадобится.
+                          TopUpModal уже подключён ниже, просто открываем его. */}
+                      {h.membership_status === "paused" && (
+                        <Button
+                          onClick={() => setTopUpOpen(true)}
+                          variant="primary"
+                          className="min-h-0 px-3 py-1.5 text-xs"
+                        >
+                          Пополнить
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </div>
