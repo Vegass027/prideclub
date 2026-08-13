@@ -53,6 +53,9 @@
 
 ## 3. Где что лежит — локально и на сервере
 
+> Snapshot от 2026-08-13 — добавлено `apps/backend/scripts/e2e/`
+> (reusable end-to-end simulator: scenario_happy_path + cleanup).
+
 ### Локально (`/Users/dmitriy/Downloads/Privichki`)
 
 ```
@@ -64,6 +67,15 @@ apps/
 │   ├── app/core/            # config, security, middleware, exceptions, constants, logging
 │   ├── app/db/              # session, redis
 │   ├── alembic/versions/    # 000_extensions → 009_chat_id_partial_unique
+│   ├── scripts/
+│   │   ├── seed_dev_data.py # docker exec backend python -m scripts.seed_dev_data
+│   │   ├── register_webhook.py
+│   │   └── e2e/             # e2e-simulation (см. apps/backend/scripts/e2e/README.md)
+│   │       ├── auth.py       # generate_init_data (HMAC-SHA256), FakeUser, generate_service_token
+│   │       ├── core.py       # E2EHttp (initData/service/webhook/internal), E2EDatabase (read-only SQL)
+│   │       ├── webhook.py    # фабрики фейковых Telegram Update JSON
+│   │       ├── scenario_happy_path.py  # полный путь: create → topup → join → checkin → catch → reject
+│   │       └── cleanup.py    # удаление E2E-артефактов (DRY-RUN по умолчанию)
 │   └── tests/               # 161 тест
 ├── bot/            # aiogram 3.30 + aiohttp 3.13 (webhook на :8080)
 │   └── bot/handlers/        # start, checkin, payments, chat_member
