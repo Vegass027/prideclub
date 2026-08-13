@@ -246,3 +246,256 @@ async def test_publish_stream_key_format() -> None:
         EventPublisher.idempotency_key("m-uuid", "2026-08-04")
         == "sse_published:checkin:m-uuid:2026-08-04"
     )
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 6): event_type kwarg + habit_idempotency_key +
+# publish_to_habit. Все тесты после строки sanity (чтобы не ломать
+# нумерацию) — добавляются В КОНЕЦ файла.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_publish_checkin_event_type_kwarg_default_is_byte_for_byte_compatible(
+    publisher, fake_redis
+) -> None:
+    """Backward-compat: без event_type kwarg ключ = старый формат
+    sse_published:checkin:{m}:{d} (для существующих call-сайтов)."""
+    event = CheckinEvent(event="checkin.accepted", payload={"x": 1})
+
+    # Дефолт — без event_type (как process_checkin.py сейчас вызывает)
+    await publisher.publish_checkin(
+        user_id=100,
+        habit_id="h-100",
+        membership_id="m-100",
+        date_iso="2026-08-10",
+        event=event,
+    )
+
+    # Ключ должен быть В ТОЧНОСТИ старого формата, byte-for-byte.
+    expected_key = "sse_published:checkin:m-100:2026-08-10"
+    assert await fake_redis.get(expected_key) == "1"
+    assert publisher.idempotency_key("m-100", "2026-08-10") == expected_key
+
+
+@pytest.mark.asyncio
+async def test_publish_checkin_event_type_caught_does_not_collide_with_checkin(
+    publisher, fake_redis
+) -> None:
+    """COLLISION-фикс: caught-публикация для той же (m, d) НЕ пересекается
+    с checkin-публикацией. Утренний checkin.rejected забивал старый ключ
+    на 24ч → вечерний you_were_caught для той же (m, d) терялся.
+    С новым kwarg: caught → sse_published:caught:{m}:{d} — независимо."""
+    event1 = CheckinEvent(event="checkin.rejected", payload={"reason": "joined_late"})
+    event2 = CheckinEvent(event="you_were_caught", payload={"catcher": "X"})
+
+    # Утро: checkin.rejected с дефолтом (event_type="checkin")
+    await publisher.publish_checkin(
+        user_id=200,
+        habit_id="h-200",
+        membership_id="m-200",
+        date_iso="2026-08-10",
+        event=event1,
+    )
+
+    # Вечер: you_were_caught с явным event_type="caught"
+    result_caught = await publisher.publish_checkin(
+        user_id=200,
+        habit_id="h-200",
+        membership_id="m-200",
+        date_iso="2026-08-10",
+        event=event2,
+        event_type="caught",
+    )
+
+    # ОБЕ публикации выполнены — нет коллизии.
+    assert result_caught is True
+
+    # Оба ключа живут независимо.
+    assert await fake_redis.get("sse_published:checkin:m-200:2026-08-10") == "1"
+    assert await fake_redis.get("sse_published:caught:m-200:2026-08-10") == "1"
+
+    # И ОБА стрим-entry лежат в user-stream (один и тот же ключ стрима!).
+    user_stream = publisher.stream_key(200, "h-200")
+    entries = await fake_redis.xrange(user_stream)
+    assert len(entries) == 2
+    events = [fields["event"] for _id, fields in entries]
+    assert "checkin.rejected" in events
+    assert "you_were_caught" in events
+
+
+# --- publish_to_habit (Item 6) ---
+
+
+@pytest.mark.asyncio
+async def test_publish_to_habit_first_time_xadds_habit_stream(
+    publisher, fake_redis
+) -> None:
+    """Первый вызов publish_to_habit → XADD в sse:habit:{habit_id}."""
+    habit_id = "h-broadcast-1"
+    payload = {
+        "event": "catch",
+        "habit_id": habit_id,
+        "catcher_user_id": 501,
+        "violator_user_id": 502,
+        "violator_membership_id": "m-502",
+        "amount": 10000,
+        "penalty_id": "penalty-uuid-1",
+    }
+
+    result = await publisher.publish_to_habit(
+        habit_id=habit_id,
+        event_type="habit_catch",
+        payload=payload,
+        scope_suffix="penalty-uuid-1",
+    )
+
+    assert result is True
+
+    # Idempotency-ключ живёт 24ч.
+    idem_key = publisher.habit_idempotency_key(
+        event_type="habit_catch", unique_id="penalty-uuid-1",
+    )
+    assert await fake_redis.get(idem_key) == "1"
+
+    # Stream entry в habit-stream.
+    habit_stream = publisher.habit_stream_key(habit_id)
+    entries = await fake_redis.xrange(habit_stream)
+    assert len(entries) == 1
+    _entry_id, fields = entries[0]
+    assert fields["habit_id"] == habit_id
+    assert fields["event"] == "catch"
+    inner_payload = json.loads(fields["payload"])
+    assert inner_payload["amount"] == 10000
+    assert inner_payload["penalty_id"] == "penalty-uuid-1"
+
+
+@pytest.mark.asyncio
+async def test_publish_to_habit_second_time_skipped_no_xadd(
+    publisher, fake_redis
+) -> None:
+    """Guard 2 для publish_to_habit: повторный вызов с тем же
+    scope_suffix → XADD не выполнен (Celery retry / duplicate delivery)."""
+    habit_id = "h-broadcast-2"
+    payload = {"event": "catch", "habit_id": habit_id, "amount": 100}
+    scope = "penalty-uuid-2"
+
+    r1 = await publisher.publish_to_habit(
+        habit_id=habit_id, event_type="habit_catch",
+        payload=payload, scope_suffix=scope,
+    )
+    r2 = await publisher.publish_to_habit(
+        habit_id=habit_id, event_type="habit_catch",
+        payload=payload, scope_suffix=scope,
+    )
+
+    assert r1 is True
+    assert r2 is False  # duplicate → skip
+
+    habit_stream = publisher.habit_stream_key(habit_id)
+    entries = await fake_redis.xrange(habit_stream)
+    assert len(entries) == 1  # только первый
+
+
+@pytest.mark.asyncio
+async def test_publish_to_habit_namespace_isolation(
+    publisher, fake_redis
+) -> None:
+    """Два habit-публикации с разным event_type — независимые namespace'ы."""
+    habit_id = "h-namespace"
+    p1 = {"event": "catch", "amount": 100}
+    p2 = {"event": "leaderboard_update", "winner": "u-1"}
+
+    # Один и тот же scope_suffix, разные event_types — должны жить отдельно.
+    r1 = await publisher.publish_to_habit(
+        habit_id=habit_id, event_type="habit_catch",
+        payload=p1, scope_suffix="penalty-X",
+    )
+    r2 = await publisher.publish_to_habit(
+        habit_id=habit_id, event_type="habit_leaderboard",
+        payload=p2, scope_suffix="penalty-X",  # ОДИН scope_suffix
+    )
+
+    assert r1 is True
+    assert r2 is True  # не duplicate, потому что разный event_type
+
+    # Два ключа с разными event_type.
+    assert await fake_redis.get("sse_published:habit_catch:penalty-X") == "1"
+    assert await fake_redis.get("sse_published:habit_leaderboard:penalty-X") == "1"
+
+    # Два event'а в habit-stream.
+    entries = await fake_redis.xrange(publisher.habit_stream_key(habit_id))
+    assert len(entries) == 2
+    events = [fields["event"] for _id, fields in entries]
+    assert events == ["catch", "leaderboard_update"]
+
+
+@pytest.mark.asyncio
+async def test_publish_to_habit_user_stream_not_touched(publisher, fake_redis) -> None:
+    """publish_to_habit пишет ТОЛЬКО в habit-stream, не трогает user-stream.
+
+    Это критично для Item 7 multiplex: user-stream содержит персональные
+    события (checkin.accepted, you_were_caught), habit-stream — broadcast.
+    Смешение сломает клиентский маппинг событий."""
+    habit_id = "h-stream-isolation"
+    user_id = 100
+    payload = {"event": "catch", "habit_id": habit_id}
+
+    await publisher.publish_to_habit(
+        habit_id=habit_id, event_type="habit_catch",
+        payload=payload, scope_suffix="penalty-Z",
+    )
+
+    # Habit-stream — есть entry.
+    habit_stream = publisher.habit_stream_key(habit_id)
+    assert len(await fake_redis.xrange(habit_stream)) == 1
+
+    # User-stream — ПУСТОЙ (publish_to_habit его не трогает).
+    user_stream = publisher.stream_key(user_id, habit_id)
+    assert await fake_redis.xrange(user_stream) == []
+
+
+@pytest.mark.asyncio
+async def test_publish_to_habit_redis_unavailable_returns_false(
+    publisher, fake_redis, monkeypatch
+) -> None:
+    """Redis down → return False (at-most-once), НЕ raise exception."""
+    from redis.asyncio import Redis
+
+    class _BoomRedis(Redis):
+        async def set(self, *args, **kwargs):
+            raise ConnectionError("redis unavailable on SET")
+
+        async def xadd(self, *args, **kwargs):
+            raise ConnectionError("redis unavailable on XADD")
+
+    monkeypatch.setattr(publisher, "_redis", _BoomRedis())
+
+    result = await publisher.publish_to_habit(
+        habit_id="h-fail", event_type="habit_catch",
+        payload={"event": "catch"}, scope_suffix="penalty-fail",
+    )
+    assert result is False
+    # Стрим не тронут (XADD не выполнился).
+    assert await fake_redis.xrange(publisher.habit_stream_key("h-fail")) == []
+
+
+def test_habit_idempotency_key_format() -> None:
+    """Sanity: ключи habit-stream + habit-idempotency в каноническом формате."""
+    assert EventPublisher.habit_stream_key("h-uuid") == "sse:habit:h-uuid"
+    assert (
+        EventPublisher.habit_idempotency_key(
+            event_type="habit_catch", unique_id="penalty-id"
+        )
+        == "sse_published:habit_catch:penalty-id"
+    )
+    # Backward-compat: idempotency_key без event_type kwarg → старый формат
+    assert (
+        EventPublisher.idempotency_key("m-1", "2026-08-10")
+        == "sse_published:checkin:m-1:2026-08-10"
+    )
+    # С event_type="caught" → новый namespace
+    assert (
+        EventPublisher.idempotency_key("m-1", "2026-08-10", event_type="caught")
+        == "sse_published:caught:m-1:2026-08-10"
+    )

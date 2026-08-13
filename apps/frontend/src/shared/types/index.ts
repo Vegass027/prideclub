@@ -2,19 +2,21 @@ export type ProofType = "video_note" | "photo" | "text";
 
 export type MembershipStatus = "active" | "paused" | "left";
 
+// Pravki-bug-fixes §Z-19 (joiner-late protection): пользователь вступил
+// в клуб сегодня ПОСЛЕ checkin_window_end. can_catch=False в /members
+// (status != 'missed'). На TodayPage самого юзера показывается мягкий
+// текст "Вы вступили после чек-ина, следующая отметка — завтра".
+//
+// Pravki-bug-fixes §Z-21 (caught badge): "caught" добавится в §Z-21.3.
 export type CheckinStatus =
   | "done"
   | "missed"
   | "pending"
   | "not_started"
-  // Pravki §Z-22 follow-up fix: backend DB enum checkin_status
-  // (см. apps/backend/app/core/constants.py + alembic миграции с расширением)
-  // включает 'caught' и 'joined_late'. /api/v1/habits/{id}/members
-  // возвращает existing.status.value напрямую — без фильтра на frontend
-  // статусы. 'caught' возникает после apply_catch на жертве, и до этого
-  // фикса StatusBadge с `Record<CheckinStatus, ...>` падал на undefined.
-  | "caught"
-  | "joined_late";
+  | "joined_late"
+  // Pravki-bug-fixes §Z-21 (caught badge): юзер пойман за пропуск сегодня.
+  // PenaltyService.apply_catch пишет Checkin(status='caught') (PR Item 2).
+  | "caught";
 
 export interface User {
   id: number;
@@ -133,7 +135,14 @@ export interface BalanceResponse {
   history: Transaction[];
 }
 
-/** Клуб в /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
+/**
+ * Клуб в /me/wallet (Pravki-deposit-sse.md §Z-4.1 + Pravki-subscribe-and-join.md §Z-17 substep 1).
+ *
+ * `subscription_until` добавлен для pre-check на фронте: JoinButton сравнивает
+ * с today и выбирает режим модалки оплаты («full» с чекбоксом подписки или
+ * «deposit-only» без чекбокса, см. §Z-13.1 матрица). None если юзер ещё
+ * ни разу не платил подписку (или legacy /join не устанавливал поле).
+ */
 export interface WalletClub {
   habit_id: string;
   title: string;
@@ -142,6 +151,13 @@ export interface WalletClub {
   can_checkin: boolean;
   /** "active" | "paused" — последний результат recompute. */
   status: MembershipStatus;
+  /**
+   * ISO date "YYYY-MM-DD" или null. Optional в TS потому что бэкенд
+   * (Pydantic) тоже делает default None, и старые фикстуры в тестах
+   * могут не передавать это поле (не влияет на тестируемое поведение).
+   * Фронт-код должен явно обрабатывать null как «нет активной подписки».
+   */
+  subscription_until?: string | null;
 }
 
 /** Ответ GET /me/wallet (Pravki-deposit-sse.md §Z-4.1). */
@@ -156,6 +172,23 @@ export interface TopupResponse {
   transaction_id?: string;
   new_deposit_balance?: number;
   code?: string;
+}
+
+/**
+ * Pravki-subscribe-and-join.md §Z-12.1: ответ POST /api/v1/payments/subscribe.
+ *
+ * `charged_subscription: true` — списали price_month + deposit (новое
+ * вступление или истёкшая подписка). `false` — списали только deposit
+ * (была активная подписка, не трогаем).
+ */
+export interface SubscribeResponse {
+  ok: boolean;
+  transaction_id: string;
+  membership_id: string;
+  new_deposit_balance: number;
+  subscription_until: string; // ISO date "YYYY-MM-DD"
+  total_charged_kopecks: number;
+  charged_subscription: boolean;
 }
 
 export interface LeaderboardBreakdown {

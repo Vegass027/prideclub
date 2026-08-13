@@ -331,6 +331,35 @@ class FakeCheckinRepo:
         self._store[(membership_id, on_date)] = c
         return c, True
 
+    async def upsert_status(
+        self,
+        *,
+        membership_id: str,
+        on_date: date,
+        status: CheckinStatus,
+    ) -> Checkin:
+        """Зеркалит прод-метод: INSERT или UPDATE status существующего Checkin.
+
+        Pravki-bug-fixes §Z-21: разрешает transitions
+        pending → caught, pending → missed, missed → caught.
+        proof_message_id сохраняется если был (НЕ перезаписывается).
+        """
+        key = (membership_id, on_date)
+        existing = self._store.get(key)
+        if existing is None:
+            c = Checkin(
+                id=str(uuid4()),
+                membership_id=membership_id,
+                date=on_date,
+                status=status,
+                proof_message_id=None,
+            )
+        else:
+            existing.status = status
+            c = existing
+        self._store[key] = c
+        return c
+
     async def count_done_for_memberships(
         self, membership_ids: list[str]
     ) -> dict[str, int]:
@@ -429,6 +458,35 @@ class FakePenaltyRepo:
             [membership_id], as_violator=as_violator
         )
         return result.get(membership_id, (0, 0))
+
+    async def ids_with_any_penalty_today(
+        self,
+        *,
+        membership_ids: list[str],
+        club_date,
+    ) -> set[str]:
+        """Зеркалит прод-метод: возвращает {membership_id} для которых есть
+        Penalty за club_date (любого reason).
+        Pravki-bug-fixes §Z-21 (can_catch fix)."""
+        if not membership_ids:
+            return set()
+        out: set[str] = set()
+        mid_set = {str(m) for m in membership_ids}
+        for p in self._store.values():
+            if str(p.membership_id) in mid_set and p.date == club_date:
+                out.add(str(p.membership_id))
+        return out
+
+    async def has_any_penalty_today(
+        self,
+        *,
+        membership_id: str,
+        club_date,
+    ) -> bool:
+        return membership_id in await self.ids_with_any_penalty_today(
+            membership_ids=[membership_id],
+            club_date=club_date,
+        )
 
 
 class FakeBonusRuleRepo:

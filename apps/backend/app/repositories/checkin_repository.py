@@ -103,3 +103,42 @@ class CheckinRepository:
         existing = await self.get_for_date(membership_id, on_date)
         assert existing is not None
         return existing, False
+
+    async def upsert_status(
+        self,
+        *,
+        membership_id: str,
+        on_date,
+        status: CheckinStatus,
+    ) -> Checkin:
+        """INSERT ... ON CONFLICT (membership_id, date) DO UPDATE SET status = ...
+
+        Семантика «upsert статуса» — отличается от get_or_create_done тем что:
+        - DO UPDATE SET status (не DO NOTHING) — разрешает transitions
+          pending→caught (apply_catch после пропуска) и pending→missed
+          (apply_window_expired cron), missed→caught (apply_catch после cron).
+        - proof_message_id сохраняется (если был done раньше — file_id остаётся
+          в БД для истории, просто status перезаписывается).
+
+        Pravki-bug-fixes §Z-21 (caught/missed badge): вызывается из
+        PenaltyService.apply_catch (status='caught') и
+        PenaltyService.apply_window_expired (status='missed').
+
+        Returns обновлённый/созданный Checkin.
+        """
+        stmt = (
+            pg_insert(Checkin)
+            .values(
+                membership_id=membership_id,
+                date=on_date,
+                status=status,
+                proof_message_id=None,
+            )
+            .on_conflict_do_update(
+                index_elements=["membership_id", "date"],
+                set_=dict(status=status),
+            )
+            .returning(Checkin)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one()

@@ -14,9 +14,11 @@ class MarketplaceResponse(BaseModel):
 class WalletClubOut(BaseModel):
     """Один клуб в `GET /me/wallet`.
 
-    Pravki-deposit-sse.md §Z-4.1: содержит всё необходимое для UI-кнопки
-    «Открыть клуб» без дополнительных запросов — penalty_amount, can_checkin
-    (deposit >= penalty), статус последнего recompute.
+    Pravki-deposit-sse.md §Z-4.1 + Pravki-subscribe-and-join.md §Z-17 (substep 1):
+    содержит всё необходимое для UI-кнопки «Открыть клуб» без дополнительных
+    запросов — penalty_amount, can_checkin (deposit >= penalty), статус
+    последнего recompute, и `subscription_until` для pre-check режима
+    модалки оплаты («full» vs «deposit-only», см. §Z-13.1 матрица).
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -26,6 +28,10 @@ class WalletClubOut(BaseModel):
     penalty_amount: int
     can_checkin: bool  # user.deposit_balance >= habit.penalty_amount
     status: str  # "active" | "paused" — последний результат recompute_pause_status
+    # Pravki-subscribe-and-join.md §Z-17 substep 1: добавлено для pre-check на фронте.
+    # None если юзер ещё ни разу не платил подписку (или membership LEFT/свежая).
+    # Фронт сравнивает с date.today() чтобы выбрать режим модалки оплаты.
+    subscription_until: date | None = None
 
 
 class WalletOut(BaseModel):
@@ -481,3 +487,43 @@ class AdminHabitRefreshChatResponse(BaseModel):
 
 class AdminHabitAvailableChatsResponse(BaseModel):
     items: list[AdminHabitAvailableChat]
+
+
+# ---------------------------------------------------------------------------
+# Pravki-subscribe-and-join.md §Z-12.1: POST /api/v1/payments/subscribe
+# ---------------------------------------------------------------------------
+
+
+class SubscribeRequest(BaseModel):
+    """Request для объединённой оплаты «подписка + депозит + создание ACTIVE membership».
+
+    Pravki-subscribe-and-join.md §Z-12.1:
+    - `subscription_accepted` — server-side gate (см. §Z-13.1 матрица). Допустимо
+      True и False если у юзера есть активная подписка (existing.subscription_until >= today).
+      Если подписки нет — должно быть True, иначе 422.
+    - `idempotency_key` — client-generated UUID4 (uuid4 из фронта), позволяет safe-retry
+      без двойного списания. Префикс «subscribe:» добавляется на backend для отделения
+      от idempotency_key обычных topup'ов.
+    """
+
+    habit_id: str
+    deposit_amount_kopecks: int = Field(gt=0, le=10_000_000)
+    subscription_accepted: bool
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class SubscribeResponse(BaseModel):
+    """Response для объединённой оплаты.
+
+    Pravki-subscribe-and-join.md §Z-13.3: `charged_subscription` показывает,
+    списали ли price_month (True) или только депозит (False — была активная
+    подписка, не трогаем). UI использует это для adaptive alert после успеха.
+    """
+
+    ok: bool = True
+    transaction_id: str
+    membership_id: str
+    new_deposit_balance: int
+    subscription_until: date
+    total_charged_kopecks: int
+    charged_subscription: bool

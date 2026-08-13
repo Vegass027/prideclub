@@ -8,6 +8,7 @@ import type {
   MarketplaceResponse,
   MembersResponse,
   MyHabitsList,
+  SubscribeResponse,
   TodayResponse,
   TopupResponse,
   WalletResponse,
@@ -44,6 +45,20 @@ export const balanceApi = {
   get: () => apiClient.get<BalanceResponse>("/balance").then((r) => r.data),
   topup: (payload: { habit_id: string; amount_kopecks: number }) =>
     apiClient.post<TopupResponse>("/payments/topup", payload).then((r) => r.data),
+  /**
+   * Pravki-subscribe-and-join.md §Z-14: единая оплата подписки+депозита.
+   * Возвращает ACTIVE membership (или реактивирует существующую PAUSED/LEFT).
+   * `charged_subscription: false` если была активная подписка (списали только депозит).
+   */
+  subscribe: (payload: {
+    habit_id: string;
+    deposit_amount_kopecks: number;
+    subscription_accepted: boolean;
+    idempotency_key: string;
+  }) =>
+    apiClient
+      .post<SubscribeResponse>("/payments/subscribe", payload)
+      .then((r) => r.data),
 };
 
 /** Pravki-deposit-sse.md §Z-4.1: глобальный кошелёк юзера. */

@@ -1,11 +1,14 @@
 # 06 — Модель данных
 
-> Snapshot от 2026-07-23 (обновлено 2026-08-07 после Step 7 — успешный деплой
-> SSE+Redis Streams). Схема таблиц и антифрод актуальны. **Список миграций
-> расширен до 13** (000 → 013), см. §3. Финансовая идемпотентность — через
-> уникальные индексы, см. §5. Topic-scoped чек-ины и третий топик для чата
-> клуба — см. §6. **Redis SSE namespaces** (`sse:user:*`, `sse_published:*`,
-> `sse:conn:*`) — см. §11 (новый раздел).
+> Snapshot от 2026-07-23 (обновлено 2026-08-09 после Pravki-subscribe-and-join Z-19
+> deploy). Схема таблиц и антифрод актуальны. **Список миграций расширен до 15**
+> (000 → 015, см. §3). Финансовая идемпотентность — через уникальные индексы,
+> см. §5. Topic-scoped чек-ины и третий топик для чата клуба — см. §6.
+> **Redis SSE namespaces** (`sse:user:*`, `sse_published:*`, `sse:conn:*`) — см. §11.
+> **Pravki-subscribe-and-join:** новый endpoint `POST /api/v1/payments/subscribe`
+> + `subscribe_and_join` метод в `MembershipService` (см. `Pravki-subscribe-and-join.md`
+> §Z-13). **Pravki-bug-fixes Z-19 (joiner-late):** `CheckinStatus` enum расширен
+> `joined_late` + `caught` через миграцию 015.
 
 Финальная схема БД, миграции, антифрод и идемпотентность. Все решения здесь — результат
 6 итераций ревью, готовы к применению.
@@ -206,10 +209,16 @@ PRIMARY KEY (user_id, offer_version_id)
 
 ## 3. Полный набор миграций
 
-> На проде применена голова `013_user_photo` (см.
-> [09-prod-readiness.md](09-prod-readiness.md) §1.1). Файлы миграций лежат в
-> `apps/backend/alembic/versions/`. Для upgrade/downgrade используется
-> `make migrate` / `make migrate-test`.
+> На проде применена голова `015_checkin_status_extra_values` (snapshot 2026-08-09).
+> Промежуточные миграции 014a/014b/015 добавлены при deploy'ах PR #1
+> (Pravki-deposit-sse: deposit на users) и Pravki-subscribe-and-join + bug-fixes
+> (Z-19 joiner-late). Файлы миграций лежат в `apps/backend/alembic/versions/`.
+> Для upgrade/downgrade используется `make migrate` / `make migrate-test`.
+>
+> ⚠️ **Известный баг:** `docker compose run --rm backend alembic upgrade head` НЕ
+> выполняет ALTER TYPE ADD VALUE через транзакционный wrapper alembic (миграция
+> 015 «висит» без ошибки). Workaround — ручной `psql` + `UPDATE alembic_version`.
+> Подробности и диагностика — `docs/10-deploy.md` §9.2.
 
 | # | Файл | Что делает |
 |---|---|---|
@@ -223,6 +232,11 @@ PRIMARY KEY (user_id, offer_version_id)
 | `007_habit_admin_fields` | `007_habit_admin_fields.py` | Поля для Admin Mini App: `habits.photo_url`, `habits.telegram_invite_link`, `habits.member_limit`, `habits.curator_id`, `habits.stat_*` |
 | `008_character_and_club_fields` | `008_character_and_club_fields.py` | `habits.stat_name`, `habits.stat_icon`, `habits.stat_gain_per_checkin`, `habits.stat_loss_per_miss` — характеристики и персонаж (TZ) |
 | `009_chat_id_partial_unique` | `009_chat_id_partial_unique.py` | Частичный UNIQUE-индекс на `habits.chat_id` (только `WHERE chat_id IS NOT NULL`) — гарантирует, что у двух активных клубов не может быть одного Telegram-чата |
+| `012_proof_types` | `012_proof_types.py` | `habits.proof_types` ARRAY вместо единого `proof_type` — multi-proof поддержка (видео-кружок / фото / текст). Миграция `topic-scoped чек-инов` (forum supergroups) |
+| `013_user_photo` | `013_user_photo.py` | `users.photo_file_id` для аватарок в лидерборде + Redis кеш `user_photo_file_id:{user_id}` (6h TTL) |
+| `014a_user_deposit` | `014a_user_deposit.py` | `users.deposit_balance` (ADD COLUMN NOT NULL DEFAULT 0 + backfill из `memberships.deposit_balance` + 3 sanity-чека). Шаг 1 из двухшаговой миграции депозита с `memberships` на `users` (Pravki-deposit-sse.md §Z-2.1, PR #1) |
+| `014b_drop_membership_dep` | `014b_drop_membership_dep.py` | `DROP COLUMN memberships.deposit_balance` — Шаг 2 из двухшаговой миграции (PR #1). После этой миграции `memberships.deposit_balance` НЕ существует ни в схеме, ни в Python-модели (`apps/backend/app/models/membership.py`) |
+| `015_checkin_status_extra_values` | `015_checkin_status_extra_values.py` | `ALTER TYPE checkin_status ADD VALUE 'joined_late', 'caught'`. Enum расширен для bug-fixes §Z-19 (joiner-late protection в Pravki-subscribe-and-join.md) и §Z-21 (planned — caught badge). ⚠️ Для применения этой миграции нужен ручной workaround через psql — см. `docs/10-deploy.md` §9.2 |
 | `010_habit_topics` | `010_habit_topics.py` | `habits.checkin_topic_thread_id` и `habits.notifications_topic_thread_id` (BIGINT NULL) + partial btree-индексы. Включает топик-фильтр чек-инов. |
 | `011_habit_chat_topic` | `011_habit_chat_topic.py` | `habits.chat_topic_thread_id` (BIGINT NULL) + partial btree-индекс. Третий топик для общего чата участников клуба. |
 | `012_proof_types` | `012_proof_types.py` | `habits.proof_types JSONB NOT NULL DEFAULT '["video_note"]'` + CHECK (длина 1..3) + GIN-индекс. Бэкфилл: `UPDATE habits SET proof_types = jsonb_build_array(proof_type::text)`. `habits.proof_type` остаётся как алиас первого элемента массива для обратной совместимости. |
@@ -238,6 +252,46 @@ PRIMARY KEY (user_id, offer_version_id)
 ### 4.1. Один чек-ин в сутки
 Уникальный индекс `(membership_id, date)` в `checkins`. Повторная попытка в тот же день
 идемпотентно возвращает существующую запись.
+
+### 4.0. Pre-filter exceptions (Pravki §Z-22, 5-round fix)
+
+Полный набор доменных исключений, используемых в чек-ин пути
+(backend → bot → frontend mapper). Single source of truth — `CheckinRejectCode`
+enum в `apps/backend/app/core/constants.py`, mirror в
+`apps/frontend/src/shared/types/checkinReject.ts`. Drifts защита:
+`test_all_exception_codes_match_enum` (backend) + ручной review в
+`apps/frontend/src/shared/types/__tests__/checkinReject.test.ts`.
+
+| Exception | `code` (canonical) | Где бросается |
+|---|---|---|
+| `HabitNotFoundError` | `habit_not_found` | backend `enqueue_checkin` (нет клуба по chat_id) |
+| `CheckinWindowClosedError` | `checkin_window_closed` | backend `enqueue_checkin` + worker `process_checkin` |
+| `CheckinAlreadyExistsError` | `checkin_already_exists` | worker (duplicate checkin_id) |
+| `CheckinAlreadyCaughtError` | `caught_today` | worker (есть Penalty за club_date) |
+| `CheckinWrongTopicError` | `not_checkin_topic` | backend `enqueue_checkin` + worker (Topic-scoped club) |
+| `CheckinJoinedLateError` | `joined_late` | worker (joined_today после закрытия окна) |
+| `CheckinMembershipPausedError` | `membership_paused` | backend `enqueue_checkin` + worker `process_checkin` |
+| `CheckinMembershipLeftError` | `membership_left` | backend `enqueue_checkin` + worker `process_checkin` |
+| `MembershipNotFoundError` | `membership_not_found` | backend `enqueue_checkin` + worker |
+| `MembershipNotActiveError` (legacy) | `membership_not_active` | catch-flow (`/events/stream`, legacy hook); НЕ чек-ин |
+| `ProofValidationError("forwarded")` | `forwarded` | `proof_validator.validate_proof_media()` |
+| `ProofValidationError("too_short")` | `too_short` | `proof_validator` (video_note < 3 сек) |
+| `ProofValidationError("wrong_type")` | `wrong_type` | `proof_validator` (тип не в `habit.proof_types`) |
+| `ProofValidationError("empty")` | `empty` | `proof_validator` (text empty) |
+| `ProofValidationError("stale_message")` | `stale_message` | `proof_validator` (message_date > 60s ago или из будущего) |
+
+**Canonical order v2** (порядок проверок в bot prefilter И backend defense-in-depth
+должен совпадать — `test_checkin_reject_code_order_matches_documented_priority`):
+
+1. **Structural / fundamental** — `habit_not_found`, `membership_not_found`
+2. **Too late** (финансовый итог дня) — `caught_today`, `checkin_already_exists`, `joined_late`
+3. **Wrong setup** (actionable: topup / rejoin) — `membership_paused`, `membership_left`
+4. **Wrong time/topic** (перепосылкой/ожиданием) — `checkin_window_closed`, `not_checkin_topic`, `forwarded`
+5. **Proof validation** — `wrong_type`, `too_short`, `stale_message`, `empty`
+
+Принцип приоритета: для каждой пары побеждает более специфичный текст (комбо-тесты
+для `caught_today + paused/left/window_closed` зафиксированы в `apps/bot/tests/test_checkin_handler.py`).
+Подробнее — `docs/04-code-standards.md` §7.1 "Pre-filter pattern".
 
 ### 4.2. Валидация медиа
 ```python

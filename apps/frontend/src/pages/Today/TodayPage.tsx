@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useToday, useTodayStream, useWallet } from "@/shared/hooks";
+import { useToday, useHabitSse, useWallet } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
 import { missingKopecks } from "@/shared/utils/topupPresets";
 import { BottomNav } from "@/shared/ui/BottomNav";
@@ -73,13 +73,15 @@ export function TodayPage() {
   const [topupOpen, setTopupOpen] = useState(false);
 
   // Real-time: держим ["today", habitId] в кэше актуальным через SSE
-  // (Step 6, `feature/topic-scoped-checkin`). useToday даёт первый снимок
-  // при загрузке, useTodayStream — обновления по checkin.accepted/rejected
-  // без polling, без ручного refetch, без лишнего GET на каждый mount.
+  // multiplex (Pravki Items 7+8+9). useToday даёт первый снимок при загрузке,
+  // useHabitSse — обновления по:
+  //  - checkin.accepted/rejected (user-stream, personal)
+  //  - catch (habit-stream broadcast — у жертвы пропадает бейдж «Поймать»)
+  //  - you_were_caught (user-stream — жертва меняет статус)
+  // Без polling, без ручного refetch, без лишнего GET на каждый mount.
   // React Query сам управляет stale-инвалидацией через staleTime: 30_000
-  // в useToday; mount-форс-инвалидейт был избыточным — на масштабе 1000+
-  // юзеров это конкретная лишняя нагрузка на backend.
-  useTodayStream(habitId);
+  // в useToday.
+  useHabitSse(habitId);
 
   const handleOpenChat = () => {
     if (!data) return;
@@ -402,6 +404,32 @@ export function TodayPage() {
           <strong className="block text-danger">Сегодня пропуск.</strong>
           <span className="text-muted">
             Штраф уже списан в призовой фонд клуба.
+          </span>
+        </section>
+      )}
+
+      {/* Pravki-bug-fixes §Z-21 (caught badge): жертва поимки за сегодня.
+          Отдельная ветка от missed — текст другой потому что сценарий разный:
+          - missed = cron `close_catch_window` списал депозит (никто не ловил).
+          - caught = другой участник поймал, штраф ушёл в приз-фонд. */}
+      {checkin.status === "caught" && (
+        <section className="mt-4 rounded-card border border-danger/30 bg-danger/10 p-4 text-sm">
+          <strong className="block text-danger">Вас поймали.</strong>
+          <span className="text-muted">
+            Вы не выполнили ежедневное задание вовремя. Штраф списан в призовой фонд клуба.
+          </span>
+        </section>
+      )}
+
+      {/* Pravki-bug-fixes §Z-19 (joiner-late protection):
+          юзер вступил в клуб сегодня ПОСЛЕ checkin_window_end.
+          Нейтральный тон (не штрафной как missed, не зелёный как done).
+          Без мутации депозита и без CTA. */}
+      {checkin.status === "joined_late" && (
+        <section className="mt-4 rounded-card border border-muted/30 bg-muted/10 p-4 text-sm">
+          <strong className="block text-text">Вы вступили после чек-ина.</strong>
+          <span className="text-muted">
+            Следующая отметка — завтра.
           </span>
         </section>
       )}

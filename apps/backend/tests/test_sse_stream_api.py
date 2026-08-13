@@ -328,8 +328,10 @@ class TestSseStreamGenerator:
         _redis_sync, limiter = await _make_limiter_for(user_id)
         bus = RedisStreamBus(_redis_async, block_ms=SSE_SHORT_BLOCK_MS)  # type: ignore[arg-type]
 
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id="$"
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: "$"},
         )
         first = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert first == ": connected\n\n"
@@ -351,8 +353,10 @@ class TestSseStreamGenerator:
         _redis_sync, limiter = await _make_limiter_for(user_id)
         bus = RedisStreamBus(_redis_async, block_ms=SSE_SHORT_BLOCK_MS)  # type: ignore[arg-type]
 
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id="$"
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: "$"},
         )
         await asyncio.wait_for(gen.__anext__(), timeout=1.0)  # ": connected"
         # Первый XREAD BLOCK на пустом стриме → heartbeat.
@@ -398,8 +402,10 @@ class TestSseStreamGenerator:
         limiter = SseConnectionLimiter(sync_redis)  # type: ignore[arg-type]
         bus = RedisStreamBus(stream_redis, block_ms=SSE_SHORT_BLOCK_MS)
 
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id="0"
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: "0"},
         )
         chunks = []
         async for chunk in gen:
@@ -456,8 +462,10 @@ class TestSseStreamGenerator:
         bus = RedisStreamBus(stream_redis, block_ms=SSE_SHORT_BLOCK_MS)
 
         # start_id = first_id → следующее чтение вернёт запись строго ПОСЛЕ.
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id=first_id
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: first_id},
         )
         chunks = []
         async for chunk in gen:
@@ -574,8 +582,10 @@ class TestSseStreamGenerator:
         limiter = SseConnectionLimiter(sync_redis)  # type: ignore[arg-type]
         bus = RedisStreamBus(stream_redis, block_ms=SSE_SHORT_BLOCK_MS)
 
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id="$"
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: "$"},
         )
         await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         await gen.aclose()
@@ -599,8 +609,10 @@ class TestSseStreamGenerator:
         assert int(await sync_redis.get(f"{KEY_PREFIX}{user_id}")) == 1  # type: ignore[arg-type]
 
         bus = RedisStreamBus(stream_redis, block_ms=SSE_SHORT_BLOCK_MS)
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            _FakeRequest(), user_id, habit_id, limiter, bus, last_event_id="$"
+            _FakeRequest(), user_id, habit_id, limiter, bus,
+            streams={user_stream: "$"},
         )
         await asyncio.wait_for(gen.__anext__(), timeout=1.0)
 
@@ -629,8 +641,10 @@ class TestSseStreamGenerator:
 
         fake_req = _FakeRequest(disconnect=True)
         bus = RedisStreamBus(stream_redis, block_ms=SSE_SHORT_BLOCK_MS)
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
         gen = _sse_event_stream_generator(
-            fake_req, user_id, habit_id, limiter, bus, last_event_id="$"
+            fake_req, user_id, habit_id, limiter, bus,
+            streams={user_stream: "$"},
         )
 
         chunks = []
@@ -757,3 +771,249 @@ class TestAsyncRedisSingleton:
             f"создаёт connection pool на каждое SSE-открытие (FD-leak "
             f"при reconnect-loop в Telegram WebView)"
         )
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 7): SSE multiplex — два курсора в одном XREAD.
+#
+# Контракт:
+# - legacy client (без last_event_id_habit) → только user-stream (Variant 1).
+# - v2 client (с last_event_id_habit) → user + habit multiplex.
+#
+# Тесты 1–3 mandatory BEFORE commit (по согласованию с пользователем).
+# ============================================================================
+
+
+class TestSseMultiplex:
+    """Item 7: backward-compat + новый multiplex contract.
+
+    Главная инвариантность (Pravki Item 7 review): legacy client
+    ФИЗИЧЕСКИ не подписан на habit-stream, даже если catch_event
+    произошёл между запросами. Это НЕ фильтр в generator'е, а
+    отсутствие habit-stream в `streams` dict (Variant 1 в разведке).
+    """
+
+    @pytest.mark.asyncio
+    async def test_1_legacy_client_does_not_receive_habit_catch_events(self) -> None:
+        """Test 1 (mandatory): legacy client без last_event_id_habit
+        НЕ подписан на habit-stream.
+
+        Сценарий:
+        1. Setup fakeredis: pre-publish checkin.accepted в user-stream
+           И catch event в habit-stream ДО открытия соединения.
+        2. Legacy client открывает EventSource с `last_event_id="0"`,
+           БЕЗ `last_event_id_habit`.
+        3. Assert: получает ТОЛЬКО user-stream events (checkin.accepted),
+           НЕ получает catch event (даже если он уже в habit-stream).
+
+        Это проверяет backward-compat в строгом смысле — клиент v1
+        НЕ видит catch-events. Без этого теста легко пропустить случай,
+        когда фильтрация в generator'е забыта → все клиенты получают
+        catch-events, v1 клиент парсит их как garbage и ломается.
+        """
+        from app.api.v1.events import _sse_event_stream_generator
+        from app.services.sse.redis_stream_bus import RedisStreamBus
+
+        user_id = 42
+        habit_id = "h-legacy-isolation"
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
+        habit_stream = RedisStreamBus.habit_stream_key(habit_id)
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+        # Pre-publish ОБА события ДО открытия соединения.
+        checkin_eid = await redis.xadd(
+            user_stream,
+            {
+                "event": "checkin.accepted",
+                "habit_id": habit_id,
+                "user_id": str(user_id),
+                "occurred_at": "2026-08-10T12:00:00Z",
+                "payload": '{"status":"done"}',
+            },
+        )
+        catch_eid = await redis.xadd(
+            habit_stream,
+            {
+                "event": "catch",
+                "habit_id": habit_id,
+                "occurred_at": "2026-08-10T12:00:01Z",
+                "payload": '{"catcher_user_id":1,"violator_user_id":42,"penalty_id":"p-1"}',
+            },
+        )
+        assert checkin_eid and catch_eid
+
+        _redis_sync, limiter = await _make_limiter_for(user_id)
+        bus = RedisStreamBus(redis, block_ms=SSE_SHORT_BLOCK_MS)
+
+        # Legacy v1 contract: только user-stream, БЕЗ habit-stream.
+        streams = {user_stream: "0"}  # Variant 1 — нет habit_stream_key
+        assert habit_stream not in streams, (
+            "Test invariant: legacy client НЕ должен иметь habit-stream в streams"
+        )
+
+        gen = _sse_event_stream_generator(
+            _FakeRequest(), user_id, habit_id, limiter, bus, streams
+        )
+        chunks = []
+        async for chunk in gen:
+            chunks.append(chunk)
+            # Ждём первый SSE event frame (id: <eid>\nevent: ...), а не
+            # первый чанк (это ": connected"). С block_ms=50 XREAD на
+            # pre-populated stream должен вернуть за <10мс.
+            if "id:" in chunk and ("event:" in chunk or "data:" in chunk):
+                # Дали ещё одну итерацию для проверки второго XREAD не
+                # подтянет habit-event (legacy не подписан).
+                await asyncio.sleep(0.1)
+                break
+        await gen.aclose()
+
+        # Joined весь output.
+        output = "".join(chunks)
+        assert "checkin.accepted" in output, (
+            f"Legacy client должен получить checkin.accepted, got: {output!r}"
+        )
+        assert "catch" not in output, (
+            f"Legacy client НЕ должен получать catch-event (habit-stream "
+            f"не подписан). Got: {output!r}"
+        )
+        assert "penalty_id" not in output, (
+            f"Legacy client НЕ должен видеть payload catch-event. Got: {output!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_2_multiplex_client_receives_both_streams(self) -> None:
+        """Test 2 (mandatory): multiplex client с обоими параметрами
+        получает события из user-stream И habit-stream.
+
+        Сценарий:
+        1. Setup fakeredis: pre-publish catch в habit-stream И
+           checkin.accepted в user-stream ДО открытия.
+        2. Multiplex client: streams = {user_stream: 0, habit_stream: 0}.
+        3. Assert: получает ОБА события с правильными event names.
+
+        Это проверяет multiplex contract — один XREAD на оба стрима,
+        плоский output с per-stream events.
+        """
+        from app.api.v1.events import _sse_event_stream_generator
+        from app.services.sse.redis_stream_bus import RedisStreamBus
+
+        user_id = 42
+        habit_id = "h-multiplex"
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
+        habit_stream = RedisStreamBus.habit_stream_key(habit_id)
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+        checkin_eid = await redis.xadd(
+            user_stream,
+            {
+                "event": "checkin.accepted",
+                "habit_id": habit_id,
+                "user_id": str(user_id),
+                "occurred_at": "2026-08-10T12:00:00Z",
+                "payload": '{"status":"done"}',
+            },
+        )
+        catch_eid = await redis.xadd(
+            habit_stream,
+            {
+                "event": "catch",
+                "habit_id": habit_id,
+                "occurred_at": "2026-08-10T12:00:01Z",
+                "payload": '{"catcher_user_id":1,"violator_user_id":42,"penalty_id":"p-1"}',
+            },
+        )
+
+        _redis_sync, limiter = await _make_limiter_for(user_id)
+        bus = RedisStreamBus(redis, block_ms=SSE_SHORT_BLOCK_MS)
+
+        # Multiplex contract: оба стрима.
+        streams = {user_stream: "0", habit_stream: "0"}
+        assert user_stream in streams and habit_stream in streams
+
+        gen = _sse_event_stream_generator(
+            _FakeRequest(), user_id, habit_id, limiter, bus, streams
+        )
+        chunks = []
+        async for chunk in gen:
+            chunks.append(chunk)
+            # Прерываем после получения обоих events (или первого heartbeat).
+            if "catch" in "".join(chunks) and "checkin.accepted" in "".join(chunks):
+                break
+        await gen.aclose()
+
+        output = "".join(chunks)
+        assert "checkin.accepted" in output, (
+            f"Multiplex client должен получить user-stream event. Got: {output!r}"
+        )
+        assert "catch" in output, (
+            f"Multiplex client должен получить habit-stream event. Got: {output!r}"
+        )
+        # Cursor per-stream — ID из разных стримов.
+        assert checkin_eid in output, f"checkin entry_id missing in output: {output!r}"
+        assert catch_eid in output, f"catch entry_id missing in output: {output!r}"
+
+    @pytest.mark.asyncio
+    async def test_3_read_blocking_multiplex_isolates_per_stream(self) -> None:
+        """Test 3 (mandatory): `read_blocking_multiplex` с одним стримом
+        НЕ возвращает события из других стримов (no leak).
+
+        Сценарий:
+        1. Pre-publish events в ДВА стрима (user + habit).
+        2. Call `read_blocking_multiplex({user_stream: '$'})` — ТОЛЬКО user-stream.
+        3. Assert: возвращаются ТОЛЬКО user-stream events, habit-stream
+           НЕ трогается даже если там есть entries.
+
+        Защита от race condition / missconfig: если handler случайно
+        передаст только один стрим в dict (например, для legacy v1
+        клиента), generator НЕ должен leak'ить habit-events.
+        """
+        from app.services.sse.redis_stream_bus import RedisStreamBus
+
+        user_id = 99
+        habit_id = "h-isolation"
+        user_stream = RedisStreamBus.stream_key(user_id, habit_id)
+        habit_stream = RedisStreamBus.habit_stream_key(habit_id)
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+        # Events в ОБОИХ стримах.
+        await redis.xadd(
+            user_stream, {"event": "user.event", "payload": '{"x":1}'}
+        )
+        await redis.xadd(
+            habit_stream, {"event": "habit.event", "payload": '{"y":2}'}
+        )
+
+        bus = RedisStreamBus(redis, block_ms=SSE_SHORT_BLOCK_MS)
+
+        # Вызываем ТОЛЬКО user-stream с start_id="0" — read historical.
+        # `$` используется для realtime-only (НЕ историческое чтение),
+        # что соответствует production semantics: реальный клиент после
+        # reconnect'а с `last_event_id="0"` хочет видеть ВСЮ историю.
+        out = await bus.read_blocking_multiplex({user_stream: "0"})
+
+        # Все entries должны быть из user_stream.
+        assert all(sn == user_stream for sn, _, _ in out), (
+            f"Все entries должны быть из user_stream, got streams: "
+            f"{[sn for sn, _, _ in out]}"
+        )
+        # Habit-stream НЕ должен быть прочитан.
+        events_returned = [fields["event"] for _, _, fields in out]
+        assert "user.event" in events_returned, (
+            f"Должен вернуться user.event, got: {events_returned}"
+        )
+        assert "habit.event" not in events_returned, (
+            f"Habit-stream НЕ должен быть прочитан (no leak). "
+            f"Got: {events_returned}"
+        )
+
+        # Sanity: read_blocking_multiplex с ОБОИМИ стримами — получает оба.
+        # Используем start_id="0" чтобы прочитать исторические entries.
+        out_both = await bus.read_blocking_multiplex(
+            {user_stream: "0", habit_stream: "0"}
+        )
+        events_both = [fields["event"] for _, _, fields in out_both]
+        assert "user.event" in events_both
+        assert "habit.event" in events_both

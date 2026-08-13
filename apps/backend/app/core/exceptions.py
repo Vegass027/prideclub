@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.constants import CheckinRejectCode
+
 
 class DomainError(Exception):
     status_code: int = 400
@@ -63,12 +65,12 @@ class ServiceTokenExpiredError(DomainError):
 
 class MembershipNotFoundError(DomainError):
     status_code = 404
-    code = "membership_not_found"
+    code = CheckinRejectCode.MEMBERSHIP_NOT_FOUND.value
 
 
 class MembershipNotActiveError(DomainError):
     status_code = 400
-    code = "membership_not_active"
+    code = CheckinRejectCode.MEMBERSHIP_NOT_ACTIVE.value
 
 
 class SseStreamForbiddenError(DomainError):
@@ -107,17 +109,32 @@ class TooManySseConnectionsError(DomainError):
 
 class HabitNotFoundError(DomainError):
     status_code = 404
-    code = "habit_not_found"
+    code = CheckinRejectCode.HABIT_NOT_FOUND.value
 
 
 class CheckinWindowClosedError(DomainError):
     status_code = 400
-    code = "checkin_window_closed"
+    code = CheckinRejectCode.WINDOW_CLOSED.value
 
 
 class CheckinAlreadyExistsError(DomainError):
     status_code = 409
-    code = "checkin_already_exists"
+    code = CheckinRejectCode.ALREADY_CHECKED_IN.value
+
+
+# Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth на server-side.
+# Если у membership уже есть Penalty за сегодня (CAUGHT через apply_catch
+# ИЛИ WINDOW_CLOSED_NO_CATCH через cron apply_window_expired), чек-ин
+# невозможен — окно дня закрыто со штрафом. Бот в pre-filter должен
+# отсеять раньше (state.caught_today), но это fallback на race / bypass /
+# прямой вызов internal API / старую версию бота.
+#
+# 422 (Unprocessable Entity): запрос синтаксически валидный, но
+# состояние ресурса не позволяет выполнить операцию (semantically
+# точнее чем 409 Conflict).
+class CheckinAlreadyCaughtError(DomainError):
+    status_code = 422
+    code = CheckinRejectCode.ALREADY_CAUGHT.value
 
 
 class CheckinInvalidProofError(DomainError):
@@ -194,7 +211,7 @@ class CheckinWrongTopicError(DomainError):
     """Сообщение пришло не из того топика, что привязан к клубу."""
 
     status_code = 422
-    code = "not_checkin_topic"
+    code = CheckinRejectCode.WRONG_TOPIC.value
 
 
 class PhotoUnavailableError(DomainError):
@@ -235,3 +252,104 @@ class InsufficientDepositError(DomainError):
             current_kopecks=current_kopecks,
             club_penalty_kopecks=club_penalty_kopecks,
         )
+
+
+class CheckinJoinedLateError(DomainError):
+    """422: пользователь вступил в клуб сегодня ПОСЛЕ закрытия checkin_window.
+
+    Pravki-bug-fixes §Z-19 (joiner-late protection): защита от попытки чек-ина
+    в день вступления. Используется и в worker `process_checkin` (симметричная
+    серверная защита против race / старого бота / прямого вызова), и в
+    CheckinService.get_today_status (для статуса в TodayResponse).
+
+    code = CheckinRejectCode.JOINED_LATE.value — бот мапит его в дружественное
+    сообщение с временем окна клуба (см. apps/bot/bot/handlers/checkin_texts.py).
+    """
+    status_code = 422
+    code = CheckinRejectCode.JOINED_LATE.value
+
+
+# Pravki §Z-22 (Step 3, hole #3): сплит MembershipNotActiveError.
+# До этого момента checkin_service.py бросал единый MembershipNotActiveError
+# для status in (paused, left), и бот не мог различить "пополни депозит" vs
+# "rejoin" — был один generic текст. Теперь:
+#   - MembershipPaused: deposit < penalty этого клуба (автопауза через
+#     recompute_pause_status). Recovery: topup deposit в мини-аппе.
+#   - MembershipLeft: юзер сам вышел из клуба (явное действие, нельзя
+#     восстановить через topup — нужно заново Subscribe/Join).
+#
+# MembershipNotActiveError ОСТАВЛЯЕМ для catch-flow (см. MembersPage.tsx
+# CATCH_ERROR_LABELS) — там сплит на paused/left не нужен (catch-flow
+# работает только с активными, но если попадёт non-active — generic).
+class CheckinMembershipPausedError(DomainError):
+    """422: membership.status == PAUSED (deposit < penalty этого клуба)."""
+
+    status_code = 422
+    code = CheckinRejectCode.MEMBERSHIP_PAUSED.value
+
+
+class CheckinMembershipLeftError(DomainError):
+    """422: membership.status == LEFT (юзер вышел из клуба)."""
+
+    status_code = 422
+    code = CheckinRejectCode.MEMBERSHIP_LEFT.value
+
+
+class InsufficientDepositChoiceError(DomainError):
+    """422: deposit_amount_kopecks < habit.penalty_amount при subscribe_and_join.
+
+    Pravki-subscribe-and-join.md §Z-13: пользователь выбрал в JoinPayModal
+    сумму депозита, которая НЕ покрывает штраф клуба. Это UI-баг (модалка
+    фильтрует пресеты, но пользователь мог ввести «свою сумму» ниже порога).
+    Отдельное 422 (не 403 как у InsufficientDepositError) — потому что здесь
+    запрос вообще не выполнился, а не «отказ из-за текущего баланса».
+    """
+    status_code = 422
+    code = "insufficient_deposit_choice"
+
+    def __init__(
+        self,
+        *,
+        required_kopecks: int,
+        chosen_kopecks: int,
+    ) -> None:
+        super().__init__(
+            self.code,
+            required_kopecks=required_kopecks,
+            chosen_kopecks=chosen_kopecks,
+        )
+
+
+class SubscriptionRequiredError(DomainError):
+    """422: subscription_accepted=False при отсутствии активной подписки.
+
+    Pravki-subscribe-and-join.md §Z-13.1: единственная запрещённая комбинация
+    в матрице server-side gate. UI адаптирует модалку (прячет чекбокс если
+    подписка активна), но если кто-то шлёт False в обход — 422.
+    """
+    status_code = 422
+    code = "subscription_required"
+
+
+class AlreadyActiveError(DomainError):
+    """409: membership.status == ACTIVE — повторный /subscribe для клуба, где
+    юзер уже состоит.
+
+    Pravki-subscribe-and-join.md §Z-13 шаг 3c: вместо silent success возвращаем
+    явный код, чтобы UI мог показать «Ты уже в клубе, обнови страницу».
+    Идемпотентно для случаев гонки (parallel POST → второй видит уже ACTIVE).
+    """
+    status_code = 409
+    code = "already_active"
+
+
+class IdempotencyConflictError(DomainError):
+    """400: тот же idempotency_key использован с другими параметрами.
+
+    Pravki-subscribe-and-join.md §Z-14.1: клиент должен генерировать uuid4
+    один раз и ретраить с тем же ключом. Если шлёт тот же ключ но другие
+    параметры (habit_id, deposit_amount_kopecks) — это явная ошибка клиента.
+    На практике не должно случаться если uuid4 генерится правильно.
+    """
+    status_code = 400
+    code = "idempotency_conflict"

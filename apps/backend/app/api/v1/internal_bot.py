@@ -34,6 +34,9 @@ from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.user_repository import UserRepository
 
+# Pravki-bug-fixes §Z-21 (Item 4): для caught_today в HabitStateResponse.
+from app.repositories.penalty_repository import PenaltyRepository
+
 router = APIRouter()
 logger = get_logger("internal_bot")
 
@@ -307,6 +310,31 @@ class HabitStateResponse(BaseModel):
     # {penalty}". Default 0 = если клуб не подгрузился, бот покажет
     # "из 0,00 ₽" (не критично, defence-in-depth).
     penalty_amount: int = 0
+    # Pravki-bug-fixes §Z-19 (joiner-late protection):
+    # бот проверяет is_joined_late в pre-filter и отвечает дружественным
+    # сообщением с window_start/window_end ("ваш первый чек-ин завтра").
+    # True если юзер вступил сегодня после закрытия checkin_window —
+    # вычисляется на backend через тот же habit.was_joined_after_window,
+    # что и /members handler (Z-19.4). Бот НЕ дублирует tz-логику.
+    is_joined_late: bool = False
+    checkin_window_start: str | None = None  # "HH:MM" — для текста ответа ботом
+    checkin_window_end: str | None = None
+    # Pravki §Z-22 (hole #1): вычисляется через habit.is_within_checkin_window(now).
+    # Бот проверяет в pre-filter и отвечает REJECT_OUT_OF_WINDOW, чтобы юзер
+    # услышал "окно закрыто" синхронно, а не "Принято" → ложное ожидание.
+    # Default False = fail-safe: если state не подгрузился, лучше отказать,
+    # чем принять. Backend тоже проверяет в enqueue_checkin (defense-in-depth).
+    is_within_checkin_window: bool = False
+    # Pravki-bug-fixes §Z-21 (Item 4): новые поля для различения caught vs missed.
+    # - caught_today: True если есть ЛЮБОЙ Penalty за club_date (CAUGHT или
+    #   WINDOW_CLOSED_NO_CATCH). Бот проверяет ПЕРВЫМ (ДО already_checked_in),
+    #   иначе для status='caught' сработал бы REJECT_ALREADY_CHECKED_IN с
+    #   неверным текстом "ты уже отметился".
+    # - checkin_status: str | None — статус Checkin на сегодня (если есть):
+    #   "done"|"caught"|"missed"|"joined_late"|"pending". Бот использует
+    #   для выбора текста (REJECT_CAUGHT_TODAY vs REJECT_PENALTY_DAY_CLOSED).
+    caught_today: bool = False
+    checkin_status: str | None = None
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -348,6 +376,8 @@ async def get_habit_state(
 
     already_checked_in = False
     checked_in_at: datetime | None = None
+    checkin_status: str | None = None
+    caught_today = False
     if membership is not None:
         club_date_now = habit.club_date(datetime.now(tz=UTC))
         checkin = await CheckinRepository(session).get_for_date(
@@ -357,6 +387,43 @@ async def get_habit_state(
         if checkin is not None:
             already_checked_in = True
             checked_in_at = checkin.verified_at
+            checkin_status = checkin.status.value
+        # Pravki-bug-fixes §Z-21 (Item 4): caught_today ловит ОБА сценария
+        # (CAUGHT через apply_catch И WINDOW_CLOSED_NO_CATCH через cron).
+        # Penalty для membership уже есть → бот отвечает REJECT_CAUGHT_TODAY /
+        # REJECT_PENALTY_DAY_CLOSED (см. checkin.py prefilter).
+        penalty_repo = PenaltyRepository(session)
+        caught_today = await penalty_repo.has_any_penalty_today(
+            membership_id=membership.id,
+            club_date=club_date_now,
+        )
+
+    # Pravki-bug-fixes §Z-19: joined_late вычисляется здесь ОДИН РАЗ на
+    # backend (общая tz-логика через habit.was_joined_after_window).
+    # Бот получает готовый bool + window times и не дублирует расчёты.
+    # При race (юзер вступил между двумя вызовами) — backend всегда
+    # читает свежее membership.joined_at из БД, бот доверяет.
+    # Defensive: membership может быть None (юзер без membership в клубе —
+    # /habit_state endpoint всё равно возвращает found=True чтобы бот знал
+    # про клуб, но joined_late неприменим). Аналогично joined_at=None
+    # в тестах.
+    is_joined_late = False
+    if membership is not None and membership.joined_at is not None:
+        joined_in_club_tz = membership.joined_at.astimezone(habit.tzinfo)
+        club_date_now = habit.club_date(datetime.now(tz=UTC))
+        if joined_in_club_tz.date() == club_date_now:
+            is_joined_late = habit.was_joined_after_window(membership.joined_at)
+
+    # Pravki §Z-22 (hole #1): вычисляем is_within_checkin_window ОДИН РАЗ
+    # на backend (tz-логика через habit), бот получает готовый bool.
+    # Позиция #5 в canonical order (см. CheckinRejectCode docstring).
+    is_within_checkin_window = habit.is_within_checkin_window(datetime.now(tz=UTC))
+
+    # Pravki §Z-22 (Step 3, hole #3): membership_status.
+    # canonical #6 (paused) / #7 (left) в CheckinRejectCode.
+    membership_status_value: str | None = None
+    if membership is not None:
+        membership_status_value = membership.status.value
 
     return HabitStateResponse(
         found=True,
@@ -367,8 +434,16 @@ async def get_habit_state(
         checked_in_at=checked_in_at,
         # Feature/paused-member-ux: для бота — paused-юзер должен получить
         # "пополни депозит", а не общее "окно закрыто".
-        membership_status=membership.status.value if membership is not None else None,
+        membership_status=membership_status_value,
         deposit_balance=user_row.deposit_balance if user_row is not None else 0,
         penalty_amount=habit.penalty_amount,
+        is_joined_late=is_joined_late,
+        checkin_window_start=habit.checkin_window_start.strftime("%H:%M"),
+        checkin_window_end=habit.checkin_window_end.strftime("%H:%M"),
+        # Pravki §Z-22 (hole #1): окно чек-ина сейчас.
+        is_within_checkin_window=is_within_checkin_window,
+        # Pravki-bug-fixes §Z-21 (Item 4): новые поля.
+        caught_today=caught_today,
+        checkin_status=checkin_status,
     )
 

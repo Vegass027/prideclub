@@ -14,6 +14,13 @@
 > **Production**:
 > - User Mini App: `https://app.prideclub.fun/`
 > - Admin Mini App: `https://admin.prideclub.fun/` (owner-only, через `OWNER_TELEGRAM_ID`)
+>
+> **Snapshot 2026-08-09 (Pravki-subscribe-and-join + bug-fixes Z-19 deploy):**
+> bundle `main-CmHeC1H6.js` (включает `JoinPayModal`, блок `joined_late` в
+> `TodayPage`, defensive fallback в `StatusBadge`). Compose workaround для
+> overlay-конфликта — `image: nginx:1.27-alpine` + volume mount на bundle,
+> см. `docs/10-deploy.md` §9.1. **ВНИМАНИЕ:** не возвращать `build:` в compose
+> до диагностики overlay-конфликта (см. отдельную задачу в репо).
 
 ---
 
@@ -108,6 +115,17 @@ apps/frontend/src/
 - «Мои клубы» теперь живут только на странице профиля.
 
 ### ✅ Today (внутри клуба)
+
+**Обновлено 2026-08-09 (Pravki-subscribe-and-join + bug-fixes Z-19):**
+- `JoinPayModal` — модалка оплаты при первом вступлении (чекбокс подписки +
+  пресеты депозита из `topupPresets.ts`, отфильтрованные по `penalty_amount`,
+  кнопка «Оплатить X ₽» с total = `price_month + deposit`).
+- `JoinButton` — открывает `JoinPayModal` (вместо прямого POST `/join` как в PR #2).
+- Блок для статуса `joined_late` (новый Pravki-bug-fixes Z-19): «Вы вступили
+  после чек-ина. Следующая отметка — завтра.» Нейтральный тон (не штрафной).
+- Defensive fallback в `StatusBadge` для рассинхрона кэша браузера:
+  `statusConfig[status] ?? FALLBACK_BADGE` — unknown статус показывает `•`,
+  не падает (commit `564b8db`).
 - Hero-карточка с описанием привычки + окно чек-ина.
 - `StatusBadge`: ожидает / принят / пропущен / не в окне.
 - **Топик-фильтр чек-инов (миграция 010)**: кнопка «🎬 Сделать чек-ин» появляется
@@ -254,6 +272,45 @@ POST `/events/stream/token` остаётся под общим `/api/` блок�
 **Деплой:** используется метод из `docs/02-architecture.md §13` —
 `docker run node:20-alpine + docker cp dist + nginx -s reload`. НЕ `docker
 compose build frontend` (двухслойный nginx не обновит dist в работающем контейнере).
+
+---
+
+### ✅ checkin.rejected mapper — Step 5 (Pravki §Z-22, 2026-08-12)
+
+**Проблема (закрытая):** через SSE `checkin.rejected` приходил сырой
+`payload.message` (например, `checkin_window_closed`), который фронт
+показывал в `Telegram.WebApp.showAlert()` без перевода. Юзер видел машинный
+код в alert'е. Симметрично бою (`apps/bot/bot/handlers/checkin_texts.py`)
+фронт тоже должен иметь mapper.
+
+**Решение** (commit `b4cc923`):
+- `apps/frontend/src/shared/texts/checkinReject.ts` (NEW) —
+  `checkinRejectText(code, ctx)` симметричный `bot._text_for_code`.
+  14 кодов покрыты (все из `CheckinRejectCode` enum, кроме legacy
+  `MEMBERSHIP_NOT_ACTIVE` — fallback на `REJECT_UNKNOWN`).
+- `apps/frontend/src/shared/hooks/streamController.ts:152-178` —
+  `checkin.rejected` handler теперь вызывает `checkinRejectText` вместо
+  pass-through `payload.message`. Битый JSON или unknown code →
+  `REJECT_UNKNOWN`.
+- `apps/frontend/src/shared/types/checkinReject.ts` (уже из Шага 0) —
+  TS mirror enum, single source of truth с backend.
+
+**Источник истины:**
+- Backend: `apps/backend/app/core/constants.py:CheckinRejectCode` (enum)
+- Frontend: `apps/frontend/src/shared/types/checkinReject.ts` (TS mirror)
+- Тесты drift: `apps/backend/tests/test_checkin_reject_codes.py` +
+  `apps/frontend/src/shared/types/__tests__/checkinReject.test.ts`
+
+**Известное ограничение** (НЕ блокирует): `caught_today` vs `missed`
+различие для фронта отсутствует — worker SSE payload `{reason, message}`
+не содержит `checkin_status`. Mapper использует общий текст «поймали»
+на оба случая (финансово одинаковый результат, см. `docs/09-prod-readiness.md §3`).
+Бот различает их через `state.checkin_status` в `HabitStateResponse`.
+Расширение `_publish_checkin_rejected` отдельным PR.
+
+**Тесты** (`apps/frontend/src/shared/texts/__tests__/checkinReject.test.ts`):
+16 vitest unit + 4 новых в `streamController.test.ts` (mapped text вместо
+pass-through). Общий test baseline: 68 frontend тестов (было 50, +18).
 
 ---
 

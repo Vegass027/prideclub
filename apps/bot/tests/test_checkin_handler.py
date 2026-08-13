@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -35,12 +36,15 @@ class FakeVideoNote:
 class FakeMessage:
     chat_id: int = -1004467477629
     message_id: int = 42
-    message_thread_id: int = 4
+    message_thread_id: int = 12
     from_user_id: int = 7295309649
     date: Any = None
     text: str | None = None
     photo: Any = None
     video_note: FakeVideoNote | None = None
+    # Pravki §Z-22 (Step 4, hole #4): forward_date != None означает
+    # пересланное сообщение. None = оригинал (default).
+    forward_date: Any = None
 
     @property
     def chat(self) -> _FakeChat:
@@ -139,6 +143,13 @@ def _make_photo_message() -> FakeMessage:
 
 
 # Pre-filter (PR №9) default state: всё ОК — все типы разрешены, чек-ин ещё не сделан.
+# Pravki §Z-22 (hole #1): is_within_checkin_window=True — окно открыто,
+# pre-filter пропускает. Для тестов с "вне окна" — задают явно False.
+# Pravki §Z-22 (hole #2): checkin_topic_thread_id=12 (matches FakeMessage
+# default message_thread_id=12) — wrong_topic pre-filter тоже пропускает.
+# Для тестов с "неправильный топик" — задают явно другой thread_id.
+# Pravki §Z-22 (Step 3, hole #3): membership_status="active" — prefilter
+# paused/left пропускает. Для тестов с "paused/left" — задают явно.
 _DEFAULT_OK_STATE: dict[str, Any] = {
     "found": True,
     "habit_id": "any",
@@ -146,6 +157,8 @@ _DEFAULT_OK_STATE: dict[str, Any] = {
     "checkin_topic_thread_id": 12,
     "already_checked_in": False,
     "checked_in_at": None,
+    "is_within_checkin_window": True,
+    "membership_status": "active",
 }
 
 
@@ -169,6 +182,8 @@ def test_parse_proof_video_note() -> None:
     assert payload["duration_seconds"] == 5
     assert payload["chat_id"] == msg.chat_id
     assert payload["message_thread_id"] == msg.message_thread_id
+    # Pravki §Z-22 (Step 4, hole #4): is_forwarded added to payload.
+    assert payload["is_forwarded"] is False
 
 
 def test_parse_proof_text() -> None:
@@ -177,6 +192,7 @@ def test_parse_proof_text() -> None:
     assert payload is not None
     assert payload["proof_type"] == "text"
     assert payload["text"] == "чек"
+    assert payload["is_forwarded"] is False
 
 
 def test_parse_proof_photo() -> None:
@@ -184,6 +200,16 @@ def test_parse_proof_photo() -> None:
     payload = _parse_proof(msg)  # type: ignore[arg-type]
     assert payload is not None
     assert payload["proof_type"] == "photo"
+    assert payload["is_forwarded"] is False
+
+
+def test_parse_proof_forwarded_message() -> None:
+    """Pravki §Z-22 (Step 4, hole #4): forward_date != None → is_forwarded=True."""
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    payload = _parse_proof(msg)  # type: ignore[arg-type]
+    assert payload is not None
+    assert payload["is_forwarded"] is True
 
 
 # ---------- _text_for_code --------------------------------------------------
@@ -200,15 +226,35 @@ def test_text_for_code_too_short() -> None:
 
 
 def test_text_for_code_wrong_topic() -> None:
+    """Pravki §Z-22 (hole #2) DRIFT FIX: только канонический 'not_checkin_topic'
+    маппится в REJECT_WRONG_TOPIC. Старые алиасы ('wrong_topic',
+    'checkin_wrong_topic') теперь падают в REJECT_UNKNOWN — раньше они
+    были в коде, но ничего не делали (worker шлёт канонический код).
+    """
     expected = checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
-    assert _text_for_code("wrong_topic", name="Test") == expected
-    assert _text_for_code("checkin_wrong_topic", name="Test") == expected
+    # Канонический — маппится
+    assert _text_for_code("not_checkin_topic", name="Test") == expected
+    # Старые алиасы — теперь REJECT_UNKNOWN
+    assert _text_for_code("wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
+    assert _text_for_code("checkin_wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN  # noqa: E501
 
 
 def test_text_for_code_out_of_window() -> None:
-    expected = checkin_texts.REJECT_OUT_OF_WINDOW.format(name="Test")
+    # Pravki-bug-fixes §Z-21 (Item 5): формат требует start/end (c window_start/end kwargs).
+    expected = checkin_texts.REJECT_OUT_OF_WINDOW.format(
+        name="Test", start="?", end="?",
+    )
+    # Без kwargs — fallback на '?'
     assert _text_for_code("out_of_window", name="Test") == expected
     assert _text_for_code("checkin_window_closed", name="Test") == expected
+    # С kwargs — реальное время окна
+    expected_with_times = checkin_texts.REJECT_OUT_OF_WINDOW.format(
+        name="Test", start="06:00", end="12:00",
+    )
+    assert _text_for_code(
+        "checkin_window_closed", name="Test",
+        window_start="06:00", window_end="12:00",
+    ) == expected_with_times
 
 
 def test_text_for_code_unknown() -> None:
@@ -277,9 +323,17 @@ async def test_handle_proof_too_short_sends_rejection() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_proof_wrong_topic_sends_rejection() -> None:
+    """Pravki §Z-22 (hole #2) DRIFT FIX: code должен быть "not_checkin_topic"
+    (канонический), не "wrong_topic" (мёртвый magic-string).
+
+    Раньше test работал с "wrong_topic" потому что _text_for_code принимал
+    алиасы `("wrong_topic", "checkin_wrong_topic")` — но это была
+    компенсация broken-контракта. После фикса только канонический код
+    шлётся worker'ом и признаётся ботом.
+    """
     msg = _make_video_note_message()
     bot = FakeBot()
-    backend = _ok_backend({"ok": False, "task_id": None, "code": "wrong_topic"})
+    backend = _ok_backend({"ok": False, "task_id": None, "code": "not_checkin_topic"})
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
@@ -287,8 +341,24 @@ async def test_handle_proof_wrong_topic_sends_rejection() -> None:
     assert bot.sent[0]["text"] == checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
 
 
+def test_text_for_code_wrong_topic_uses_canonical_code() -> None:
+    """Pravki §Z-22 (hole #2): DRIFT FIX проверка.
+
+    Старый magic-string `("wrong_topic", "checkin_wrong_topic")` больше
+    НЕ валиден. Теперь только канонический "not_checkin_topic" маппится
+    в REJECT_WRONG_TOPIC. Это закрывает дрейф между bot/worker/backend.
+    """
+    # Канонический — маппится
+    expected = checkin_texts.REJECT_WRONG_TOPIC.format(name="Test")
+    assert _text_for_code("not_checkin_topic", name="Test") == expected
+    # Старые алиасы — теперь падают в REJECT_UNKNOWN (нет skeleton-text)
+    assert _text_for_code("wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
+    assert _text_for_code("checkin_wrong_topic", name="Test") == checkin_texts.REJECT_UNKNOWN
+
+
 @pytest.mark.asyncio
 async def test_handle_proof_out_of_window_sends_rejection() -> None:
+    # Pravki-bug-fixes §Z-21 (Item 5): fallback на '?' когда worker не передал times.
     msg = _make_video_note_message()
     bot = FakeBot()
     backend = _ok_backend({"ok": False, "task_id": None, "code": "out_of_window"})
@@ -296,7 +366,9 @@ async def test_handle_proof_out_of_window_sends_rejection() -> None:
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
     assert len(bot.sent) == 1
-    assert bot.sent[0]["text"] == checkin_texts.REJECT_OUT_OF_WINDOW.format(name="Test")
+    assert bot.sent[0]["text"] == checkin_texts.REJECT_OUT_OF_WINDOW.format(
+        name="Test", start="?", end="?",
+    )
 
 
 @pytest.mark.asyncio
@@ -593,3 +665,1002 @@ async def test_prefilter_video_note_too_short_takes_priority_over_wrong_type() -
     text = bot.sent[0]["text"]
     assert "Видео-кружочек" not in text
     assert "только" in text or "Фото" in text
+
+# ---------------------------------------------------------------------------
+# Pravki-bug-fixes §Z-19: bot pre-filter для joined_late.
+#
+# Сценарий: бот получает habit_state с is_joined_late=True →
+# 1. Отвечает REJECT_JOINED_LATE с подставленными start/end.
+# 2. НЕ создаёт Celery-задачу (backend.post не вызывается).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_skips_backend() -> None:
+    """is_joined_late=True → REJECT_JOINED_LATE с временем окна, без backend.post."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": True,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Главное: Celery-задача НЕ создаётся.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], (
+        f"Backend /internal/checkins/process must NOT be called for joined_late, "
+        f"got calls: {process_calls}"
+    )
+    # Юзеру отвечено с подставленным временем окна.
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "06:00" in text, f"Expected start '06:00' in response, got: {text}"
+    assert "12:00" in text, f"Expected end '12:00' in response, got: {text}"
+    assert "вступили" in text or "завтра" in text, (
+        f"Expected joined_late wording, got: {text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_falls_back_on_missing_window() -> None:
+    """Если is_joined_late=True но start/end отсутствуют (старый backend),
+    fallback на '?' (не падаем, не молчим)."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": True,
+            # start/end отсутствуют (на случай если кто-то использует старый backend)
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Backend process всё равно НЕ вызван.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == []
+    # Ответ отправлен с '?' fallback.
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "?" in text, f"Expected '?' fallback in response, got: {text}"
+
+
+@pytest.mark.asyncio
+async def test_prefilter_joined_late_false_proceeds_to_backend() -> None:
+    """is_joined_late=False → обычный путь, backend.post вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+        response={"ok": True, "task_id": "t-1", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Celery-задача создаётся.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert len(process_calls) == 1, (
+        f"Expected backend /internal/checkins/process to be called once, "
+        f"got {len(process_calls)} calls"
+    )
+    # И ответ "Принято".
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "Принято" in text
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 4): caught_today prefilter
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_status_caught_uses_REJECT_CAUGHT_TODAY() -> None:
+    """status='caught' (apply_catch): caught_today=True → REJECT_CAUGHT_TODAY,
+    НЕ REJECT_ALREADY_CHECKED_IN ("уже отметился" — было бы неверно).
+
+    Тест проверяет порядок проверок: caught_today срабатывает ПЕРВЫМ,
+    даже если already_checked_in=True одновременно.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # ← оба флага True одновременно
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # NEW (Item 4):
+            "caught_today": True,  # ← это и есть условие для caught_today ветки
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Backend не вызывается — prefilter отбил.
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться — caught_today prefilter"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "поймали" in text, (
+        f"Expected 'поймали' (REJECT_CAUGHT_TODAY), got: {text!r}"
+    )
+    assert "уже отметился" not in text, (
+        f"Should NOT contain 'уже отметился' (REJECT_ALREADY_CHECKED_IN), got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_status_missed_uses_REJECT_PENALTY_DAY_CLOSED() -> None:
+    """status='missed' (cron apply_window_expired, без кэтчера):
+    caught_today=True → REJECT_PENALTY_DAY_CLOSED с нейтральным тоном.
+
+    ВАЖНО: НЕ говорим «поймали» — никто не ловил, просто окно закрылось
+    со штрафом. Различение через checkin_status.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # cron-only: Checkin(status='missed') есть, Penalty(WINDOW_CLOSED_NO_CATCH) есть
+            "caught_today": True,
+            "checkin_status": "missed",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "поймали" not in text, (
+        f"Should NOT say 'поймали' for cron-only missed, got: {text!r}"
+    )
+    assert "штраф" in text, (
+        f"Expected 'штраф' (REJECT_PENALTY_DAY_CLOSED), got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_already_checked_in_status_done_uses_REJECT_ALREADY_CHECKED_IN() -> None:
+    """status='done' (юзер сам отметился): caught_today=False → пропускаем
+    caught_today ветку, попадаем в already_checked_in → REJECT_ALREADY_CHECKED_IN.
+
+    Это нормальный случай — юзер отметился, второй кружочек не нужен.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            # Нет пенальти за сегодня → caught_today=False
+            "caught_today": False,
+            "checkin_status": "done",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    process_calls = [
+        c for c in backend.calls if c.get("path") == "/internal/checkins/process"
+    ]
+    assert process_calls == [], "Backend НЕ должен вызываться"
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "уже отметился" in text
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_takes_priority_over_already_checked_in() -> None:
+    """Стресс-тест порядка: даже если ОБА флага True, caught_today
+    срабатывает ПЕРВЫМ и возвращает правильный текст (не REJECT_ALREADY_CHECKED_IN).
+
+    Это ОСНОВНОЙ тест из всего Item 4 — проверка порядка.
+    Если этот тест упадёт с 'уже отметился' — значит порядок сломан.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": "2026-07-23T08:00:00+00:00",
+            "is_joined_late": False,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    # Если caught_today правильно стоит ПЕРВЫМ — увидим 'поймали'.
+    # Если перепутать порядок и already_checked_in сработает первым — увидим 'уже отметился'.
+    assert "поймали" in text, (
+        f"Order broken: caught_today должен быть ДО already_checked_in. "
+        f"Got text: {text!r}"
+    )
+
+
+# ============================================================================
+# Pravki-bug-fixes §Z-21 (Item 5): bot pre-filter для checkin_window_closed
+#
+# Сценарий: бот получает ответ worker'а с code='checkin_window_closed' (race
+# fallback) + window_start/end → REJECT_OUT_OF_WINDOW с временем окна.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_checkin_window_closed_passes_window_times() -> None:
+    """code='checkin_window_closed' + window_start/end → REJECT_OUT_OF_WINDOW
+    с реальным временем окна (НЕ статичный текст).
+
+    Сценарий: бот pre-filter пропустил (is_within_checkin_window=True при state),
+    worker ответил 200 OK с code='checkin_window_closed' (race fallback).
+    Bot маппит code → текст с window_start/end.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    # Pre-filter должен пропустить (found=True, окно открыто per state),
+    # worker fallback — race case.
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,  # race-fallback: pre-filter пропустил, worker отверг
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+        response={
+            "ok": False,
+            "code": "checkin_window_closed",
+            "message": "checkin_window_closed",
+            "window_start": "06:00",
+            "window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "06:00" in text, f"Expected '06:00' in REJECT_OUT_OF_WINDOW, got: {text!r}"
+    assert "12:00" in text, f"Expected '12:00' in REJECT_OUT_OF_WINDOW, got: {text!r}"
+    # Текст упоминает что окно закрыто (статичная часть)
+    assert "окно" in text.lower(), f"Expected 'окно' in text, got: {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_prefilter_checkin_window_closed_falls_back_on_missing_window() -> None:
+    """Если code='checkin_window_closed' без window_start/end (старый worker),
+    fallback на '?' (НЕ падаем, НЕ статичный текст без плейсхолдеров)."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,  # race-fallback: pre-filter пропустил, worker отверг
+            # start/end ОТСУТСТВУЮТ (как и в worker response ниже) — fallback на '?'
+        },
+        response={
+            "ok": False,
+            "code": "checkin_window_closed",
+            "message": "checkin_window_closed",
+            # window_start/window_end отсутствуют (старый worker)
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    # Fallback '?' вместо KeyError
+    assert "?" in text, f"Expected '?' fallback, got: {text!r}"
+
+
+# ============================================================================
+# Pravki §Z-22 (hole #1): bot pre-filter для checkin_window_closed.
+#
+# Сценарий: бот получил state от backend /get_habit_state, в котором
+# is_within_checkin_window=False (backend посчитал через habit.is_within_checkin_window).
+# Бот должен ответить REJECT_OUT_OF_WINDOW с window_start/end из state
+# и НЕ вызывать backend.post() (никакого send_task).
+#
+# Canonical order v2 (после ревизии Шага 1.1): state-of-day checks
+# (caught_today, already_checked_in, joined_late) идут ПЕРЕД WINDOW_CLOSED.
+# Причина: поймать можно ТОЛЬКО того, кто пропустил окно, значит
+# caught_today=True почти ВСЕГДА сопровождается is_within_checkin_window=False.
+# Для 95% пойманных участников WINDOW_CLOSED первым был бы бессмысленной
+# потерей информации. Поэтому caught_today ВЫИГРЫВАЕТ.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_returns_REJECT_OUT_OF_WINDOW() -> None:
+    """is_within_checkin_window=False → REJECT_OUT_OF_WINDOW без backend.post.
+
+    Закрывает Pravki §Z-22 (hole #1): раньше бот отвечал "Принято" → worker
+    отвергал async → юзер получал ложный acknowledge. Теперь синхронно.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # <-- вот он, баг #1
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот ответил REJECT_OUT_OF_WINDOW
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "06:00" in text, f"Expected '06:00' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+    assert "12:00" in text, f"Expected '12:00' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+    assert "окно" in text.lower(), f"Expected 'окно' в REJECT_OUT_OF_WINDOW, got: {text!r}"
+
+    # Backend.post НЕ вызывался — никаких send_task, никакого "Принято" юзеру
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться при closed window, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_window_closed() -> None:
+    """caught_today=True ВЫИГРЫВАЕТ у is_within_checkin_window=False.
+
+    Pravki §Z-22 (hole #1) canonical order v2: state-of-day идёт ПЕРЕД
+    time/location. Это инверсия первой попытки (где WINDOW_CLOSED был #5,
+    state-of-day — #8-10). Реальный сценарий: поймать можно ТОЛЬКО того,
+    кто уже не в окне, значит caught_today=True почти ВСЕГДА имеет
+    is_within_checkin_window=False. Юзер должен увидеть:
+
+        "сегодня вас уже поймали за пропуск, штраф списан"
+
+    а не бесполезное "окно закрыто" (для пойманного это вторично —
+    деньги уже списаны, действие "пополни депозит" не помогает).
+
+    Ревизия ордера зафиксирована в этом тесте + в docstring enum'а +
+    в test_checkin_reject_code_order_matches_documented_priority.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # тоже True (status='caught' = checkin + penalty)
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # оба нарушены
+            "caught_today": True,
+            "checkin_status": "caught",
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY выигрывает — юзер узнаёт что пойман, не "окно закрыто"
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у WINDOW_CLOSED для пойманного юзера. "
+        f"Если 'поймали' не в тексте — order сломан (revert от v2 к v1). "
+        f"Got: {text!r}"
+    )
+    assert "окно" not in text.lower(), (
+        f"REJECT_OUT_OF_WINDOW не должен выиграть — для пойманного это "
+        f"маскирует финансовое последствие. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_falls_back_on_missing_window_times() -> None:
+    """Если state не содержит checkin_window_start/end — fallback на '?' (НЕ KeyError)."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,
+            # checkin_window_start/end отсутствуют (старый backend)
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "?" in text, f"Expected '?' fallback, got: {text!r}"
+    assert "окно" in text.lower(), f"Expected окно-текст, got: {text!r}"
+
+
+# ============================================================================
+# Pravki §Z-22 (hole #2): bot pre-filter для not_checkin_topic.
+#
+# Сценарий: state.checkin_topic_thread_id=42, message.message_thread_id=99
+# (например, юзер шлёт в General вместо топика «Чек-ины»). Бот должен
+# ответить REJECT_WRONG_TOPIC и НЕ вызывать backend.post().
+#
+# Canonical order v2: позиция #9 (после WINDOW_CLOSED #8). Оба из
+# категории IV (Wrong time/topic).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_returns_REJECT_WRONG_TOPIC() -> None:
+    """state.checkin_topic_thread_id=42, message.message_thread_id=99
+    → REJECT_WRONG_TOPIC, backend.post НЕ вызывается.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # отличается от state (default FakeMessage = 4)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,  # ожидаемый topic
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот ответил REJECT_WRONG_TOPIC
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "топик" in text.lower(), f"Expected топик-текст, got: {text!r}"
+    assert "↩" in text, f"Expected reply-префикс, got: {text!r}"
+
+    # Backend.post НЕ вызывался
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться при wrong topic, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_correct_topic_proceeds() -> None:
+    """message.message_thread_id == state.checkin_topic_thread_id
+    → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 42  # matches state
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил, идём к backend.post
+    assert len(backend.calls) == 1, (
+        f"backend.post должен вызываться, got calls: {backend.calls!r}"
+    )
+    # bot отправил "Принято" (т.к. fake response = {"ok": True})
+    assert len(bot.sent) == 1
+    assert "Принято" in bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_no_topic_thread_id_legacy_accepts_any() -> None:
+    """state.checkin_topic_thread_id IS NULL (legacy pre-migration 010)
+    → любой message_thread_id (включая None для General) принимается.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # произвольный
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": None,  # legacy — без топиков
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил (legacy-режим)
+    assert len(backend.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
+    """Canonical order v2: #9 WRONG_TOPIC после #8 WINDOW_CLOSED.
+
+    Если оба окна нарушены (юзер шлёт не в тот топик И вне окна),
+    WINDOW_CLOSED срабатывает первым (canonical order #8 выше #9).
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # WINDOW_CLOSED (#8) выигрывает у WRONG_TOPIC (#9)
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "06:00" in text and "12:00" in text
+    assert "топик" not in text.lower(), (
+        f"WRONG_TOPIC не должен выиграть у WINDOW_CLOSED "
+        f"(canonical order #9 < #8). Got: {text!r}"
+    )
+
+
+# ============================================================================
+# Pravki §Z-22 (Step 3, hole #3): bot pre-filter для paused/left сплита.
+#
+# Canonical order v2: позиции #6 (MEMBERSHIP_PAUSED) и #7 (MEMBERSHIP_LEFT).
+# Идут ПОСЛЕ state-of-day (#3-5 caught_today/already_checked_in/joined_late)
+# и ПОСЛЕ WRONG_TOPIC (#9), потому что для пойманного юзера показываем
+# "поймали" — не "пополни депозит".
+#
+# ОБЯЗАТЕЛЬНЫЕ тесты (по precheck Шага 3):
+# 1. pure paused (без caught_today)
+# 2. pure left (без caught_today)
+# 3. combo caught_today=True + paused=True → REJECT_CAUGHT_TODAY
+#    (caught_today приоритет #3 > #6, физически возможен после
+#    apply_catch → recompute_pause_status).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_membership_paused_returns_REJECT_MEMBERSHIP_PAUSED() -> None:
+    """status=paused → REJECT_MEMBERSHIP_PAUSED, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "паузе" in text.lower(), f"Expected 'паузе' в REJECT_MEMBERSHIP_PAUSED, got: {text!r}"
+    assert "пополни" in text.lower() or "депозит" in text.lower(), (
+        f"Expected 'пополни депозит' (recovery path) в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для paused, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_membership_left_returns_REJECT_MEMBERSHIP_LEFT() -> None:
+    """status=left → REJECT_MEMBERSHIP_LEFT, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "left",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "участник" in text.lower(), (
+        f"Expected 'участник' в REJECT_MEMBERSHIP_LEFT, got: {text!r}"
+    )
+    assert "вступи" in text.lower() or "мини-апп" in text.lower(), (
+        f"Expected 'вступи заново через мини-апп' (recovery path) в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_membership_paused() -> None:
+    """COMBO: caught_today=True + membership_status=paused.
+
+    Физически возможен (после apply_catch → recompute_pause_status).
+    Юзер должен увидеть "поймали" (canonical #3 выше #6), а не
+    "пополни депозит" — иначе потеряется финансовая информация.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,  # status='caught' = checkin + penalty
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",  # автопауза после обнуления депозита
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у MEMBERSHIP_PAUSED (#6)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у paused. "
+        f"Иначе юзер увидит 'пополни депозит' вместо 'поймали, штраф списан' — "
+        f"потеря финансовой информации. Got: {text!r}"
+    )
+    assert "паузе" not in text.lower(), (
+        f"REJECT_MEMBERSHIP_PAUSED не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_membership_left() -> None:
+    """COMBO: caught_today=True + membership_status=left.
+
+    Технически достижимо через membership_service.leave() после поимки,
+    но prefilter всё равно отбивает на позиции #3 (ALREADY_CAUGHT) —
+    защита по canonical order. Тест задокументирован как инвариант: см.
+    checkin_service.py комментарий рядом с проверкой статуса.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "left",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у MEMBERSHIP_LEFT (#7)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у left. Got: {text!r}"
+    )
+    assert "участник" not in text.lower(), (
+        f"REJECT_MEMBERSHIP_LEFT не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_priority_over_membership_paused() -> None:
+    """Canonical order v2: #8 WINDOW_CLOSED > #6 MEMBERSHIP_PAUSED.
+
+    Если оба нарушены (юзер paused И вне окна) — показываем окно,
+    потому что это более специфичная информация (конкретное время),
+    чем "пополни депозит" (общая инструкция).
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "membership_status": "paused",  # оба нарушены
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "12:00" in text
+    assert "паузе" not in text.lower(), (
+        f"paused не должен выиграть у WINDOW_CLOSED (canonical #6 < #8). Got: {text!r}"
+    )
+
+
+# ============================================================================
+# Pravki §Z-22 (Step 4, hole #4): bot pre-filter для forwarded messages.
+#
+# Сценарий: message.forward_date != None (пересланное сообщение в Telegram).
+# Бот должен ответить REJECT_FORWARDED, не дожидаясь worker'а.
+#
+# Canonical order v2: позиция #10 (после WINDOW_CLOSED #8, WRONG_TOPIC #9,
+# MEMBERSHIP_PAUSED #6, MEMBERSHIP_LEFT #7).
+#
+# Особенность: forward_date доступен ТОЛЬКО в aiogram Message (Telegram
+# update). Backend его не получает в state, только в payload.is_forwarded.
+# Поэтому для FORWARDED bot prefilter — ОБЯЗАТЕЛЬНЫЙ (а не defense-in-depth).
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_forwarded_returns_REJECT_FORWARDED() -> None:
+    """message.forward_date != None → REJECT_FORWARDED, backend.post НЕ вызывается."""
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)  # любой не-None
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "пересланные видео" in text.lower(), (
+        f"Expected 'пересланные видео' в REJECT_FORWARDED, got: {text!r}"
+    )
+    assert "своё" in text.lower() or "живое" in text.lower(), (
+        f"Expected action hint 'запиши своё / живое' в тексте, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для forwarded, "
+        f"got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_not_forwarded_proceeds() -> None:
+    """message.forward_date=None (default) → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ."""
+    msg = _make_video_note_message()
+    msg.forward_date = None  # default FakeMessage, но для явности
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Pre-filter пропустил, идём к backend.post
+    assert len(backend.calls) == 1
+    assert "Принято" in bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_caught_today_priority_over_forwarded() -> None:
+    """Canonical order v2: #3 ALREADY_CAUGHT > #10 FORWARDED.
+
+    Пойманный юзер прислал пересланное видео (странно, но race возможен).
+    Юзер должен увидеть "поймали" (финансовая информация важнее),
+    а не "пересланные видео".
+    """
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": True,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+            "caught_today": True,
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # CAUGHT_TODAY (#3) выигрывает у FORWARDED (#10)
+    text = bot.sent[0]["text"]
+    assert "поймали" in text.lower(), (
+        f"caught_today должен ВЫИГРАТЬ у forwarded. Got: {text!r}"
+    )
+    assert "пересланные" not in text.lower(), (
+        f"REJECT_FORWARDED не должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_window_closed_priority_over_forwarded() -> None:
+    """Canonical order v2: #8 WINDOW_CLOSED > #10 FORWARDED.
+
+    Окно закрыто И сообщение переслано — "окно закрыто" (специфичнее)
+    важнее, чем "пересланные видео" (общая инструкция).
+    """
+    msg = _make_video_note_message()
+    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # закрыто
+            "membership_status": "active",
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
+    assert "12:00" in text
+    assert "пересланные" not in text.lower(), (
+        f"FORWARDED не должен выиграть у WINDOW_CLOSED (canonical #10 < #8). Got: {text!r}"
+    )

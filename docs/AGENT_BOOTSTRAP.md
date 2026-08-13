@@ -53,6 +53,9 @@
 
 ## 3. Где что лежит — локально и на сервере
 
+> Snapshot от 2026-08-13 — добавлено `apps/backend/scripts/e2e/`
+> (reusable end-to-end simulator: scenario_happy_path + cleanup).
+
 ### Локально (`/Users/dmitriy/Downloads/Privichki`)
 
 ```
@@ -64,6 +67,15 @@ apps/
 │   ├── app/core/            # config, security, middleware, exceptions, constants, logging
 │   ├── app/db/              # session, redis
 │   ├── alembic/versions/    # 000_extensions → 009_chat_id_partial_unique
+│   ├── scripts/
+│   │   ├── seed_dev_data.py # docker exec backend python -m scripts.seed_dev_data
+│   │   ├── register_webhook.py
+│   │   └── e2e/             # e2e-simulation (см. apps/backend/scripts/e2e/README.md)
+│   │       ├── auth.py       # generate_init_data (HMAC-SHA256), FakeUser, generate_service_token
+│   │       ├── core.py       # E2EHttp (initData/service/webhook/internal), E2EDatabase (read-only SQL)
+│   │       ├── webhook.py    # фабрики фейковых Telegram Update JSON
+│   │       ├── scenario_happy_path.py  # полный путь: create → topup → join → checkin → catch → reject
+│   │       └── cleanup.py    # удаление E2E-артефактов (DRY-RUN по умолчанию)
 │   └── tests/               # 161 тест
 ├── bot/            # aiogram 3.30 + aiohttp 3.13 (webhook на :8080)
 │   └── bot/handlers/        # start, checkin, payments, chat_member
@@ -269,18 +281,24 @@ git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "..."
 git -c user.name=Vegass -c user.email=dmitriy@vegass.dev push origin main
 
 # Только после явного "ок" на деплой:
-# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг
+# 1. Синхронизация через privichki-prod (ed25519 ключ) на хост в стэйджинг.
+# ВАЖНО: backend, worker, bot — image-based контейнеры (см. §8.1 ниже).
+# Каждый сервис требует СВОЙ rsync + СВОЙ docker compose build.
+# Стейджинг /tmp/privichki_new/{backend,worker,bot} должен существовать.
 rsync -az --delete apps/backend/ privichki-prod:/tmp/privichki_new/backend/
 rsync -az --delete apps/worker/  privichki-prod:/tmp/privichki_new/worker/
+rsync -az --delete apps/bot/     privichki-prod:/tmp/privichki_new/bot/
 
 # 2. Применение в /app
-ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/'
+ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/backend/ /app/apps/backend/ && rsync -az --delete /tmp/privichki_new/worker/ /app/apps/worker/ && rsync -az --delete /tmp/privichki_new/bot/ /app/apps/bot/'
 
-# 3. Пересборка + рестарт контейнеров
-ssh privichki-prod 'cd /app/infra && docker compose build backend --no-cache && docker compose up -d backend'
+# 3. Пересборка + рестарт контейнеров (image-based! см. §8.1)
+# ВАЖНО: build ПЕРЕД up. Без build up возьмёт старый image со старым кодом.
+ssh privichki-prod 'cd /app/infra && docker compose build backend worker bot --no-cache && docker compose up -d backend worker bot'
 
-# 4. Проверка
+# 4. Проверка (curl-verify КАЖДОГО слоя отдельно)
 ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http://127.0.0.1:8000/health && curl -s http://127.0.0.1:8000/ready'
+# Для worker и bot проверки — см. §8.2.
 ```
 
 `ssh privichki-prod` — алиас из `~/.ssh/config`, указывает на `root@169.58.52.78`
@@ -297,21 +315,132 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
 - ❌ `rm -rf /app/**`, `docker system prune`, изменения `.env` без ок
 - ❌ `docker cp` для правки кода (пропадёт при recreate)
 
+### 8.1 Image-based контейнеры: build после rsync обязателен (2026-08-10)
+
+**Урок из Items 3+4 деплоя (см. коммиты `2012201`, `7343411` deploy):**
+
+Контейнеры **`habit-backend`, `habit-worker`, `habit-bot`** — image-based.
+Код копируется в image через `COPY` в Dockerfile (см. `infra/docker/backend.Dockerfile`,
+`worker.Dockerfile`, `bot.Dockerfile`). **Bind-mount не настроен** для `/app/apps/`.
+
+Это значит:
+
+- `rsync` обновляет файлы на host'е → контейнер их **НЕ ВИДИТ** (у контейнера свой
+  overlay с запечённой копией файлов из Dockerfile).
+- `docker compose restart` перезапускает контейнер с **тем же образом** → старый код.
+- `docker compose up -d --force-recreate` пересоздаёт контейнер, но **не
+  пересобирает image** → всё равно старый код.
+- ✅ `docker compose build <service> --no-cache && docker compose up -d <service>`
+  — единственный способ доставить новый код.
+
+**Симптом если забыл build:** `python -c "import ..."` в контейнере показывает
+старые классы, `grep new_symbol /app/...` в контейнере возвращает 0, но файл на
+host'е (в `/app/apps/...`) уже новый. **Тест:** `md5sum /app/apps/<file>` на host
+против `docker exec <container> md5sum /app/apps/<file>` внутри контейнера —
+должны совпадать; если не совпадают — образ устарел, нужен `build`.
+
+**Только `habit-frontend` — bind-mounted.** Директива `volumes: - /app/apps/frontend/dist:/usr/share/nginx/html`
+в `docker-compose.yml` означает что nginx видит свежие файлы после rsync.
+**Но** nginx кеширует open file descriptors → нужен `docker exec habit-frontend nginx -s reload`
+после rsync (не требует recreate).
+
+**Per-service rsync обязателен.** Staging `/tmp/privichki_new/<service>/` от каждого
+сервиса хранится отдельно. Если забыть rsync worker (только backend) — будет
+deploy worker из STALE staging (вчерашний код). После очистки `/tmp/` —
+staging directories исчезают → rsync молча проваливается → build даёт старый image.
+**Защита:** после `rm -rf /tmp/privichki_new` сначала `mkdir -p /tmp/privichki_new/{backend,worker,bot}`,
+потом rsync.
+
+### 8.2 curl-verify после деплоя
+
+**Не катай весь стек сразу.** После каждого restart проверяй что не отвалилось:
+
+```bash
+# Backend — health + ready + schema check
+curl -s http://127.0.0.1:8000/health; echo
+curl -s http://127.0.0.1:8000/ready; echo
+docker exec habit-backend python -B -c "
+from app.core.exceptions import CheckinAlreadyCaughtError  # пример
+print('imports work')
+"
+
+# Worker — celery inspect active (нет зависших тасок)
+docker exec habit-worker celery -A worker.celery_app inspect active | head -5
+
+# Bot — webhook reachable (405 Method Not Allowed = endpoint OK)
+curl -sI https://api.prideclub.fun/bot/webhook | head -2
+docker exec habit-bot grep new_symbol /app/apps/bot/...  # если файл поменялся
+
+# Frontend — bundle hash + cache headers
+curl -s https://app.prideclub.fun/admin/ | grep -o "/assets/admin-[A-Za-z0-9_-]*\\.js"
+curl -sI https://app.prideclub.fun/admin/ | grep -i cache-control
+```
+
+Между слоями (после backend, до worker, до bot, до frontend) — проверка нужна.
+Если что-то отвалилось (например, telegram_bot_api.py aliases), лучше поймать
+ДО того как перезапустишь следующий слой (например, bot импортирует из backend'а
+через HTTP, и если backend стартовал сломанным — bot не сможет ничего сделать).
+
+### 8.3 Debug-скрипты на проде — НЕ оставлять
+
+При ручной диагностике (smoke test / curl / token generation) часто кладутся
+временные скрипты в `/tmp` на проде (например, `gen_token_svc.py`,
+`check_task.py`). **Удалять сразу после использования.** Потенциальная
+поверхность атаки: если кто-то получит доступ к `/tmp`, скрипт для генерации
+service-token (с полным доступом к backend API) лежит готовый.
+
 ## 9. Что не работает на проде (snapshot 2026-07-23)
 
-- ❌ **Платежи = мок.** `PaymentModal.setTimeout(1200)`, `TopUpModal.alert()`.
-  Бот не вызывает `bot.send_invoice`, в `.env` нет `PROVIDER_TOKEN`,
-  в БД `transactions=0`.
+> **Snapshot 2026-08-09:** секция ниже была отредактирована (актуальное состояние
+> зафиксировано в Pravki-subscribe-and-join.md §0 и §5 ритуала). Сверяйтесь
+> с реальным кодом через `git log --oneline <file>` + `git show <commit>`, а не только
+> с этим разделом. Свежие snapshot'ы — `Pravki.md §7`, `docs/09-prod-readiness.md §1.1`.
+
+- 🟡 **Платежи = мок на уровне Telegram API** (НЕ на уровне backend flow). Backend endpoint
+  `POST /api/v1/payments/subscribe` работает и создаёт ACTIVE membership с реальной
+  записью в `users.deposit_balance` + `transactions(amount=price_month+deposit,
+  type=SUBSCRIPTION|DEPOSIT_TOPUP)`. Закрыто коммитом `b98cab0` 2026-08-09: до
+  фикса subscription fee попадал на `deposit_balance` (юзеры видели 1250₽ вместо 250₽);
+  теперь deposit_balance инкрементируется **только** на `deposit_amount_kopecks`,
+  subscription_fee идёт в `transactions.amount` как доход клуба/платформы.
+  Что осталось моком: **отсутствие реального `bot.send_invoice`** — на проде нет
+  `PROVIDER_TOKEN`, бот не вызывает Telegram Payment API, деньги «списываются»
+  без взаимодействия с Telegram. Это отдельная задача (см. Pravki-subscribe-and-join.md §6).
+- ✅ **Pravki §Z-22: prefilter holes 5-round fix** (закрыто 2026-08-12,
+  серия `b4f8974` → `2eda062` → `3e7f1ee` → `4272cfa` → `92a05be` → `6cf22f2` → `b4cc923`) —
+  foundation `CheckinRejectCode` enum с drift-test, закрыты 4 дырки
+  (checkin_window_closed / not_checkin_topic с DRIFT FIX мёртвого magic-string /
+  membership_paused + membership_left сплит / forwarded с особенностью `forward_date`
+  только в aiogram Message). Three-tier защита: bot prefilter sync + backend defense-in-depth
+  в `enqueue_checkin` + frontend mapper в `checkinReject.ts`. Canonical priority v2
+  по специфичности copy: state-of-day выше time/location выше proof validation.
+  Combo-тесты для `caught_today + paused/left/window_closed` зафиксированы.
+  Закрыт оригинальный дырявый паттерн "бот отвечает Принято синхронно, worker
+  отвергает async" — раньше юзер получал ложный acknowledge. Закрыт баг
+  "мини-апп показывает raw-code через SSE" — теперь mapper переводит в
+  human-readable. Подробности — `docs/04-code-standards.md §7.1`,
+  `docs/06-data-model.md §4.0`, `docs/09-prod-readiness.md §1.1`.
+- 🟡 **Известное несоответствие: бот и мини-апп показывают РАЗНЫЕ формулировки
+  для `caught_today` (cron `apply_window_expired` vs `apply_catch`).** Worker SSE payload
+  `{reason, message}` НЕ содержит `checkin_status` — фронт не может отличить
+  "поймали" от "штраф списан, никто не поймал". Бот различает через `state.checkin_status`.
+  Финансово одинаково, копия разная. Подробности — `docs/09-prod-readiness.md §3`.
+  Отдельный PR для расширения `_publish_checkin_rejected` + mapper.
 - ❌ **Бэкапы не развёрнуты.** `backup_cron.sh` готов, нет `aws` CLI, нет
   `S3_*` env, нет cron-задачи. Текущая защита — только volume `habit-club_pgdata`.
 - ❌ **Sentry = no-op** (DSN пуст). Grafana не развёрнута. Кастомных Prometheus-метрик нет.
 - ❌ **Хостинг — Contabo (Германия), не Selectel (РФ).** ФЗ-152 под риском для
-  реальных ПДн (сейчас в БД только 10 тест-юзеров, 0 clubs/transactions).
+  реальных ПДн (сейчас в БД 2 тест-юзера, 3 habits, 3 memberships, 4 transactions).
 - ❌ **AI-комендант и "Удалить аккаунт"** — не реализованы (в v2).
 - 🟡 **В БД 0 habits при 9 файлах в `uploads/club_photos/`** — POST
   `/admin/v1/habits` не отрабатывал, расследовать.
+  ⚠️ **Расхождение с реальностью:** на 2026-08-09 в `habits` 3 строки (восстановлены
+  из pg_dump'а 2026-08-09). Расследование нужно проверить заново.
 - 🟡 **Контракт `chat_id` vs `habit_id`** в `apps/backend/app/api/v1/internal_payments.py`
   ожидает `chat_id: int`, бот шлёт `habit_id: str`. 422 без починки.
+  ⚠️ **Расхождение:** см. комментарий в `Pravki-subscribe-and-join.md §0` «Текущее
+  состояние бота на проде» — `internal_payments.py` остаётся мёртвым кодом (бот не
+  вызывает его). Удалить или переименовать параметр — отдельная задача.
 - 🟡 **Bot логирует plain text**, не structlog-JSON как backend/worker.
 - ✅ **Webhook SSL error (закрыто 2026-08-04)** — `WEBHOOK_BASE_URL` указывал на сырой IP
   в `/app/infra/.env`, Telegram не доставлял апдейты (2 шт в `pending_update_count`).
@@ -321,8 +450,78 @@ ssh privichki-prod 'docker ps --format "{{.Names}}\t{{.Status}}" && curl -s http
   `penalty_repo` в конструктор `CheckinService`, чек-ины возвращали `ok=False` без записи.
   Пофикшено: добавлен `penalty_repo=PenaltyRepository(session)` в
   `apps/worker/worker/tasks/process_checkin.py`.
+- ✅ **MembershipService LEFT/PAUSED bypass** (закрыто 2026-08-09 коммитом `ae6bd07`,
+  сейчас на `feature/fix/left-paused-deposit-bypass` ветке или уже в `main`).
+  `join` теперь проверяет deposit ВСЕГДА — никаких исключений для LEFT/PAUSED.
+- ⚠️ **Docker build cache конфликт** (2026-08-09, НЕ закрыто) — `docker compose build
+  frontend` падает с overlay-конфликтом на `@tanstack/react-query`. Workaround
+  применён (commit `4a390e1`): `image: nginx:1.27-alpine` + volume mount на bundle.
+  Диагностика первопричины — отдельная задача (см. `docs/10-deploy.md` §runbook
+  после фикса этого snapshot'а).
+- ⚠️ **Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE**
+  (2026-08-09, НЕ закрыто). `docker compose run --rm backend alembic upgrade head`
+  стартует контейнер, но не пишет в БД — миграция висит. Workaround: ручной
+  `docker exec habit-postgres psql` с `ALTER TYPE checkin_status ADD VALUE IF NOT
+  EXISTS 'joined_late'` + `UPDATE alembic_version SET version_num='015_...'`.
+  Диагностика первопричины — отдельная задача (см. `docs/10-deploy.md` §runbook).
 
-Подробнее — `docs/09-prod-readiness.md` §1.1 и `docs/02-architecture.md` §9.
+Подробнее — `docs/09-prod-readiness.md` §1.1, `docs/02-architecture.md` §9, `docs/10-deploy.md` §runbook,
+и финальные snapshot'ы планов: `Pravki-subscribe-and-join.md` §0 (Z-13..Z-18 + Z-19),
+`Pravki-deposit-sse.md` §Z-2.9 (PR #1).
+
+## 9.1. Telegram Mini App кэш на мобильном (first-aid: @WebpageBot)
+
+> Snapshot 2026-08-10. Закрыто через `@WebpageBot` после ловушки с
+> admin.prideclub.fun → user app на iOS/Android.
+
+**Симптом (паттерн):** правка фронта/маршрутизации выкатывается на прод,
+на **десктопе работает корректно** (Telegram Desktop / Chrome / Safari),
+на **мобильном Telegram** (iOS/Android) — старая версия SPA, или
+неправильный shell (user вместо admin), или `invalid_init_data` несмотря
+на то что curl на сервере возвращает правильный HTML.
+
+**Root cause:** Telegram mobile WebView держит **отдельный кэш** на
+URL-базисе, **отдельно от system browser cache**. Этот кэш:
+
+- ❌ НЕ чистится через `Settings → Data and Storage → Clear Cache` в
+  Telegram (это только media cache).
+- ❌ НЕ чистится через `Sign out → Sign in` (cache привязан к
+  installation ID, не к user session).
+- ❌ НЕ чистится через iOS `Offload App` (Offload сохраняет
+  `Library/Caches` где живёт WebView cache). Нужен **полный Delete App**.
+- ❌ Не реагирует на `Cache-Control: no-cache` от сервера для **уже
+  закешированных** ответов — директива влияет только на последующие
+  запросы после её установки.
+- ✅ Чистится через `Settings → Apps → Telegram → Storage → Clear Cache`
+  на Android (полностью, включая WebView).
+- ✅ Чистится через полный **Delete App + reinstall** на iOS.
+- ✅ Чистится через бота `@WebpageBot` — открыть в Telegram, отправить
+  URL Mini App (`https://admin.prideclub.fun/`), он отдаст свежий ответ
+  в обход WebView-кэша и force-refresh'нет его.
+
+**Алгоритм диагностики (если «на десктопе ок, на мобильном нет»):**
+
+1. `curl https://<domain>/` с сервера — что отдаётся? Если правильный
+   shell → сервер ок, проблема в WebView-кэше мобильного клиента.
+2. Открыть тот же URL в Safari/Chrome на телефоне (НЕ в Telegram).
+   Правильный shell → 100% подтверждение WebView-кэша.
+3. Применить `@WebpageBot` (быстрее всего): открыть бота → отправить
+   URL → он отдаст свежий ответ и force-refresh'нет WebView-кэш.
+4. Если `@WebpageBot` недоступен: iOS — `Settings → General → iPhone
+   Storage → Telegram → Delete App → reinstall`; Android — `Settings
+   → Apps → Telegram → Storage → Clear Cache`.
+
+**Защита на сервере (применена в `infra/nginx/frontend.nginx.conf`,
+коммит `65160c1` 2026-08-10):** `Cache-Control: no-store, no-cache,
+must-revalidate` на HTML-шеллах и SPA fallback. Bundle-файлы
+(`/assets/`) оставлены с `immutable, max-age=1y` (там content-hash).
+Не защищает от уже-закешированного, но предотвращает рецидив при
+следующем изменении маршрутизации SPA-shell'ов.
+
+**Defense-in-depth:** при ЛЮБОЙ правке `infra/nginx/frontend.nginx.conf`,
+затрагивающей SPA-shell маршрутизацию (`admin.html` ↔ `index.html`),
+предупреждать пользователя заранее: «после деплоя admin Mini App на
+мобильных может залипнуть кэш → @WebpageBot или Delete+Reinstall».
 
 ## 10. Стиль кода — короткая шпаргалка
 
@@ -470,3 +669,99 @@ PostgreSQL 16 (9 миграций, 16 таблиц). Кэш + очереди = R
 VPS 4 (Германия, не РФ), nginx на хосте как reverse proxy. Деплой — rsync +
 `docker compose build` + `up -d`. Деньги — `int` копейки. Auth — двухконтурная
 (initData + service-token JWT с aud/iss/exp). Платежи = мок на фронте.
+## 11. Серия фиксов §Z-21 (2026-08-10, snapshot)
+
+> **Snapshot 2026-08-10.** Закрытая серия из 9 items + docs. Все коммиты в `feat/subscribe-and-join`.
+
+### Карта серии (все задеплоены на проде)
+
+| Item | Что | Commit |
+|---|---|---|
+| 1+2 | `can_catch` в /members видит Penalty + `Checkin(status)` при Penalty | `106734b` |
+| 3 | StatusBadge «Пойман» 🎯 + TodayPage caught-секция | `af9b22a` |
+| 4 | Бот + воркер отклоняют повторный чек-ин после поимки | `f429f80` |
+| 5 | `checkin_window_closed` с реальным временем окна | `be6702d` |
+| 6 | `publish_to_habit` + worker task `publish_catch_event` (Variant Б) | `175c3ff` |
+| 7 | SSE multiplex с двумя cursor'ами | `527f67e` |
+| 8 | catch + you_were_caught broadcasts (HTTP catch_violator only) | `cb5938d` |
+| 9 | `useHabitSse` hook (frontend) | `d94fc91` |
+| Docs | AGENT_BOOTSTRAP §8.1+§8.2+§8.3 (image-based deploy уроки) | `3a4d936` |
+| Infra | telegram_bot_api алиасы + http_factory restore (compat с stash) | `0d6855b`, `0087d15` |
+
+### Runtime user-flow (после Items 1-9)
+
+1. **Юзер открывает клуб** → `GET /habits/{id}/today` → рендер. `useHabitSse`
+   открывает multiplex SSE-стрим (`?last_event_id=$&last_event_id_habit=$`).
+
+2. **Юзер делает чек-ин** → бот pre-filter → `POST /internal/checkins/process`
+   → defense-in-depth (`CheckinJoinedLateError` / `CheckinAlreadyCaughtError`)
+   → worker `process_checkin` → XADD в `sse:user:{u}:{h}` → SSE-event
+   `checkin.accepted` → frontend `setQueryData(["today", habitId], payload)`.
+
+3. **Юзер поймал кого-то** (кнопка «Поймать») → backend `apply_catch` →
+   **ДВА `send_task` в раздельных `try/except`** (Item 8):
+   - `publish_catch_event` → worker XADD в `sse:habit:{h}` (broadcast — все
+     участники получают `catch` event).
+   - `publish_you_were_caught` → worker XADD в `sse:user:{violator}:{h}`
+     (personal для жертвы).
+   На frontend: multiplex EventSource доставляет оба event'а. `invalidateQueries`
+   для members/today/wallet/balance, haptic medium (catch) + haptic warning
+   (you_were_caught).
+
+4. **Cron `close_catch_window`** → `penalty_service.apply_window_expired`
+   пишет `Penalty(reason=WINDOW_CLOSED_NO_CATCH)` + `Checkin(status='missed')`.
+   UI пропустивших обновляется только при следующем mount через `staleTime`
+   / `refetch` (**НЕ через realtime SSE — осознанное ограничение Item 8**).
+   В cron-сценарии нет `catcher_user_id`/`catcher_first_name` для payload —
+   если broadcast нужен, потребуется отдельный Item 10.
+
+5. **Юзер пытается повторно чек-инуть после поимки** → бот pre-filter ловит
+   `caught_today` → REJECT_CAUGHT_TODAY (текст разный для apply_catch vs cron).
+   Defense-in-depth на backend: `CheckinAlreadyCaughtError`.
+
+### Архитектурные решения (Items 6-9)
+
+- **Variant Б (Item 6):** Backend → Celery task → Worker `EventPublisher`.
+  Backend НЕ знает про Redis Streams / async Redis. `include=[]` —
+  backend не импортирует worker tasks. +0 строк shared кода.
+- **Multiplex SSE (Item 7):** Один `EventSource` читает оба стрима
+  (`sse:user:{u}:{h}` + `sse:habit:{h}`) с per-stream cursor'ами.
+  Backend XREAD STREAMS multiplexes в одном round-trip. Frontend multiplexes
+  в одном EventSource.
+- **Variant 1 backward-compat (Item 7):** Legacy v1 клиент (без
+  `last_event_id_habit`) → только user-stream (habit-stream физически не
+  подписан). Drift detection warning (`sse_multiplex_drift_detected`) в
+  backend для диагностики frontend-bug'а.
+- **COLLISION-изоляция (Item 6 + Item 8):** `idempotency_key(..., event_type='caught')`
+  → `sse_published:caught:{m}:{d}` — независимый namespace от
+  `sse_published:checkin:{m}:{d}`. Утренний `checkin.rejected` не блокирует
+  вечерний `you_were_caught`.
+- **SEPARATE try/except (Item 8):** Два `send_task` в catch_violator обёрнуты
+  в раздельные try/except — если broker упал на первом, второй всё равно
+  вызывается. Тест `test_catch_handler_two_send_tasks_independent_try_except`
+  покрывает через `side_effect=[Exception, None]`.
+- **Wallet invalidate (Q2 разведки):** Frontend инвалидирует wallet в обоих
+  event-listener'ах (`catch` и `you_were_caught`). React Query dedup'ит через
+  `notifyManager.batch` + `setTimeout(0)` — безопасно (исследовано из
+  исходников, не предположение).
+
+### Тестовый baseline
+
+| Слой | Passed | Pre-existing failed | Замечание |
+|---|---|---|---|
+| Backend | 364 | 11 | admin_habits_api (нужен Redis), user_photo_endpoint (mock AvatarService) |
+| Worker | 77 | 9 | test_process_penalty и др. |
+| Bot | 40 | 0 | все зелёные |
+| Frontend | 48 | 0 | все зелёные |
+
+**20 pre-existing фейлов — baseline, не регрессии серии.** Подтверждено через
+`git stash` проверки до/после каждого Item.
+
+### Известные ограничения (НЕ в серии §Z-21)
+
+- **Cron `apply_window_expired` НЕ транслирует SSE broadcast** — осознанное
+  ограничение Item 8 (нет catcher'а в payload). При необходимости — Item 10.
+- **Платежи = мок** (backend flow есть, но bot не вызывает `send_invoice`).
+- **Sentry/Grafana/Prometheus** не задеплоены (см. §9 AGENT_BOOTSTRAP).
+- **`_b` legacy debug-файлы в `/tmp/`** — не чистил, не моя задача.
+- **2 user_photo_endpoint fail + 9 admin_habits_api fail** — pre-existing.

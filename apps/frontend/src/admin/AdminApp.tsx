@@ -21,7 +21,7 @@ export function AdminApp() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename="/admin">
         <AdminAppRouter />
       </BrowserRouter>
     </QueryClientProvider>

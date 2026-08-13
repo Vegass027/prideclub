@@ -287,16 +287,21 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 | CI/CD | GitHub Actions (lint + test) + Dependabot | — |
 | Резервные копии | `backup_cron.sh` готов, **не развёрнут** (нет aws CLI, нет S3 env) | — |
 
-## 9. Известные проблемы и долги (snapshot 2026-07-23)
+## 9. Известные проблемы и долги (snapshot 2026-07-23, обновлено 2026-08-09)
 
 > Обновлено 2026-07-23 после закрытия задачи topic-scoped check-in.
+> Свежие правки 2026-08-09 — см. `docs/AGENT_BOOTSTRAP.md §9` (там более полный
+> список с фактическим состоянием после Pravki-subscribe-and-join deploy'а).
 
 | Что | Где | Статус |
 |---|---|---|
-| Платежи мок | `PaymentModal.tsx`, `TopUpModal.tsx` | Мок, Telegram Payments не подключён |
-| Контракт `chat_id` vs `habit_id` | `internal_payments.py` ↔ `bot/handlers/payments.py` | Сломано, требует фикса перед включением платежей |
-| `SENTRY_DSN` пуст | `.env` | Sentry no-op |
-| Бэкапы не развёрнуты | `infra/backup/`, `.env` | Сценарий в плане, не выполнен |
+| 🟡 Платежи = мок на уровне Telegram API (НЕ на уровне backend) | `bot/handlers/payments.py` не вызывает `send_invoice` | Backend `POST /api/v1/payments/subscribe` работает (commit `b98cab0`, 2026-08-09). Реальный Telegram Payments — отдельная задача, см. `Pravki-subscribe-and-join.md §6` |
+| ⚠️ Docker overlay-конфликт при `docker compose build frontend` | `infra/docker-compose.yml` | Workaround применён (commit `4a390e1`): `image: nginx:1.27-alpine` + volume mount. Подробности и диагностика — `docs/10-deploy.md` §9.1 |
+| ⚠️ Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE | `apps/backend/alembic/versions/015_*.py` | Workaround через ручной `psql` + `UPDATE alembic_version`. Подробности — `docs/10-deploy.md` §9.2 |
+| ⚠️ Контракт `chat_id` vs `habit_id` | `internal_payments.py` ↔ `bot/handlers/payments.py` | Сломано, требует фикса перед включением платежей (или удалить мёртвый код — см. `Pravki-subscribe-and-join.md §0`) |
+| ⚠️ Контракт `chat_id` vs `habit_id` в `apps/backend/app/api/v1/internal_payments.py` ожидает `chat_id: int`, бот шлёт `habit_id: str`. 422 без починки | | Сломано — мёртвый код (бот не вызывает). Удалить или переименовать параметр — отдельная задача |
+| ⚠️ Sentry = no-op | `SENTRY_DSN` пуст в `.env` | Без изменений |
+| ❌ Бэкапы не развёрнуты | `infra/backup/`, `.env` | Сценарий в плане, не выполнен |
 | Бот логирует plain text | `bot/main.py:25` | Не structlog, как в backend/worker (warning не блокирует) |
 | Nginx на хосте дублирует фронт | `/etc/nginx/sites-enabled/habit-club` + `habit-frontend` (nginx 1.27) | Двухслойный прокси; не баг, но усложняет деплой (см. §12 ниже) |
 | Server в Германии | `169.58.52.78` (Contabo) | ФЗ-152 под риском; миграция в Selectel — план |

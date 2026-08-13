@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    CheckinStatus,
     MembershipStatus,
     PenaltyConfig,
     PenaltyReason,
@@ -156,6 +157,19 @@ class PenaltyService:
         # Сначала flush'им penalty (INSERT + RETURNING), затем transaction.
         await self._session.flush()
 
+        # Pravki-bug-fixes §Z-21 (caught badge): пишем Checkin(status='caught')
+        # сразу после penalty, чтобы /members (can_catch=False) и /today
+        # (статус='Пойман') отображали правильное состояние без перезагрузки.
+        # ON CONFLICT DO UPDATE: если Checkin уже есть (status='missed' от cron
+        # apply_window_expired или status='done' от гонки — юзер успел
+        # отметиться после поимки), перезаписываем на 'caught'. proof_message_id
+        # сохраняется если был (для истории).
+        await self._checkin_repo.upsert_status(
+            membership_id=str(violator_membership_id),
+            on_date=club_date,
+            status=CheckinStatus.CAUGHT,
+        )
+
         transaction = Transaction(
             id=str(uuid4()),
             user_id=violator.user_id,
@@ -241,6 +255,17 @@ class PenaltyService:
         self._session.add(penalty)
         # Flush перед transaction — см. apply_catch().
         await self._session.flush()
+
+        # Pravki-bug-fixes §Z-21 (missed badge): пишем Checkin(status='missed')
+        # сразу после penalty, чтобы /members и /today отображали правильный
+        # статус. ON CONFLICT DO UPDATE: если Checkin уже был с другим
+        # статусом — перезаписываем. Race с apply_catch невозможен потому что
+        # оба метода проверяют existing Penalty первым делом (idempotent guard).
+        await self._checkin_repo.upsert_status(
+            membership_id=str(violator_membership_id),
+            on_date=club_date,
+            status=CheckinStatus.MISSED,
+        )
 
         transaction = Transaction(
             id=str(uuid4()),

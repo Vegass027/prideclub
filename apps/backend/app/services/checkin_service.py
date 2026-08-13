@@ -4,8 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
+from app.core.constants import CheckinRejectCode
 from app.core.exceptions import (
+    CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
+    CheckinJoinedLateError,
+    CheckinMembershipLeftError,
+    CheckinMembershipPausedError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     HabitArchivedError,
@@ -87,6 +92,31 @@ class CheckinService:
         membership = await self._membership_repo.get_for_user_in_habit(user_id, habit_id)
         if membership is None:
             raise MembershipNotFoundError()
+
+        # Pravki §Z-22 (Step 3, hole #3): сплит MembershipNotActiveError →
+        # CheckinMembershipPausedError / CheckinMembershipLeftError.
+        #
+        # ИНВАРИАНТЫ (см. precheck Шага 3):
+        # - caught_today=True AND status=paused ВОЗМОЖЕН:
+        #   penalty_service.apply_catch пишет Penalty → flush → recompute_pause_status
+        #   флипает ACTIVE→PAUSED (deposit < penalty после списания штрафа).
+        #   В этом случае юзер видит REJECT_CAUGHT_TODAY (canonical #3 выше #6).
+        # - caught_today=True AND status=left НЕВОЗМОЖЕН через apply_catch /
+        #   apply_window_expired (оба reject non-ACTIVE, lines 100-101 / 215-216
+        #   penalty_service.py). Технически достижим через membership_service.leave()
+        #   ПОСЛЕ поимки (юзер увидел пенальти и нажал "выйти"), но prefilter всё равно
+        #   отбивает на позиции #3 (ALREADY_CAUGHT выше #7 MEMBERSHIP_LEFT).
+        # - status=paused → recovery: topup deposit в мини-аппе (авто-возобновится).
+        # - status=left → recovery: rejoin через Marketplace (НЕ topup).
+        # Сплит важен: бот даёт разные тексты (пополни vs rejoin), потому что
+        # кнопки разные.
+        if membership.status.value == "paused":
+            raise CheckinMembershipPausedError()
+        if membership.status.value == "left":
+            raise CheckinMembershipLeftError()
+        # Defensive: MembershipNotActiveError оставлен для catch-flow (НЕ чек-ин).
+        # Если в enum добавится новый статус (например, "banned") — упадём в
+        # нижестоящий MembershipNotActiveError, который 400 + generic text.
         if membership.status.value != "active":
             raise MembershipNotActiveError()
 
@@ -116,13 +146,76 @@ class CheckinService:
         if proof.proof_type.value not in (habit.proof_types or []):
             from app.services.proof_validator import ProofValidationError
 
-            raise ProofValidationError("wrong_type")
+            raise ProofValidationError(CheckinRejectCode.WRONG_TYPE.value)
 
-        # Окно чек-ина — в TZ клуба.
+        # Pravki-bug-fixes §Z-19 (joiner-late protection): симметричная серверная
+        # защита от race / старого бота / прямого вызова / etc.
+        # ВАЖНО: проверяем joined_late ПЕРЕД обычной window check — иначе
+        # для новичка вступившего в 13:00 (окно 06-12) сначала сработал бы
+        # CheckinWindowClosedError (status_code == code "checkin_window_closed"),
+        # и joined_late никогда бы не был достигнут. Новичок должен получить
+        # специфическое сообщение "ваш первый чек-ин завтра", а не общее
+        # "окно закрыто".
+        # Запрос к membership.joined_at СВЕЖИЙ из БД (не из кеша) — это
+        # race-safe: если юзер вступил между pre-filter бота и этой проверкой,
+        # мы увидим актуальное состояние.
+        club_date = habit.club_date(now_utc)
+
+        # Pravki-bug-fixes §Z-21 (Item 4): defense-in-depth — если за club_date
+        # уже есть Penalty (CAUGHT или WINDOW_CLOSED_NO_CATCH), чек-ин невозможен.
+        # Бот в pre-filter должен отсеять (state.caught_today), но это fallback
+        # на race / bypass / старую версию бота / прямой вызов internal API.
+        #
+        # Семантика НЕ различает CAUGHT vs WINDOW_CLOSED_NO_CATCH на этом уровне:
+        # оба означают «штраф за день уже списан, чек-ин не принимается».
+        # Различение делается в UI через StatusBadge (Item 3) и на фронте TodayPage.
+        # Бот использует catch_today + checkin_status для разных текстов.
+        #
+        # ВАЖНО: идёт ПОСЛЕ joined_at check (выше) и ДО window check (ниже),
+        # потому что:
+        # - joined_late сначала возвращает специфический текст «ваш первый чек-ин
+        #   завтра» (а не «штраф списан»);
+        # - window-closed без cron penalty сначала возвращает «окно закрыто»
+        #   (а не «штраф списан»).
+        # Только если club_date прошёл joined_late AND прошёл window AND
+        # cron отработал (или apply_catch был) — сюда попадаем.
+        if await self._penalty_repo.has_any_penalty_today(
+            membership_id=membership.id,
+            club_date=club_date,
+        ):
+            self._logger.info(
+                "checkin_rejected_caught_today",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "membership_id": membership.id,
+                    "club_date": str(club_date),
+                },
+            )
+            raise CheckinAlreadyCaughtError()
+
+        # Defensive: joined_at=None пропускается (только в тестах).
+        if membership.joined_at is not None:
+            joined_in_club_tz = membership.joined_at.astimezone(habit.tzinfo)
+            if (
+                joined_in_club_tz.date() == club_date
+                and habit.was_joined_after_window(membership.joined_at)
+            ):
+                self._logger.info(
+                    "checkin_rejected_joined_late",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "joined_at_utc": membership.joined_at.isoformat(),
+                        "club_date": str(club_date),
+                    },
+                )
+                raise CheckinJoinedLateError()
+
+        # Окно чек-ина — в TZ клуба. Идёт ПОСЛЕ joined_late чтобы новичок
+        # получил специфический код, а не общий "checkin_window_closed".
         if not habit.is_within_checkin_window(now_utc):
             raise CheckinWindowClosedError()
-
-        club_date = habit.club_date(now_utc)
 
         try:
             checkin, created = await self._checkin_repo.get_or_create_done(
@@ -195,11 +288,28 @@ class CheckinService:
         if existing is not None:
             status = existing.status.value
         else:
-            window_open = habit.is_within_checkin_window(now_utc)
-            if window_open:
-                status = "pending"
-            else:
-                status = "missed"
+            # Defensive: joined_at может быть None в тестах (FakeMembershipRepo
+            # не задаёт поле). В проде NOT NULL constraint + server_default
+            # гарантируют значение, но мы не падаем на None.
+            joined_at = membership.joined_at
+            status = None
+            if joined_at is not None:
+                # Pravki-bug-fixes §Z-19 (joiner-late protection):
+                # joined_late имеет приоритет над pending/missed — даже если окно
+                # случайно открыто (race в TZ, DST и т.п.), joined_late остаётся.
+                # Это status для TodayResponse — UI TodayPage (Z-19.5) показывает
+                # отдельный блок для joined_late.
+                joined_in_club_tz = joined_at.astimezone(habit.tzinfo)
+                if (
+                    joined_in_club_tz.date() == club_date
+                    and habit.was_joined_after_window(joined_at)
+                ):
+                    status = "joined_late"
+            if status is None:
+                if habit.is_within_checkin_window(now_utc):
+                    status = "pending"
+                else:
+                    status = "missed"
 
         checkin_count = await self._checkin_repo.count_done_for_membership(
             str(membership.id)

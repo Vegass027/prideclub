@@ -96,6 +96,43 @@ export function useTopUpDeposit() {
   });
 }
 
+/**
+ * Pravki-subscribe-and-join.md §Z-17.5: обёртка над balanceApi.subscribe для JoinPayModal.
+ *
+ * После успеха инвалидируем все ключи, которые могли измениться:
+ * - `marketplace`: статус членства на странице клубов (joined/не-joined).
+ * - `today`: кэш текущего клуба (после navigate на /today).
+ * - `wallet`: новый deposit_balance.
+ * - `balance`: для /balance endpoint'а (история транзакций).
+ * - `my-habits`: список клубов юзера (для pre-check subscription_until в Z-17).
+ *
+ * `onSuccess` получает `data: SubscribeResponse` от бэкенда — модалка использует
+ * `total_charged_kopecks` и `charged_subscription` для честного alert'а после
+ * оплаты (см. §Z-17 substep 2 — gap fix для LEFT+active subscription: реальная
+ * списанная сумма может отличаться от показанной в UI).
+ */
+export function useJoinAndPay(
+  onSuccess?: (data: import("@/shared/types").SubscribeResponse) => void,
+) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      habit_id: string;
+      deposit_amount_kopecks: number;
+      subscription_accepted: boolean;
+      idempotency_key: string;
+    }) => balanceApi.subscribe(payload),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["marketplace"] });
+      qc.invalidateQueries({ queryKey: ["today"] });
+      qc.invalidateQueries({ queryKey: ["wallet"] });
+      qc.invalidateQueries({ queryKey: ["balance"] });
+      qc.invalidateQueries({ queryKey: ["my-habits"] });
+      onSuccess?.(data);
+    },
+  });
+}
+
 export type LeaderboardTab = LeaderboardTabId;
 
 export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab) {
@@ -146,5 +183,11 @@ export function useLeaderboardClubs(tab: LeaderboardTab) {
 }
 
 export { usePhotoBlob } from "./usePhotoBlob";
+// Pravki §Z-21 (Item 9): useHabitSse ЗАМЕНЯЕТ useTodayStream. Multiplex SSE
+// (Item 7) + event handlers для catch / you_were_caught (Item 8).
+// useTodayStream оставлен как deprecated alias для backward-compat
+// (если кто-то импортирует напрямую, не сломается), но TodayPage уже
+// переключён на useHabitSse.
+export { useHabitSse } from "./useHabitSse";
 export { useTodayStream } from "./useTodayStream";
 export { useWallet } from "./useWallet";

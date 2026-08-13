@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { TodayResponse } from "@/shared/types";
+import { checkinRejectText } from "@/shared/texts/checkinReject";
 
 /** Backoff между reconnect-попытками, в миллисекундах. */
 const BACKOFFS_MS = [1000, 2000, 5000, 10000] as const;
@@ -24,6 +25,21 @@ export interface TelegramLike {
   WebApp?: TelegramWebAppLike;
 }
 
+/** Pravki-bug-fixes §Z-21 (Item 9): haptic notifications. */
+export interface HapticFeedbackLike {
+  impactOccurred?: (style: "light" | "medium" | "heavy" | "rigid" | "soft") => void;
+  notificationOccurred?: (type: "error" | "success" | "warning") => void;
+}
+
+/**
+ * Optional side-effect injection for haptic notifications. Если None —
+ * skip (только console.warn для ошибок). Production wiring в useHabitSse.ts.
+ */
+export type HapticFn = (
+  kind: "impact" | "notification",
+  value: "light" | "medium" | "heavy" | "rigid" | "soft" | "error" | "success" | "warning",
+) => void;
+
 export interface StreamControllerOptions {
   habitId: string;
   queryClient: QueryClient;
@@ -38,6 +54,8 @@ export interface StreamControllerOptions {
   onError?: (message: string) => void;
   /** Хост для SSE (DI: в проде `/api/v1`, в тестах абсолютный URL). */
   streamBaseUrl?: string;
+  /** Pravki §Z-21 (Item 9): haptic feedback для catch / you_were_caught. */
+  onHaptic?: HapticFn;
 }
 
 export interface StreamController {
@@ -48,7 +66,8 @@ export interface StreamController {
   /** Состояние для тестов (observable). */
   readonly state: {
     isStarted: boolean;
-    lastEventId: string | null;
+    lastEventIdUser: string | null;
+    lastEventIdHabit: string | null;
     attempt: number;
   };
 }
@@ -85,13 +104,16 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
     clearTimeoutFn = clearTimeout,
     onError = defaultOnError,
     streamBaseUrl = "/api/v1",
+    onHaptic,
   } = opts;
 
   let isStarted = false;
   let stopped = true;
   let es: StreamEventSource | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let lastEventId: string | null = null;
+  // Item 7: два независимых cursor'а — multiplex SSE.
+  let lastEventIdUser: string | null = null;
+  let lastEventIdHabit: string | null = null;
   let attempt = 0;
   let inFlight = false;
 
@@ -102,7 +124,9 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
       const res = await requestToken(habitId);
       if (stopped) return;
       const params = new URLSearchParams({ habit_id: habitId, token: res.token });
-      if (lastEventId) params.set("last_event_id", lastEventId);
+      // Item 7 multiplex: передаём оба cursor'а.
+      if (lastEventIdUser) params.set("last_event_id", lastEventIdUser);
+      if (lastEventIdHabit) params.set("last_event_id_habit", lastEventIdHabit);
       const url = `${streamBaseUrl}/events/stream?${params.toString()}`;
       es = new createEventSource(url);
       bindListeners(es);
@@ -116,7 +140,7 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
 
   const bindListeners = (source: StreamEventSource) => {
     source.addEventListener("checkin.accepted", (e) => {
-      if (e.lastEventId) lastEventId = e.lastEventId;
+      if (e.lastEventId) lastEventIdUser = e.lastEventId;
       attempt = 0; // success — сброс backoff
       try {
         const today = JSON.parse(e.data) as TodayResponse;
@@ -127,15 +151,66 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
     });
 
     source.addEventListener("checkin.rejected", (e) => {
-      if (e.lastEventId) lastEventId = e.lastEventId;
-      let message = "Чек-ин отклонён";
+      if (e.lastEventId) lastEventIdUser = e.lastEventId;
+      // Pravki §Z-22 (Step 5, hole #2): frontend mapper, симметричный
+      // apps/bot/bot/handlers/checkin_texts.py. Раньше фронт пассивно
+      // показывал payload.message (raw code вроде "checkin_window_closed")
+      // — теперь маппим code → human-readable text.
+      //
+      // Worker шлёт payload {reason, code, message, window_start, window_end}.
+      // Берём reason (canonical) если есть, fallback на code, fallback на null.
+      let code: string | null = null;
+      let window_start: string | undefined;
+      let window_end: string | undefined;
       try {
-        const payload = JSON.parse(e.data) as { message?: string };
-        if (payload.message) message = payload.message;
+        const payload = JSON.parse(e.data) as {
+          reason?: string;
+          code?: string;
+          window_start?: string;
+          window_end?: string;
+        };
+        code = payload.reason ?? payload.code ?? null;
+        window_start = payload.window_start;
+        window_end = payload.window_end;
       } catch {
-        // не JSON — дефолт
+        // не JSON — mapper fallback на REJECT_UNKNOWN
       }
-      onError(message);
+      const text = checkinRejectText(code, { window_start, window_end });
+      onError(text);
+    });
+
+    // Item 9: you_were_caught — personal для жертвы (user-stream).
+    // Invalidate today (status=caught, новый бейдж) + wallet + balance.
+    source.addEventListener("you_were_caught", (e) => {
+      if (e.lastEventId) lastEventIdUser = e.lastEventId;
+      attempt = 0;
+      queryClient.invalidateQueries({ queryKey: ["today", habitId] });
+      queryClient.invalidateQueries({ queryKey: ["wallet"] });
+      queryClient.invalidateQueries({ queryKey: ["balance"] });
+      // Pravki Q2 разведки: invalidate в обоих событиях — безопасно
+      // (react-query dedup внутри одного tick).
+      if (onHaptic) {
+        // haptic warning — жертва "оштрафована" тон.
+        onHaptic("notification", "warning");
+      }
+    });
+
+    // Item 8: catch event — broadcast в habit-stream (для всех участников).
+    // У жертвы can_catch=False (Item 1+2), но у других — нужен refresh members
+    // чтобы убрать бейдж «Поймать».
+    source.addEventListener("catch", (e) => {
+      if (e.lastEventId) lastEventIdHabit = e.lastEventId;
+      attempt = 0;
+      queryClient.invalidateQueries({ queryKey: ["members", habitId] });
+      queryClient.invalidateQueries({ queryKey: ["today", habitId] });
+      queryClient.invalidateQueries({ queryKey: ["wallet"] });
+      queryClient.invalidateQueries({ queryKey: ["balance"] });
+      // Invalidate wallet в обоих событиях — Q2 разведки: react-query dedup
+      // безопасен.
+      if (onHaptic) {
+        // haptic medium — кто-то поймал кого-то в клубе.
+        onHaptic("impact", "medium");
+      }
     });
 
     source.onerror = () => {
@@ -187,7 +262,7 @@ export function createStreamController(opts: StreamControllerOptions): StreamCon
     start,
     stop,
     get state() {
-      return { isStarted, lastEventId, attempt };
+      return { isStarted, lastEventIdUser, lastEventIdHabit, attempt };
     },
   };
 }
@@ -204,6 +279,6 @@ function defaultOnError(message: string): void {
     return;
   }
   if (typeof console !== "undefined") {
-    console.warn("[useTodayStream]", message);
+    console.warn("[useHabitSse]", message);
   }
 }

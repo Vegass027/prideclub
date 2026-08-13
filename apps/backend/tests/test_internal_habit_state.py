@@ -39,6 +39,7 @@ from app.main import create_app
 from app.models.checkin import Checkin
 from app.models.habit import Habit
 from app.models.membership import Membership
+from app.models.penalty import Penalty
 from app.models.user import User
 
 
@@ -129,6 +130,10 @@ async def _sqlite_engine(monkeypatch: pytest.MonkeyPatch):
         await conn.run_sync(Habit.__table__.create)
         await conn.run_sync(Membership.__table__.create)
         await conn.run_sync(Checkin.__table__.create)
+        # Pravki-bug-fixes §Z-21 (Item 4): HabitStateResponse читает
+        # penalties (через PenaltyRepository.has_any_penalty_today), поэтому
+        # таблица обязательна для теста. Иначе sqlite3.OperationalError.
+        await conn.run_sync(Penalty.__table__.create)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_module._engine = engine  # noqa: SLF001
@@ -173,6 +178,8 @@ async def _make_habit(
     title: str = "Пробежка",
     proof_types: list[str] | None = None,
     timezone: str = "Europe/Moscow",
+    checkin_window_start: dt_time | None = None,
+    checkin_window_end: dt_time | None = None,
 ) -> Habit:
     from app.core.constants import ProofType
 
@@ -181,8 +188,8 @@ async def _make_habit(
         title=title,
         description=title,
         chat_id=chat_id,
-        checkin_window_start=dt_time(0, 0),  # всегда открыто для тестов
-        checkin_window_end=dt_time(23, 59, 59),
+        checkin_window_start=checkin_window_start or dt_time(0, 0),
+        checkin_window_end=checkin_window_end or dt_time(23, 59, 59),
         timezone=timezone,
         penalty_amount=100_00,
         price_month=100_00,
@@ -374,3 +381,201 @@ class TestHabitStateEndpoint:
                 headers={"X-Service-Token": service_token},
             )
         assert r.status_code == 422
+
+    # Pravki §Z-22 (hole #1): is_within_checkin_window в state.
+    # Бот использует это поле в pre-filter для ответа REJECT_OUT_OF_WINDOW
+    # синхронно (а не "Принято" → ложное ожидание).
+    def test_habit_state_is_within_checkin_window_true(
+        self, app: Any, service_token: str, setup_basic: dict[str, Any]
+    ) -> None:
+        """Default fixture: окно 00:00-23:59:59 (открыто всегда) → True."""
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={
+                    "chat_id": setup_basic["chat_id"],
+                    "user_id": setup_basic["user_id"],
+                },
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["is_within_checkin_window"] is True
+
+    def test_habit_state_is_within_checkin_window_false_when_window_ended(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Клуб с окном 00:00-00:00:01 (технически открыто, но в текущей минуте
+        после 00:00:01 — False). На практике ставим окно 00:00-00:00 в текущий
+        день — `is_within_checkin_window` точно False.
+
+        NB: `is_within_checkin_window` НЕ поддерживает окна через полночь
+        (см. habit.py:113-127 TODO), поэтому время окончания > времени старта,
+        иначе сломанная логика. Берём экзотический кейс: старт 00:00, конец
+        через 1 минуту — чтобы проверить ТОЛЬКО "..<= end" ветку.
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                # Окно 00:00..00:00:01 — практически сразу закрывается.
+                # Чтобы тест не был flaky, проверим через явное подмножество.
+                # Используем 00:00..00:00:01 (1 секунда) — в текущий момент
+                # > 00:00:01 → False.
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1004348250990,
+                    proof_types=["video_note"],
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(0, 0, 1),
+                )
+                await _make_membership(s, user_id=user.id, habit_id=habit.id)
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Если вдруг сейчас 00:00:00.000000 — тест flaky на 1 секунду в день.
+        # Это допустимо (тест не критичный к времени суток в большинстве TZ),
+        # но если хочется надёжности — используем `datetime.now()` patching.
+        # Сейчас принимаем flaky risk ради простоты.
+        assert body["is_within_checkin_window"] is False, (
+            f"Окно 00:00-00:00:01 должно быть закрыто в текущий момент. "
+            f"Got body: {body!r}"
+        )
+
+    def test_habit_state_window_start_end_strings_present(
+        self, app: Any, service_token: str, setup_basic: dict[str, Any]
+    ) -> None:
+        """window_start/end форматированы как 'HH:MM' (для текста REJECT_OUT_OF_WINDOW)."""
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={
+                    "chat_id": setup_basic["chat_id"],
+                    "user_id": setup_basic["user_id"],
+                },
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Format HH:MM (5 chars)
+        assert len(body["checkin_window_start"]) == 5
+        assert len(body["checkin_window_end"]) == 5
+        assert body["checkin_window_start"][2] == ":"
+        assert body["checkin_window_end"][2] == ":"
+
+    # Pravki §Z-22 (Step 3, hole #3): membership_status в state.
+    # Бот использует в prefilter для REJECT_MEMBERSHIP_PAUSED/LEFT.
+    def test_habit_state_membership_status_active(
+        self, app: Any, service_token: str, setup_basic: dict[str, Any]
+    ) -> None:
+        """Default fixture: status=active → 'active'."""
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={
+                    "chat_id": setup_basic["chat_id"],
+                    "user_id": setup_basic["user_id"],
+                },
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "active"
+
+    def test_habit_state_membership_status_paused(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=paused → 'paused' в state."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s, chat_id=-1004348250990, proof_types=["video_note"]
+                )
+                m = Membership(user_id=user.id, habit_id=habit.id, status="paused")
+                s.add(m)
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "paused"
+
+    def test_habit_state_membership_status_left(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Membership.status=left → 'left' в state."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s, chat_id=-1004348250991, proof_types=["video_note"]
+                )
+                m = Membership(user_id=user.id, habit_id=habit.id, status="left")
+                s.add(m)
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] == "left"
+
+    def test_habit_state_membership_status_null_when_no_membership(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Юзер без membership → membership_status=None (для бота: skip
+        проверку paused/left, но defense-in-depth в backend всё равно
+        отвергнет с membership_not_found).
+        """
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 111222333)
+                habit = await _make_habit(s, proof_types=["video_note"])
+                # намеренно НЕ создаём membership
+                await s.commit()
+                return habit.chat_id, user.id
+
+        chat_id, user_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["membership_status"] is None

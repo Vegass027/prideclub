@@ -5,7 +5,11 @@ from typing import Protocol
 
 from app.core.constants import ProofType
 from app.core.exceptions import (
+    CheckinAlreadyCaughtError,
     CheckinAlreadyExistsError,
+    CheckinJoinedLateError,
+    CheckinMembershipLeftError,
+    CheckinMembershipPausedError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     MembershipNotActiveError,
@@ -257,8 +261,12 @@ async def _process(
         except (
             ProofValidationError,
             CheckinWindowClosedError,
+            CheckinJoinedLateError,    # Pravki-bug-fixes §Z-19
+            CheckinAlreadyCaughtError, # Pravki-bug-fixes §Z-21 (Item 4)
             CheckinWrongTopicError,
-            MembershipNotActiveError,
+            CheckinMembershipPausedError, # Pravki §Z-22 (Step 3, hole #3)
+            CheckinMembershipLeftError,   # Pravki §Z-22 (Step 3, hole #3)
+            MembershipNotActiveError,     # legacy для catch-flow (НЕ чек-ин)
             MembershipNotFoundError,
         ) as exc:
             await session.rollback()
@@ -278,7 +286,44 @@ async def _process(
                 reason=reason_code,
                 message=reason_message,
             )
-            return {"ok": False, "code": reason_code, "message": reason_message}
+            # Pravki-bug-fixes §Z-19: для joined_late возвращаем window_start/end
+            # чтобы бот в race-fallback мог показать дружественное сообщение
+            # с временем окна. Habit получаем через ОТДЕЛЬНУЮ сессию (основная
+            # уже rollback'нута). Если habit не найден — fallback на пустые строки.
+            result: dict = {"ok": False, "code": reason_code, "message": reason_message}
+            if reason_code == "joined_late":
+                try:
+                    async with factory() as race_session:
+                        race_habit = await HabitRepository(race_session).get(
+                            payload["habit_id"]
+                        )
+                    if race_habit is not None:
+                        result["window_start"] = race_habit.checkin_window_start.strftime("%H:%M")
+                        result["window_end"] = race_habit.checkin_window_end.strftime("%H:%M")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "worker_joined_late_race_window_fetch_failed",
+                        extra={"err": str(exc), "kind": exc.__class__.__name__},
+                    )
+            # Pravki-bug-fixes §Z-21 (Item 5): checkin_window_closed — то же самое.
+            # Бот pre-filter обычно ловит сам (state.is_within_checkin_window),
+            # но если race (бот bypassed / старая версия) — worker fallback
+            # возвращает window_start/end чтобы текст содержал конкретное время.
+            elif reason_code == "checkin_window_closed":
+                try:
+                    async with factory() as race_session:
+                        race_habit = await HabitRepository(race_session).get(
+                            payload["habit_id"]
+                        )
+                    if race_habit is not None:
+                        result["window_start"] = race_habit.checkin_window_start.strftime("%H:%M")
+                        result["window_end"] = race_habit.checkin_window_end.strftime("%H:%M")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "worker_window_closed_race_window_fetch_failed",
+                        extra={"err": str(exc), "kind": exc.__class__.__name__},
+                    )
+            return result
         except IntegrityError as exc:
             await session.rollback()
             log.warning("worker_checkin_integrity", extra={"err": str(exc)})
@@ -361,10 +406,14 @@ if celery_app is not None:
         autoretry_for=(Exception,),
         dont_autoretry_for=(
             CheckinAlreadyExistsError,
+            CheckinJoinedLateError,    # Pravki-bug-fixes §Z-19: не ретраить — итог детерминирован.
+            CheckinAlreadyCaughtError, # Pravki-bug-fixes §Z-21 (Item 4): то же самое — deterministic.
             ProofValidationError,
             CheckinWindowClosedError,
             CheckinWrongTopicError,
-            MembershipNotActiveError,
+            CheckinMembershipPausedError, # Pravki §Z-22 (Step 3): deterministic
+            CheckinMembershipLeftError,   # Pravki §Z-22 (Step 3): deterministic
+            MembershipNotActiveError,      # legacy для catch-flow
             MembershipNotFoundError,
         ),
         retry_backoff=True,

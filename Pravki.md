@@ -404,6 +404,36 @@ After:  Images 7 (2.1 GB), Build Cache 24 (1.8 GB), / 9%
 
 **Push:** все коммиты запушены в `origin/feature/topic-scoped-checkin` (push 2026-07-26, сессия: ✅ подход D для аватарок + ребрендинг).
 
+### Дополнение: сессия 2026-08-08 → 2026-08-09 (Pravki-subscribe-and-join + bug-fixes)
+
+| SHA | Сообщение |
+|---|---|
+| `ac6951f` | feat(backend): Pravki-deposit-sse Z-1+Z-2+Z-2.8 — global deposit on users (PR #1) |
+| `9736b5b` | feat(backend+frontend): PR #2 — deposit-aware join/wallet UI (Z-3/Z-4/Z-11) |
+| `ae6bd07` | fix(backend): LEFT/PAUSED bypass в MembershipService.join — deposit-check ВСЕГДА (Variant B) |
+| `1702414` | docs: Pravki-subscribe-and-join — финал после двух итераций ревью |
+| `b51eb90` | feat(backend+frontend): Pravki-subscribe-and-join Z-12..Z-18 — объединённый платёж подписка+депозит |
+| `3af699b` | fix(frontend): regenerate package-lock.json для синхронизации с package.json |
+| `e1d97a5` | fix(frontend): заменить Array.prototype.at() на [length-1] для совместимости с ES2020 |
+| `b98cab0` | fix(backend): subscription fee НЕ попадает на deposit_balance |
+| `497d01d` | feat(bug-fixes): Z-19 joiner-late protection — полная многоуровневая защита |
+| `564b8db` | fix(frontend): defensive fallback в StatusBadge для unknown statuses |
+| `4a390e1` | fix(infra): frontend — workaround для overlay-конфликта при rebuild (Вариант 1) |
+
+**Ветка:** `feat/subscribe-and-join` (в remote `origin/feat/subscribe-and-join`).
+**Deploy:** backend, worker, bot задеплоены 2026-08-09 (alembic=015, см. workaround
+для ALTER TYPE в `docs/10-deploy.md` §9.2). Frontend bundle `main-CmHeC1H6.js` задеплоен.
+**Production snapshot:** 2 users, 3 habits, 3 memberships, 4 transactions. Балансы
+скорректированы (subscription fee отдельно от deposit). Тесты: 354 backend +
+17 worker + 35 frontend — зелёные.
+
+**Известные баги (см. `docs/AGENT_BOOTSTRAP.md §9`):**
+- 🟡 `bot.send_invoice` не вызывается — реальный Telegram Payments не подключён
+- ⚠️ Docker overlay-конфликт при `docker compose build frontend` — workaround
+  через volume mount (`docs/10-deploy.md` §9.1)
+- ⚠️ Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE —
+  workaround через ручной `psql` (`docs/10-deploy.md` §9.2)
+
 ## 9. Решения пользователя
 
 | Вопрос | Решение |

@@ -133,6 +133,10 @@ async def me_wallet(
             penalty_amount=int(penalty_amount),
             can_checkin=user_row.deposit_balance >= int(penalty_amount),
             status=m.status.value,
+            # Pravki-subscribe-and-join.md §Z-17 substep 1: передаём из JOIN.
+            # None если юзер ещё ни разу не платил подписку (или membership
+            # только что создана через legacy /join, см. §Z-13.2 семантика).
+            subscription_until=m.subscription_until,
         )
         for m, penalty_amount, title in rows
     ]

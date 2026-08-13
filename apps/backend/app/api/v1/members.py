@@ -12,10 +12,12 @@ from app.api.v1.users import TelegramUserDbDep
 from app.core.constants import CheckinStatus
 from app.core.deps import RedisDep, SessionDep
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
+from app.core.logging import get_logger
 from app.models.checkin import Checkin
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.penalty_repository import PenaltyRepository
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.catch_rate_limiter import RedisCatchRateLimiter
 from app.services.penalty_service import PenaltyService
@@ -68,6 +70,7 @@ async def list_members(
     habit_repo = HabitRepository(session)
     membership_repo = MembershipRepository(session)
     checkin_repo = CheckinRepository(session)
+    penalty_repo = PenaltyRepository(session)
 
     habit = await habit_repo.get(habit_id)
     if habit is None or habit.archived_at is not None:
@@ -100,6 +103,15 @@ async def list_members(
         ).all()
         counts = {str(m_id): int(c) for m_id, c in rows}
 
+    # Pravki-bug-fixes §Z-21 (can_catch fix): если у юзера есть ЛЮБОЙ Penalty
+    # за club_date (caught ИЛИ window_closed_no_catch) — повторный catch даст
+    # amount=0 / penalty_already_processed, поэтому can_catch=False.
+    # Один batch-запрос по всем членам клуба (по аналогии с counts).
+    penalty_set: set[str] = await penalty_repo.ids_with_any_penalty_today(
+        membership_ids=member_ids,
+        club_date=club_date,
+    )
+
     now = datetime.now(tz=UTC)
     members: list[MemberRowOut] = []
     for m in memberships:
@@ -107,7 +119,21 @@ async def list_members(
         if existing is not None:
             status = existing.status.value
         else:
-            status = "pending" if habit.is_within_checkin_window(now) else "missed"
+            # Pravki-bug-fixes §Z-19 (joiner-late protection):
+            # если Checkin на сегодня нет, определяем статус исходя из
+            # (а) membership.joined_at в TZ клуба — сегодня? после закрытия окна?
+            # (б) текущего времени в окне (нормальная pending/missed логика).
+            joined_in_club_tz = m.joined_at.astimezone(habit.tzinfo)
+            joined_today_in_club_tz = joined_in_club_tz.date() == club_date
+            if joined_today_in_club_tz and habit.was_joined_after_window(m.joined_at):
+                # Новичок сегодня, окно уже закрыто → нельзя поймать (can_catch
+                # станет False потому что status != 'missed'). На TodayPage самого
+                # юзера показывается нейтральный текст.
+                status = "joined_late"
+            elif habit.is_within_checkin_window(now):
+                status = "pending"
+            else:
+                status = "missed"
 
         # photo_url: relative путь, frontend обернёт в absolute URL
         # (Pravki §7.1 v3.1, nginx try_files на /api/v1/users/N/photo).
@@ -125,7 +151,11 @@ async def list_members(
                 username=None,
                 status=status,
                 checkin_count=counts.get(str(m.id), 0),
-                can_catch=user.id != m.user_id and status == "missed",
+                can_catch=(
+                    user.id != m.user_id
+                    and status == "missed"
+                    and str(m.id) not in penalty_set
+                ),
                 photo_url=photo_url,
             )
         )
@@ -190,6 +220,16 @@ async def catch_violator(
     catcher_membership = await membership_repo.get_for_user_in_habit(user.id, habit_id)
     club_date = (await habit_repo.get(habit_id)).club_date(datetime.now(tz=UTC))  # type: ignore[union-attr]
 
+    # Pravki-bug-fixes §Z-21 (Item 6): для broadcast'а catch_event нужен
+    # violator.user_id. Достаём ДО apply_catch (в той же сессии), чтобы
+    # после commit() объект остался доступен без re-fetch.
+    violator_membership = await membership_repo.get(payload.violator_membership_id)
+    if violator_membership is None:
+        # Race: юзер удалён между pre-filter и apply_catch. Не должно
+        # случаться в норме (MembershipNotFoundError будет в service),
+        # но защищаемся явно.
+        return CatchResponse(ok=False, code="violator_membership_not_found")
+
     try:
         penalty = await service.apply_catch(
             catcher_user_id=user.id,
@@ -198,7 +238,6 @@ async def catch_violator(
             catcher_membership_id=str(catcher_membership.id) if catcher_membership else None,
         )
         await session.commit()
-        return CatchResponse(ok=True, amount=penalty.amount)
     except PenaltyAlreadyProcessedError as exc:
         await session.rollback()
         return CatchResponse(ok=False, code=exc.code)
@@ -216,3 +255,88 @@ async def catch_violator(
         if isinstance(exc, DomainError):
             return CatchResponse(ok=False, code=exc.code)
         raise
+
+    # Pravki-bug-fixes §Z-21 (Item 6 + Item 8): после успешного commit() Penalty
+    # уже в БД — это ФИНАНСОВЫЙ ИНВАРИАНТ, который НЕЛЬЗЯ ломать.
+    # Два broadcast'а (Items 6 + 8): habit-stream (catch_event, для ВСЕХ
+    # участников клуба) и user-stream violator'а (you_were_caught, personal).
+    #
+    # ОБЕРНУТЫ В РАЗДЕЛЬНЫЕ try/except — каждый broadcast независим:
+    # если broker временно упал между первым и вторым send_task, восстановление
+    # ко второму всё равно позволит publish_you_were_caught дойти до воркера.
+    # НЕ объединять в один try — падение первого отменит второй.
+    #
+    # At-most-once на каждый: если брокер недоступен ИЛИ send_task бросает
+    # исключение — warning-лог, НЕ ломаем HTTP-ответ catch_violator
+    # (юзер уже видит CatchResponse.ok=True, penalty в БД).
+    #
+    # catcher_first_name берём из `user` (TelegramUserDbDep, JWT init_data) —
+    # уже в scope, 0 round-trip'ов. violator_first_name worker добудет
+    # отдельным PK lookup'ом (Variant C из разведки Item 8).
+    log = get_logger("members.catch_violator")
+    catcher_first_name: str = user.first_name or "User"
+    violator_user_id: int = violator_membership.user_id
+
+    # Broadcast #1: catch_event в habit-stream (для всех участников клуба).
+    # Бэкенд не обогащает violator_first_name здесь — worker fetch'ит
+    # отдельно (см. publish_catch_event._run).
+    try:
+        from app.services.celery_producer import send_task
+
+        send_task(
+            "publish_catch_event",
+            {
+                "habit_id": habit_id,
+                "penalty_id": str(penalty.id),
+                "catcher_user_id": user.id,
+                "catcher_first_name": catcher_first_name,
+                "violator_user_id": violator_user_id,
+                "violator_membership_id": payload.violator_membership_id,
+                "amount": penalty.amount,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — broadcast failure must not break HTTP response
+        log.warning(
+            "catch_publish_task_failed",
+            extra={
+                "habit_id": habit_id,
+                "penalty_id": str(penalty.id),
+                "event": "publish_catch_event",
+                "err": str(exc),
+                "err_type": exc.__class__.__name__,
+            },
+        )
+        # НЕ пробрасываем исключение — catch уже успешен, broadcast
+        # attempt для ВТОРОГО события (publish_you_were_caught) ещё впереди.
+
+    # Broadcast #2: you_were_caught в user-stream violator'а (personal).
+    # Отдельный try/except от broadcast #1 — независимые попытки.
+    try:
+        from app.services.celery_producer import send_task
+
+        send_task(
+            "publish_you_were_caught",
+            {
+                "user_id": violator_user_id,
+                "membership_id": payload.violator_membership_id,
+                "habit_id": habit_id,
+                "catcher_user_id": user.id,
+                "catcher_first_name": catcher_first_name,
+                "amount": penalty.amount,
+                "date_iso": club_date.isoformat(),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — broadcast failure must not break HTTP response
+        log.warning(
+            "you_were_caught_publish_task_failed",
+            extra={
+                "habit_id": habit_id,
+                "user_id": violator_user_id,
+                "event": "publish_you_were_caught",
+                "err": str(exc),
+                "err_type": exc.__class__.__name__,
+            },
+        )
+        # НЕ пробрасываем исключение — catch уже успешен.
+
+    return CatchResponse(ok=True, amount=penalty.amount)
