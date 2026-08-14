@@ -265,38 +265,42 @@ class MembershipService:
         Не коммитит (commit на уровне handler'а, см. §Z-14).
         """
         full_key = f"subscribe:{idempotency_key}"
+        sub_key = f"{full_key}:sub"
+        dep_key = f"{full_key}:dep"
 
-        # Шаг 1: идемпотентность.
-        existing_tx_row = (
+        # Шаг 1: идемпотентность. canonical ключ = dep_key (главная транзакция
+        # для UI/возврата). sub_key — сателлитная, определяет charged_flag.
+        # Если dep_key уже существует — возврат существующего dep_tx без списаний.
+        existing_dep_row = (
             await self._session.execute(
-                select(Transaction).where(Transaction.idempotency_key == full_key)
+                select(Transaction).where(Transaction.idempotency_key == dep_key)
             )
         ).scalar_one_or_none()
-        if existing_tx_row is not None:
-            # Проверяем, что related_membership_id соответствует нашему habit_id
-            # (защита от reuse ключа с другим habit_id → 400 idempotency_conflict).
-            if existing_tx_row.related_membership_id is None:
+        if existing_dep_row is not None:
+            # Защита от reuse ключа с другим habit_id → IdempotencyConflictError.
+            if existing_dep_row.related_membership_id is None:
                 raise IdempotencyConflictError()
-            existing_m = await self._membership_repo.get(existing_tx_row.related_membership_id)
+            existing_m = await self._membership_repo.get(existing_dep_row.related_membership_id)
             if existing_m is None or existing_m.habit_id != habit_id:
                 raise IdempotencyConflictError()
-            # Идемпотентный retry: charged_subscription восстанавливаем из amount.
-            # Если amount > deposit_amount_kopecks → была полная оплата, иначе только депозит.
-            # Но надёжнее: пересчитать по membership.subscription_until.
-            # Если subscription_until был установлен при первой транзакции (== today+30d или свежее),
-            # значит была полная оплата. Иначе — только депозит (existing.subscription_until не трогали).
-            # Для идемпотентности достаточно: если subscription_until == (initial_tx_date + 30d),
-            # значит charged=True. Упрощение: смотрим на разницу amount vs deposit.
-            charged_flag = existing_tx_row.amount > deposit_amount_kopecks
+            # charged_flag восстанавливаем по наличию рядом sub_tx
+            # (НЕ через amount — dep_tx.amount теперь всегда == deposit_amount).
+            existing_sub_row = (
+                await self._session.execute(
+                    select(Transaction).where(Transaction.idempotency_key == sub_key)
+                )
+            ).scalar_one_or_none()
+            charged_flag = existing_sub_row is not None
             self._logger.info(
                 "subscribe_idempotent_retry",
                 extra={
                     "user_id": user_id,
                     "habit_id": habit_id,
-                    "transaction_id": str(existing_tx_row.id),
+                    "transaction_id": str(existing_dep_row.id),
+                    "charged_subscription": charged_flag,
                 },
             )
-            return existing_m, existing_tx_row, charged_flag
+            return existing_m, existing_dep_row, charged_flag
 
         # Шаг 2: получить habit, проверить archived/inactive.
         if self._habit_repo is None:
@@ -376,74 +380,82 @@ class MembershipService:
             m = existing
             await self._session.flush()
 
-        # Шаг 7: посчитать total_charged (для tx.amount и alert в UI).
-        # Subscription fee (price_month) идёт на «доход клуба/платформы»
-        # (записывается в transactions как type=SUBSCRIPTION для аудита),
-        # но НЕ попадает на deposit_balance — на нём лежат ТОЛЬКО деньги,
-        # которые могут быть списаны как штраф.
+        # Шаг 7: deposit_balance пополняется ТОЛЬКО на deposit_amount_kopecks.
+        # Subscription fee (price_month) НЕ попадает на deposit_balance — это
+        # деньги, которые могут быть списаны как штраф. Подписочная плата идёт
+        # в transactions как type=SUBSCRIPTION (отдельная строка для аудита).
         # Pravki-subscribe-and-join.md §Z-13 шаг 7: deposit_balance
         # пополняется на deposit_amount_kopecks, а не на price_month+deposit.
         # Это поймано пользователем при тестировании 2026-08-09:
         # «1000 это оплата клуба она не должна быть на депозите».
-        if charged_subscription:
-            total_charged = habit.price_month + deposit_amount_kopecks
-        else:
-            total_charged = deposit_amount_kopecks
         u.deposit_balance += deposit_amount_kopecks    # ← только депозитная часть
 
-        # Шаг 8: создать транзакцию (тип условный — см. §Z-13.3).
+        # Шаг 8: создать транзакции. ДВЕ отдельные строки при charged_subscription=True:
+        #   1. type=SUBSCRIPTION, amount=habit.price_month, balance_after=u.deposit_balance (до topup)
+        #   2. type=DEPOSIT_TOPUP, amount=deposit_amount_kopecks, balance_after=u.deposit_balance (после)
+        # При charged_subscription=False — только DEPOSIT_TOPUP.
+        # dep_tx — главная запись для UI (alert «списано N ₽»), её возвращаем наружу.
         if charged_subscription:
-            tx_type = TransactionType.SUBSCRIPTION.value
-        else:
-            tx_type = TransactionType.DEPOSIT_TOPUP.value
-        tx = Transaction(
+            sub_tx = Transaction(
+                id=str(uuid4()),
+                user_id=user_id,
+                type=TransactionType.SUBSCRIPTION.value,
+                amount=habit.price_month,
+                balance_after=u.deposit_balance - deposit_amount_kopecks,  # до topup
+                related_membership_id=m.id,
+                idempotency_key=sub_key,
+            )
+            self._session.add(sub_tx)
+
+        dep_tx = Transaction(
             id=str(uuid4()),
             user_id=user_id,
-            type=tx_type,
-            amount=total_charged,         # ← полная сумма списания с юзера (для UI/alert)
-            balance_after=u.deposit_balance,    # ← только депозитная часть
+            type=TransactionType.DEPOSIT_TOPUP.value,
+            amount=deposit_amount_kopecks,
+            balance_after=u.deposit_balance,  # после topup
             related_membership_id=m.id,
-            idempotency_key=full_key,
+            idempotency_key=dep_key,
         )
-        self._session.add(tx)
+        self._session.add(dep_tx)
+        tx = dep_tx  # для обратной совместимости с существующим return-flow
 
         # Шаг 9: recompute пауз для всех клубов юзера (включая текущий).
         # u уже под FOR UPDATE, параллельные операции сериализуются.
         await self.recompute_pause_status(user_id)
 
         # Шаг 10: flush + обработка race на idempotency_key UNIQUE.
+        # При race — flush() атомарен, обе записи (sub + dep) либо закоммитятся,
+        # либо ни одной. Если другая транзакция успела вставить dep_key — наш
+        # flush() упадёт на UNIQUE constraint, rollback, и мы re-fetch'им.
         try:
             await self._session.flush()
         except IntegrityError:
             # Параллельный POST с тем же ключом успел первым.
             # Откатываем нашу транзакцию и возвращаем существующую.
             await self._session.rollback()
-            existing_tx_row = (
+            existing_dep_row = (
                 await self._session.execute(
-                    select(Transaction).where(Transaction.idempotency_key == full_key)
+                    select(Transaction).where(Transaction.idempotency_key == dep_key)
                 )
             ).scalar_one_or_none()
-            if existing_tx_row is None:
+            if existing_dep_row is None:
                 # Крайне вырожденный кейс: кто-то удалил транзакцию между
                 # нашим INSERT-fail и re-fetch. Нечего возвращать — поднимаем
-                # ошибку явно, чтобы клиент увидел 500 (или handler превратил
-                # в 409). Лучше явная ошибка чем silent success.
+                # ошибку явно.
                 self._logger.error(
                     "subscribe_idempotency_race_no_existing_tx",
-                    extra={"user_id": user_id, "habit_id": habit_id, "key": full_key},
+                    extra={"user_id": user_id, "habit_id": habit_id, "key": dep_key},
                 )
                 raise IdempotencyConflictError()
             # Защита от reuse ключа с другим habit_id (та же проверка что
-            # в early-return на шаге 1). Если related_membership_id == None
-            # или habit_id не совпадает — клиент использует один и тот же
-            # idempotency_key для разных клубов, что явная ошибка клиента.
-            if existing_tx_row.related_membership_id is None:
+            # в early-return на шаге 1).
+            if existing_dep_row.related_membership_id is None:
                 self._logger.warning(
                     "subscribe_idempotency_race_orphan_tx",
-                    extra={"user_id": user_id, "habit_id": habit_id, "key": full_key},
+                    extra={"user_id": user_id, "habit_id": habit_id, "key": dep_key},
                 )
                 raise IdempotencyConflictError()
-            existing_m = await self._membership_repo.get(existing_tx_row.related_membership_id)
+            existing_m = await self._membership_repo.get(existing_dep_row.related_membership_id)
             if existing_m is None or existing_m.habit_id != habit_id:
                 self._logger.warning(
                     "subscribe_idempotency_race_habit_mismatch",
@@ -451,20 +463,27 @@ class MembershipService:
                         "user_id": user_id,
                         "requested_habit_id": habit_id,
                         "existing_habit_id": existing_m.habit_id if existing_m else None,
-                        "key": full_key,
+                        "key": dep_key,
                     },
                 )
                 raise IdempotencyConflictError()
-            charged_flag = existing_tx_row.amount > deposit_amount_kopecks
+            # charged_flag восстанавливаем по наличию sub_tx
+            existing_sub_row = (
+                await self._session.execute(
+                    select(Transaction).where(Transaction.idempotency_key == sub_key)
+                )
+            ).scalar_one_or_none()
+            charged_flag = existing_sub_row is not None
             self._logger.info(
                 "subscribe_idempotent_race_resolved",
                 extra={
                     "user_id": user_id,
                     "habit_id": habit_id,
-                    "transaction_id": str(existing_tx_row.id),
+                    "transaction_id": str(existing_dep_row.id),
+                    "charged_subscription": charged_flag,
                 },
             )
-            return existing_m, existing_tx_row, charged_flag
+            return existing_m, existing_dep_row, charged_flag
 
         self._logger.info(
             "subscribe_and_join_done",
@@ -473,9 +492,8 @@ class MembershipService:
                 "habit_id": habit_id,
                 "membership_id": str(m.id),
                 "charged_subscription": charged_subscription,
-                "total_charged_kopecks": total_charged,
                 "new_deposit_balance": u.deposit_balance,
                 "subscription_until": m.subscription_until.isoformat() if m.subscription_until else None,
             },
         )
-        return m, tx, charged_subscription
+        return m, dep_tx, charged_subscription

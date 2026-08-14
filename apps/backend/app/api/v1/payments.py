@@ -184,6 +184,13 @@ async def subscribe(
         # почему-то None — Pydantic v2 выбросит ValidationError при сериализации,
         # что лучше silent fallback'а.
         subscription_until=membership.subscription_until,
-        total_charged_kopecks=transaction.amount,
+        # Pravki §Z-13.3 fix: transaction — это dep_tx, amount = только депозит.
+        # total_charged_kopecks = полная сумма списания с юзера для alert в UI
+        # (price_month + deposit если подписка платная, иначе только deposit).
+        total_charged_kopecks=(
+            habit.price_month + transaction.amount
+            if charged_subscription
+            else transaction.amount
+        ),
         charged_subscription=charged_subscription,
     )

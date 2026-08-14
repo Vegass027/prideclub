@@ -79,27 +79,112 @@ class _FakeSession:
         *,
         recompute_rows: list[tuple[Any, int]] | None = None,
         raise_integrity_error_on_flush: bool = False,
+        inject_existing_tx_on_flush: Transaction | None = None,
+        inject_existing_tx_on_flush_with_sub: tuple[Transaction, Transaction] | None = None,
         membership_repo: FakeMembershipRepo | None = None,
     ) -> None:
-        self.transactions: dict[str, Transaction] = {}
+        # PRIMARY индекс — для SELECT по idempotency_key.
+        # Значение = Transaction. Один и тот же Transaction не может быть
+        # под двумя ключами, потому что idempotency_key UNIQUE в БД.
+        self._tx_by_key: dict[str, Transaction] = {}
+        # Вторичный — для тестов которым нужно перебрать все tx (используется редко).
+        self._tx_by_id: dict[str, Transaction] = {}
         self.memberships: dict[str, Any] = {}
         self._membership_repo = membership_repo
         self._recompute_rows = recompute_rows or []
         self._raise_integrity_error = raise_integrity_error_on_flush
+        # Опциональные транзакции, которые добавляются в _tx_by_key прямо
+        # перед raise IntegrityError — имитация real race (другая транзакция
+        # успела закоммитить между шагом 1 (SELECT) и шагом 10 (INSERT)).
+        self._inject_tx_on_flush = inject_existing_tx_on_flush
+        self._inject_tx_pair_on_flush = inject_existing_tx_on_flush_with_sub
+        # Ключи injected tx (sub и dep отдельно) для slot-based matching
+        # в execute() — service запрашивает либо dep_key либо sub_key,
+        # fake различает запросы по consume_queue.
+        if inject_existing_tx_on_flush_with_sub is not None:
+            self._injected_sub_key = inject_existing_tx_on_flush_with_sub[0].idempotency_key
+            self._injected_dep_key = inject_existing_tx_on_flush_with_sub[1].idempotency_key
+        elif inject_existing_tx_on_flush is not None:
+            self._injected_sub_key = None
+            self._injected_dep_key = inject_existing_tx_on_flush.idempotency_key
+        else:
+            self._injected_sub_key = None
+            self._injected_dep_key = None
         self.flush_calls = 0
         self.add_calls: list[Any] = []
+        # ID транзакций, добавленных через session.add() (наши). Используется
+        # в rollback() чтобы удалить только их, оставив injected existing.
+        self._our_tx_ids: set[str] = set()
+        # Snapshot users для rollback.
+        self._user_snapshot: dict[int, int] = {}
+        self._user_repo_ref: Any = None
+        # Текущий ключ, который сервис хочет найти через execute(). Тесты
+        # ОБЯЗАНЫ выставить его через set_query_key() перед вызовом сервиса,
+        # иначе FakeSession выберет первую попавшуюся (legacy backward-compat).
+        # Контекст: subscribe_and_join вызывает execute() несколько раз —
+        # сначала dep_key (early-return check), потом sub_key (для charged_flag),
+        # и в race-handling — те же два запроса. Тесты указывают ключи в этом
+        # порядке через session.set_query_key(...).
+        # Поддерживаются два режима:
+        #   1. Legacy: set_query_key("subscribe:abc:dep") — fake ищет по этому
+        #      ключу напрямую в _tx_by_key (как раньше).
+        #   2. Slot-based: set_query_key(["dep", "sub"]) — fake consume'ит
+        #      слоты "dep"/"sub" и ищет соответствующий injected ключ.
+        #      Используется для race-handling тестов с inject_existing_tx_*
+        #      чтобы различать dep_key vs sub_key запросы.
+        self._expected_key: str | None = None
+
+    def set_query_key(self, key: str | None) -> None:
+        """Указать какой idempotency_key искать при следующем execute().
+
+        Вызывай перед await service.subscribe_and_join(...). Если сервис делает
+        два SELECT подряд (dep → sub), передай список:
+            session.set_query_key([dep_key, sub_key])
+        или None чтобы вернуться к backward-compat (первая попавшаяся).
+        """
+        if isinstance(key, list):
+            self._expected_key = list(key)  # очередь
+        else:
+            self._expected_key = key
+
+    def _consume_expected_key(self) -> str | None:
+        """Забрать следующий ожидаемый ключ из очереди (FIFO).
+
+        Поддерживает два формата:
+        1. Legacy string/list of keys — fake ищет напрямую в _tx_by_key.
+        2. Slot-based list of ("dep"|"sub") — fake резолвит slot в
+           injected dep_key/sub_key (для race-handling тестов).
+        """
+        if self._expected_key is None:
+            return None
+        if isinstance(self._expected_key, list):
+            if not self._expected_key:
+                return None
+            slot = self._expected_key.pop(0)
+            # Slot-based: резолвим slot в injected ключ.
+            if slot == "dep" and self._injected_dep_key is not None:
+                return self._injected_dep_key
+            if slot == "sub" and self._injected_sub_key is not None:
+                return self._injected_sub_key
+            # Иначе — slot это уже реальный ключ.
+            return slot
+        return self._expected_key
 
     async def execute(self, stmt: object) -> _Result:
         text = str(stmt)
         # SELECT Transaction WHERE idempotency_key == :key (шаг 1 и race-handling).
+        # consume_expected_key вызываем ТОЛЬКО здесь, чтобы не съесть ключ
+        # на SELECT для recompute_pause_status или других запросов.
         if "transactions" in text and "idempotency_key" in text:
-            # Ищем первую транзакцию с совпадающим ключом.
-            # В реальном SQLAlchemy фильтр по WHERE, но в фейке сравниваем напрямую
-            # по тексту запроса через параметры — упрощаем через перебор.
-            for tx in self.transactions.values():
-                if tx.idempotency_key is not None:
-                    return _Result(scalar=tx)
-            return _Result(scalar=None)
+            key = self._consume_expected_key()
+            if key is None:
+                # Backward-compat: если тест не выставил ключ явно — возвращаем
+                # первую попавшуюся (старое поведение для одиночных транзакций).
+                if not self._tx_by_key:
+                    return _Result(scalar=None)
+                return _Result(scalar=next(iter(self._tx_by_key.values())))
+            tx = self._tx_by_key.get(key)
+            return _Result(scalar=tx)
         # SELECT (Membership, Habit.penalty_amount) JOIN для recompute_pause_status.
         if "memberships" in text and "habits" in text:
             return _Result(rows=self._recompute_rows)
@@ -108,7 +193,18 @@ class _FakeSession:
     def add(self, obj: Any) -> None:
         self.add_calls.append(obj)
         if isinstance(obj, Transaction):
-            self.transactions[obj.id] = obj
+            # Имитируем поведение БД: INSERT идёт в момент flush(), а не add().
+            # Но для упрощения тестов добавляем сразу — тесты не полагаются на
+            # отложенность.
+            if obj.idempotency_key is not None:
+                # Если ключ уже занят — имитируем UNIQUE constraint.
+                if obj.idempotency_key in self._tx_by_key:
+                    from sqlalchemy.exc import IntegrityError
+                    raise IntegrityError("mock", {}, Exception("mock"))
+                self._tx_by_key[obj.idempotency_key] = obj
+            self._tx_by_id[obj.id] = obj
+            # Запоминаем что это НАША tx (для rollback)
+            self._our_tx_ids.add(obj.id)
         elif hasattr(obj, "habit_id") and hasattr(obj, "user_id"):
             # Membership-like object. Регистрируем и в membership_repo чтобы
             # последующие membership_repo.get() находили его (отражает flush() в БД).
@@ -118,15 +214,96 @@ class _FakeSession:
 
     async def flush(self) -> None:
         self.flush_calls += 1
-        if self._raise_integrity_error:
+        # Сервис вызывает flush() минимум дважды:
+        #   1. После создания membership (между шагом 6 и шагом 7-8).
+        #   2. После создания transaction (шаг 10, в try/except IntegrityError).
+        # Для race-handling тестов нам нужно инъектировать existing tx
+        # и raise IntegrityError именно на 2-м вызове — иначе 1-й flush
+        # упадёт на IntegrityError и сервис не дойдёт до try/except блока.
+        on_transaction_flush = self.flush_calls >= 2
+        if on_transaction_flush and self._inject_tx_pair_on_flush is not None:
+            # Имитируем real race: другая транзакция успела закоммитить обе
+            # записи (sub + dep) между шагом 1 (SELECT) и нашим INSERT.
+            sub_tx, dep_tx = self._inject_tx_pair_on_flush
+            self._tx_by_key[sub_tx.idempotency_key] = sub_tx
+            self._tx_by_id[sub_tx.id] = sub_tx
+            self._tx_by_key[dep_tx.idempotency_key] = dep_tx
+            self._tx_by_id[dep_tx.id] = dep_tx
+            # Race-партнёр сделал membership ACTIVE. Имитируем это.
+            if dep_tx.related_membership_id and dep_tx.related_membership_id in self._membership_repo._store:  # type: ignore[attr-defined]
+                self._membership_repo._store[dep_tx.related_membership_id].status = MembershipStatus.ACTIVE  # type: ignore[attr-defined]
+        elif on_transaction_flush and self._inject_tx_on_flush is not None:
+            # Только dep_tx (например, dep-only сценарий где charged=False).
+            dep_tx = self._inject_tx_on_flush
+            self._tx_by_key[dep_tx.idempotency_key] = dep_tx
+            self._tx_by_id[dep_tx.id] = dep_tx
+            # Race-партнёр сделал membership ACTIVE.
+            if dep_tx.related_membership_id and dep_tx.related_membership_id in self._membership_repo._store:  # type: ignore[attr-defined]
+                self._membership_repo._store[dep_tx.related_membership_id].status = MembershipStatus.ACTIVE  # type: ignore[attr-defined]
+        if on_transaction_flush and self._raise_integrity_error:
             from sqlalchemy.exc import IntegrityError
             raise IntegrityError("mock", {}, Exception("mock"))
 
     async def rollback(self) -> None:
-        pass
+        # Имитируем реальный rollback БД: удаляем все НАШИ tx (добавленные
+        # через session.add()), оставляя injected existing (это уже
+        # закоммиченные данные от race-партнёра, их rollback не трогает).
+        # Также восстанавливаем user.deposit_balance до изменений нашей
+        # транзакции (snapshot делается в _snapshot_user_state()).
+        our_ids = self._our_tx_ids.copy()
+        for tx_id in our_ids:
+            tx = self._tx_by_id.pop(tx_id, None)
+            if tx is not None and tx.idempotency_key in self._tx_by_key:
+                # Удаляем только если в _tx_by_key лежит НАША tx (а не injected)
+                if self._tx_by_key[tx.idempotency_key].id == tx_id:
+                    del self._tx_by_key[tx.idempotency_key]
+        self._our_tx_ids.clear()
+        # Восстанавливаем user.deposit_balance из snapshot.
+        self._restore_user_state()
+        # Также откатываем наши Membership (добавленные через session.add,
+        # не те что добавлены тестом напрямую через membership_repo.add_for()).
+        for mid in list(self.memberships.keys()):
+            self.memberships.pop(mid, None)
+            if self._membership_repo is not None and mid in self._membership_repo._store:  # type: ignore[attr-defined]
+                self._membership_repo._store.pop(mid, None)  # type: ignore[attr-defined]
+
+    def snapshot_user_state(self, user_repo: Any) -> None:
+        """Сохранить текущее состояние users для последующего rollback.
+
+        Вызывай перед await service.subscribe_and_join(...) — fake.rollback()
+        восстановит deposit_balance после IntegrityError.
+        """
+        self._user_snapshot = {
+            user.id: user.deposit_balance for user in user_repo._store.values()  # type: ignore[attr-defined]
+        }
+
+    def _restore_user_state(self) -> None:
+        if not hasattr(self, "_user_snapshot"):
+            return
+        # Восстанавливаем через user_repo. Тест должен передать user_repo в
+        # _make_service — у нас есть к нему доступ через self._membership_repo.
+        # Но user_repo не хранится в session. Восстановим через _membership_repo.
+        # Hack: восстановим напрямую через _store если она ссылается на users.
+        # Решение: храним ссылку на user_repo при snapshot.
+        if hasattr(self, "_user_repo_ref") and self._user_repo_ref is not None:
+            for user in self._user_repo_ref._store.values():  # type: ignore[attr-defined]
+                if user.id in self._user_snapshot:
+                    user.deposit_balance = self._user_snapshot[user.id]
 
     async def commit(self) -> None:
         pass
+
+    # ---- helpers для тестов ----
+    @property
+    def transactions(self) -> list[Transaction]:
+        """Список всех зарегистрированных Transaction (для assertions в тестах)."""
+        return list(self._tx_by_id.values())
+
+    @property
+    def transactions_by_key(self) -> dict[str, Transaction]:
+        """Доступ к _tx_by_key для assertions (например, проверить что
+        подключ :sub и :dep обе созданы)."""
+        return dict(self._tx_by_key)
 
 
 def _seed_user(user_repo: FakeUserRepo, *, user_id: int, deposit: int) -> None:
@@ -169,7 +346,9 @@ def _habit_with_prices(
 async def test_subscribe_creates_active_membership_and_charges_combined_payment() -> None:
     """Новый участник: списываем price_month + deposit, создаём ACTIVE membership.
 
-    Verifies §Z-13.3: transaction type = SUBSCRIPTION (кейс 3a).
+    Pravki §Z-13.3 fix: создаются ДВЕ отдельные транзакции —
+    SUBSCRIPTION (price_month) и DEPOSIT_TOPUP (deposit). deposit_balance
+    пополняется ТОЛЬКО на deposit. Возвращаемая tx = dep_tx (главная для UI).
     """
     habit_repo = FakeHabitRepo()
     habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
@@ -199,24 +378,30 @@ async def test_subscribe_creates_active_membership_and_charges_combined_payment(
     assert m.habit_id == str(habit.id)
     # 2. subscription_until = today + 30 days.
     assert m.subscription_until == date.today() + timedelta(days=30)
-    # 3. User.deposit_balance пополнен ТОЛЬКО на deposit_amount (НЕ на price_month+deposit).
+    # 3. User.deposit_balance пополнен ТОЛЬКО на deposit_amount.
     # Subscription fee (1000₽) — это доход клуба/платформы, идёт в transactions как
-    # type=SUBSCRIPTION для аудита, но НЕ на deposit_balance (на нём только деньги
-    # которые могут быть списаны как штраф).
+    # type=SUBSCRIPTION для аудита, но НЕ на deposit_balance.
     assert user_repo._store[1].deposit_balance == 500_00
-    # 3b. tx.amount — это полная сумма списания (для UI/alert).
-    assert tx.amount == 1_000_00 + 500_00
-    # 3c. tx.balance_after — это deposit_balance после транзакции (только депозитная часть).
-    assert tx.balance_after == 500_00
-    # 4. Transaction создана с правильным типом и суммой.
+    # 4. Возвращённая tx — это dep_tx (главная для UI/alert).
     assert charged is True
-    assert tx.type == TransactionType.SUBSCRIPTION.value
-    assert tx.amount == 1_500_00
+    assert tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert tx.amount == 500_00
+    assert tx.balance_after == 500_00  # депозитная часть после topup
     assert tx.user_id == 1
     assert tx.related_membership_id == m.id
-    assert tx.balance_after == 500_00    # ← депозитная часть (после фикса 2026-08-09)
-    # 5. Idempotency key имеет префикс "subscribe:".
-    assert tx.idempotency_key == "subscribe:test-key-1"
+    # 5. Обе записи в БД (sub_tx + dep_tx).
+    assert len(session.transactions) == 2
+    sub_tx = session.transactions_by_key["subscribe:test-key-1:sub"]
+    dep_tx = session.transactions_by_key["subscribe:test-key-1:dep"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
+    assert sub_tx.amount == 1_000_00
+    assert sub_tx.balance_after == 0   # до topup (deposit_balance был 0)
+    assert dep_tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert dep_tx.amount == 500_00
+    assert dep_tx.balance_after == 500_00  # после topup
+    # Обе указывают на одну membership.
+    assert sub_tx.related_membership_id == m.id
+    assert dep_tx.related_membership_id == m.id
 
 
 @pytest.mark.asyncio
@@ -260,7 +445,11 @@ async def test_subscribe_creates_active_membership_for_brand_new_user() -> None:
 
 @pytest.mark.asyncio
 async def test_subscribe_idempotent_with_same_key() -> None:
-    """Повторный POST с тем же idempotency_key → возвращаем существующую транзакцию."""
+    """Повторный POST с тем же idempotency_key → возвращаем существующую транзакцию.
+
+    Pravki §Z-13.3 fix: возвращается dep_tx (главная). sub_tx НЕ создаётся
+    повторно. charged_flag восстанавливается по наличию рядом sub_key.
+    """
     habit_repo = FakeHabitRepo()
     habit = _habit_with_prices()
     habit_repo.add(habit)
@@ -275,7 +464,7 @@ async def test_subscribe_idempotent_with_same_key() -> None:
         membership_repo=membership_repo,
     )
 
-    # Первая транзакция.
+    # Первая транзакция (dep_key ещё не существует — set_query_key не нужен).
     m1, tx1, charged1 = await service.subscribe_and_join(
         user_id=1,
         habit_id=str(habit.id),
@@ -284,10 +473,12 @@ async def test_subscribe_idempotent_with_same_key() -> None:
         idempotency_key="idemp-1",
     )
     assert charged1 is True
-    # После фикса 2026-08-09: deposit_balance пополняется ТОЛЬКО на deposit_amount.
     assert user_repo._store[1].deposit_balance == 500_00
+    assert len(session.transactions) == 2  # sub + dep
 
-    # Второй вызов с тем же ключом — должен вернуть ту же транзакцию без нового списания.
+    # Второй вызов с тем же ключом — сервис сделает 2 SELECT (dep → sub).
+    # Указываем очередь ключей.
+    session.set_query_key(["subscribe:idemp-1:dep", "subscribe:idemp-1:sub"])
     m2, tx2, charged2 = await service.subscribe_and_join(
         user_id=1,
         habit_id=str(habit.id),
@@ -296,11 +487,14 @@ async def test_subscribe_idempotent_with_same_key() -> None:
         idempotency_key="idemp-1",
     )
 
-    # Та же транзакция и membership.
+    # Та же membership, та же dep_tx. charged восстановлен через наличие sub.
     assert tx2.id == tx1.id
     assert m2.id == m1.id
-    # Но НЕ списали второй раз (deposit_balance остался 500₽).
+    assert charged2 is True
+    # НЕ списали второй раз.
     assert user_repo._store[1].deposit_balance == 500_00
+    # В БД по-прежнему 2 транзакции (не 4).
+    assert len(session.transactions) == 2
 
 
 @pytest.mark.asyncio
@@ -334,6 +528,8 @@ async def test_subscribe_idempotency_conflict_with_different_habit() -> None:
     )
 
     # Второй POST с тем же ключом но в habit_b → conflict.
+    # Сервис сначала найдёт dep_tx (relates to habit_a membership), затем sub_tx.
+    session.set_query_key(["subscribe:shared-key:dep", "subscribe:shared-key:sub"])
     with pytest.raises(IdempotencyConflictError):
         await service.subscribe_and_join(
             user_id=1,
@@ -496,8 +692,12 @@ async def test_subscribe_charges_full_when_subscription_expired() -> None:
     )
 
     assert charged is True
-    assert tx.type == TransactionType.SUBSCRIPTION.value
-    assert tx.amount == 1_000_00 + 500_00
+    # Pravki §Z-13.3 fix: возвращаемая tx — dep_tx. Обе записи (sub+dep) в БД.
+    assert tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert tx.amount == 500_00
+    sub_tx = session.transactions_by_key["subscribe:expired-sub-1:sub"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
+    assert sub_tx.amount == 1_000_00
 
 
 @pytest.mark.asyncio
@@ -534,7 +734,10 @@ async def test_subscribe_charges_full_when_subscription_was_never_paid() -> None
     )
 
     assert charged is True
-    assert tx.type == TransactionType.SUBSCRIPTION.value
+    # Pravki §Z-13.3 fix: возвращаемая tx — dep_tx. sub_tx рядом с типом SUBSCRIPTION.
+    assert tx.type == TransactionType.DEPOSIT_TOPUP.value
+    sub_tx = session.transactions_by_key["subscribe:never-paid-1:sub"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +1038,11 @@ async def test_subscribe_active_subscription_creates_deposit_topup_transaction()
 
 @pytest.mark.asyncio
 async def test_subscribe_full_payment_creates_subscription_transaction() -> None:
-    """Кейс 3a → TransactionType.SUBSCRIPTION (как исторически)."""
+    """Кейс 3a → создаются ДВЕ транзакции: SUBSCRIPTION (price_month) + DEPOSIT_TOPUP (deposit).
+
+    Pravki §Z-13.3 fix: возвращаемая tx — это dep_tx, но в БД рядом лежит sub_tx
+    с типом SUBSCRIPTION. Тест проверяет ОБЕ записи.
+    """
     habit_repo = FakeHabitRepo()
     habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
     habit_repo.add(habit)
@@ -859,8 +1066,13 @@ async def test_subscribe_full_payment_creates_subscription_transaction() -> None
     )
 
     assert charged is True
-    assert tx.type == TransactionType.SUBSCRIPTION.value
-    assert tx.amount == 1_500_00
+    # Возвращённая tx — это dep_tx (главная для UI).
+    assert tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert tx.amount == 500_00
+    # Sub_tx рядом — отдельная запись для аудита подписки.
+    sub_tx = session.transactions_by_key["subscribe:tx-type-3a:sub"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
+    assert sub_tx.amount == 1_000_00
 
 
 # ---------------------------------------------------------------------------
@@ -962,18 +1174,19 @@ async def test_subscribe_race_handling_habit_id_mismatch_returns_idempotency_con
     Проверяет трёхуровневый guard из Z-13 фикса: scalar_one_or_none → orphan → habit_id check.
     """
     # Предзаполним session транзакцией с чужим habit_id, чтобы race-handling
-    # re-fetch нашёл её.
+    # re-fetch нашёл её. dep_key = основной канонический ключ.
     existing_tx = Transaction(
         id=str(uuid4()),
         user_id=1,
-        type=TransactionType.SUBSCRIPTION.value,
-        amount=1_500_00,
-        balance_after=1_500_00,
+        type=TransactionType.DEPOSIT_TOPUP.value,
+        amount=500_00,
+        balance_after=500_00,
         related_membership_id="other-membership-id",
-        idempotency_key="subscribe:race-key",
+        idempotency_key="subscribe:race-key:dep",
     )
     session = _FakeSession(raise_integrity_error_on_flush=True)
-    session.transactions[existing_tx.id] = existing_tx
+    session._tx_by_key[existing_tx.idempotency_key] = existing_tx
+    session._tx_by_id[existing_tx.id] = existing_tx
 
     habit_repo = FakeHabitRepo()
     habit = _habit_with_prices()
@@ -996,6 +1209,9 @@ async def test_subscribe_race_handling_habit_id_mismatch_returns_idempotency_con
     )
     existing_tx.related_membership_id = other_membership.id
 
+    # После flush() IntegrityError → rollback → re-fetch dep_key (найдёт existing_tx),
+    # затем SELECT sub_key (None — заряженной sub нет рядом).
+    session.set_query_key(["subscribe:race-key:dep", "subscribe:race-key:sub"])
     with pytest.raises(IdempotencyConflictError):
         await service.subscribe_and_join(
             user_id=1,
@@ -1012,14 +1228,15 @@ async def test_subscribe_race_handling_orphan_tx_returns_idempotency_conflict() 
     existing_tx = Transaction(
         id=str(uuid4()),
         user_id=1,
-        type=TransactionType.SUBSCRIPTION.value,
-        amount=1_500_00,
-        balance_after=1_500_00,
+        type=TransactionType.DEPOSIT_TOPUP.value,
+        amount=500_00,
+        balance_after=500_00,
         related_membership_id=None,    # ← orphan
-        idempotency_key="subscribe:orphan-key",
+        idempotency_key="subscribe:orphan-key:dep",
     )
     session = _FakeSession(raise_integrity_error_on_flush=True)
-    session.transactions[existing_tx.id] = existing_tx
+    session._tx_by_key[existing_tx.idempotency_key] = existing_tx
+    session._tx_by_id[existing_tx.id] = existing_tx
 
     habit_repo = FakeHabitRepo()
     habit = _habit_with_prices()
@@ -1046,7 +1263,11 @@ async def test_subscribe_race_handling_orphan_tx_returns_idempotency_conflict() 
 
 @pytest.mark.asyncio
 async def test_subscribe_race_handling_same_habit_returns_existing() -> None:
-    """Race + related_membership_id с тем же habit_id → возвращаем существующую транзакцию."""
+    """Race + related_membership_id с тем же habit_id → возвращаем существующую dep_tx.
+
+    Pravki §Z-13.3 fix: charged_flag восстанавливается по наличию sub_tx рядом.
+    Симметричный happy path — оба ключа присутствуют.
+    """
     session = _FakeSession(raise_integrity_error_on_flush=True)
 
     habit_repo = FakeHabitRepo()
@@ -1063,16 +1284,29 @@ async def test_subscribe_race_handling_same_habit_returns_existing() -> None:
         status=MembershipStatus.ACTIVE,
     )
 
-    existing_tx = Transaction(
+    # Обе транзакции: sub_tx (канонический charged=True) + dep_tx (главная).
+    existing_sub_tx = Transaction(
         id=str(uuid4()),
         user_id=1,
         type=TransactionType.SUBSCRIPTION.value,
-        amount=1_500_00,
-        balance_after=1_500_00,
+        amount=1_000_00,
+        balance_after=0,
         related_membership_id=existing_m.id,
-        idempotency_key="subscribe:same-key",
+        idempotency_key="subscribe:same-key:sub",
     )
-    session.transactions[existing_tx.id] = existing_tx
+    existing_dep_tx = Transaction(
+        id=str(uuid4()),
+        user_id=1,
+        type=TransactionType.DEPOSIT_TOPUP.value,
+        amount=500_00,
+        balance_after=500_00,
+        related_membership_id=existing_m.id,
+        idempotency_key="subscribe:same-key:dep",
+    )
+    session._tx_by_key[existing_sub_tx.idempotency_key] = existing_sub_tx
+    session._tx_by_key[existing_dep_tx.idempotency_key] = existing_dep_tx
+    session._tx_by_id[existing_sub_tx.id] = existing_sub_tx
+    session._tx_by_id[existing_dep_tx.id] = existing_dep_tx
 
     service = _make_service(
         session=session,
@@ -1081,6 +1315,9 @@ async def test_subscribe_race_handling_same_habit_returns_existing() -> None:
         membership_repo=membership_repo,
     )
 
+    # Сервис на шаге 1 сделает SELECT dep_key (найдёт existing_dep_tx), затем
+    # SELECT sub_key (найдёт existing_sub_tx) — charged_flag = True.
+    session.set_query_key(["subscribe:same-key:dep", "subscribe:same-key:sub"])
     m, tx, charged = await service.subscribe_and_join(
         user_id=1,
         habit_id=str(habit.id),
@@ -1089,11 +1326,12 @@ async def test_subscribe_race_handling_same_habit_returns_existing() -> None:
         idempotency_key="same-key",
     )
 
-    # Возвращена та же транзакция и membership.
-    assert tx.id == existing_tx.id
+    # Возвращена dep_tx (главная) и membership.
+    assert tx.id == existing_dep_tx.id
     assert m.id == existing_m.id
     # Без нового списания (deposit остался 500₽, как засеяли).
     assert user_repo._store[1].deposit_balance == 500_00
+    # charged_flag восстановлен через наличие sub_tx.
     assert charged is True
 
 
@@ -1127,7 +1365,234 @@ async def test_subscribe_idempotency_key_has_subscribe_prefix() -> None:
         idempotency_key="client-uuid-abc",
     )
 
-    # Префикс добавляется в сервисе (см. §Z-13 шаг 1).
-    assert tx.idempotency_key == "subscribe:client-uuid-abc"
+    # Pravki §Z-13.3 fix: возвращаемая tx — dep_tx, её ключ с суффиксом :dep.
+    assert tx.idempotency_key == "subscribe:client-uuid-abc:dep"
+    # Sub_tx рядом — с суффиксом :sub.
+    sub_tx = session.transactions_by_key["subscribe:client-uuid-abc:sub"]
+    assert sub_tx.idempotency_key == "subscribe:client-uuid-abc:sub"
     # Клиент НИКОГДА не должен слать ключ с префиксом — это наша внутренняя зона.
     assert not tx.idempotency_key.startswith("subscribe:subscribe:")
+    assert not sub_tx.idempotency_key.startswith("subscribe:subscribe:")
+
+
+# ---------------------------------------------------------------------------
+# 13. Pravki §Z-13.3: race fallback — IntegrityError на flush(), re-fetch dep
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_race_fallback_returns_existing_dep_tx() -> None:
+    """Real race: другая транзакция успела закоммитить sub_tx + dep_tx между
+    шагом 1 (SELECT) и шагом 10 (INSERT). Наш flush() падает на UNIQUE,
+    rollback, re-fetch dep_key, возвращаем существующий dep_tx.
+
+    Pravki §Z-13.3 fix: в этой ветке кода критично проверить:
+    - Возвращён существующий dep_tx (НЕ новый, не дубль).
+    - charged_subscription=True восстановлен по наличию sub_tx рядом.
+    - В БД нет ЛИШНИХ транзакций (sub_tx + dep_tx от race-партнёра, без наших).
+    - deposit_balance НЕ изменился повторно (не было двойного списания).
+    - Корректный порядок balance_after:
+        * sub_tx.balance_after = u.deposit_balance ДО topup (старая сумма)
+        * dep_tx.balance_after = u.deposit_balance ПОСЛЕ topup (новая сумма)
+      Это гарантирует что UI/audit trail может показать "до" и "после"
+      подписки-и-депозита как два отдельных события.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=500_00)  # стартовый баланс 500₽
+    membership_repo = FakeMembershipRepo()
+
+    # Предсоздаём membership которая будет указывать в existing tx.
+    # Статус PAUSED — имитируем состояние "юзер ранее был в клубе, подписка
+    # истекла, сейчас он заново вступает через race-партнёра". После того как
+    # race-партнёр "закоммитил" свою транзакцию, он же установил status=ACTIVE —
+    # но в нашем fake мы не делаем это автоматически (см. ниже explicit flip
+    # в session.flush()). Здесь ставим PAUSED чтобы пройти проверку
+    # сервиса `if existing.status == ACTIVE: raise AlreadyActiveError`.
+    existing_m = membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+
+    # Транзакции которые "другая транзакция" успела закоммитить между
+    # нашим SELECT (шаг 1) и нашим INSERT (шаг 10).
+    # ВАЖНО: balance_after у sub_tx = 500 (до topup 500₽),
+    #         balance_after у dep_tx = 1000 (после topup).
+    existing_sub_tx = Transaction(
+        id=str(uuid4()),
+        user_id=1,
+        type=TransactionType.SUBSCRIPTION.value,
+        amount=1_000_00,
+        balance_after=500_00,    # до topup
+        related_membership_id=existing_m.id,
+        idempotency_key="subscribe:race-real:sub",
+    )
+    existing_dep_tx = Transaction(
+        id=str(uuid4()),
+        user_id=1,
+        type=TransactionType.DEPOSIT_TOPUP.value,
+        amount=500_00,
+        balance_after=1_000_00,   # после topup (500 + 500)
+        related_membership_id=existing_m.id,
+        idempotency_key="subscribe:race-real:dep",
+    )
+
+    # FakeSession с raise_integrity_error=True + инъекция existing tx
+    # прямо в flush() ПЕРЕД raise. Это имитирует real race scenario.
+    session = _FakeSession(
+        raise_integrity_error_on_flush=True,
+        inject_existing_tx_on_flush_with_sub=(existing_sub_tx, existing_dep_tx),
+        membership_repo=membership_repo,
+    )
+    # Snapshot user state для rollback (имитация DB rollback).
+    session.snapshot_user_state(user_repo)
+    session._user_repo_ref = user_repo
+
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    # Шаг 1 (early-return) не сработает — на момент SELECT транзакций ещё нет.
+    # Шаг 10 (flush) → инъекция existing tx → IntegrityError → rollback →
+    # re-fetch dep_key (найдёт) → SELECT sub_key (найдёт) → return existing.
+    # Сервис делает 2 SELECT подряд в race-handling. Используем slot-based
+    # запрос: ["dep", "dep", "sub"] — два dep (шаг 1 + race-handling) и
+    # один sub (race-handling).
+    session.set_query_key(["dep", "dep", "sub"])
+
+    m, tx, charged = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=500_00,
+        subscription_accepted=True,
+        idempotency_key="race-real",
+    )
+
+    # 1. Возвращён СУЩЕСТВУЮЩИЙ dep_tx (НЕ новый).
+    assert tx.id == existing_dep_tx.id, (
+        f"должен быть возвращён existing_dep_tx, не новый. "
+        f"got tx.id={tx.id}, expected={existing_dep_tx.id}"
+    )
+    # 2. Membership — та же, что у race-партнёра.
+    assert m.id == existing_m.id
+    # 3. charged_subscription восстановлен через наличие sub_tx рядом.
+    assert charged is True
+    # 4. В БД ТОЛЬКО 2 транзакции от race-партнёра (НЕ 4 от race + наших попыток).
+    assert len(session.transactions) == 2, (
+        f"должно быть ровно 2 транзакции, got {len(session.transactions)}: "
+        f"{[t.idempotency_key for t in session.transactions]}"
+    )
+    assert existing_sub_tx.id in [t.id for t in session.transactions]
+    assert existing_dep_tx.id in [t.id for t in session.transactions]
+    # 5. Баланс НЕ изменился (race-партнёр уже списал, мы второй раз НЕ списываем).
+    assert user_repo._store[1].deposit_balance == 500_00
+    # 6. Flush был вызван ДВАЖДЫ: первый после создания membership (без race),
+    #    второй — race-handling (с инъекцией и IntegrityError).
+    assert session.flush_calls == 2
+
+    # 7. ЯВНАЯ проверка порядка balance_after:
+    #    sub_tx — ДО topup (старая сумма депозита)
+    #    dep_tx — ПОСЛЕ topup (новая сумма депозита)
+    sub_tx = session.transactions_by_key["subscribe:race-real:sub"]
+    dep_tx = session.transactions_by_key["subscribe:race-real:dep"]
+    assert sub_tx.balance_after == 500_00, (
+        f"sub_tx.balance_after должен быть ДО topup (500₽), got {sub_tx.balance_after}"
+    )
+    assert dep_tx.balance_after == 1_000_00, (
+        f"dep_tx.balance_after должен быть ПОСЛЕ topup (1000₽), got {dep_tx.balance_after}"
+    )
+    # sub_tx.balance_after + dep_tx.amount == dep_tx.balance_after
+    # (математический инвариант: после подписки баланс не меняется,
+    #  после topup = balance_after_sub + deposit_amount).
+    assert sub_tx.balance_after + dep_tx.amount == dep_tx.balance_after
+
+
+# ---------------------------------------------------------------------------
+# 12. Pravki §Z-13.3: split transactions — без subscription fee + идемпотентность
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_without_subscription_fee_creates_single_deposit_topup() -> None:
+    """Кейс 3b (активная подписка) → создаётся ТОЛЬКО DEPOSIT_TOPUP, без sub_tx.
+
+    Тест покрывает:
+    - Одна транзакция (sub_tx НЕ создаётся при charged_subscription=False).
+    - dep_tx.type = DEPOSIT_TOPUP, amount = deposit_amount_kopecks.
+    - dep_tx.balance_after = deposit_balance после topup.
+    - :sub ключ НЕ присутствует в БД.
+    - Повторный POST возвращает тот же dep_tx без дублей и без списания.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices()
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=500_00)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() + timedelta(days=10)
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    # Первый POST — кейс 3b (активная подписка, charged_subscription=False).
+    m1, tx1, charged1 = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=500_00,
+        subscription_accepted=False,
+        idempotency_key="no-sub-fee-1",
+    )
+
+    # charged=False — подписку не списывали (она уже активна).
+    assert charged1 is False
+    # Возвращена dep_tx. user deposit стартовал с 500₽, +500₽ = 1000₽.
+    assert tx1.type == TransactionType.DEPOSIT_TOPUP.value
+    assert tx1.amount == 500_00
+    assert tx1.balance_after == 1_000_00  # deposit_balance после topup (500+500)
+    assert tx1.user_id == 1
+    assert tx1.related_membership_id == m1.id
+    # ТОЛЬКО одна транзакция в БД — sub_tx не должно быть.
+    assert len(session.transactions) == 1
+    assert "subscribe:no-sub-fee-1:dep" in session.transactions_by_key
+    assert "subscribe:no-sub-fee-1:sub" not in session.transactions_by_key
+    # Membership активна.
+    assert m1.status == MembershipStatus.ACTIVE
+
+    # Второй POST с тем же ключом — идемпотентный retry.
+    # Сервис сделает SELECT dep_key (найдёт), затем SELECT sub_key (None → charged_flag=False).
+    session.set_query_key(["subscribe:no-sub-fee-1:dep", "subscribe:no-sub-fee-1:sub"])
+    m2, tx2, charged2 = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=500_00,
+        subscription_accepted=False,
+        idempotency_key="no-sub-fee-1",
+    )
+
+    # Та же транзакция, тот же membership, тот же charged_flag.
+    assert tx2.id == tx1.id
+    assert m2.id == m1.id
+    assert charged2 is False
+    # В БД по-прежнему одна транзакция (не две).
+    assert len(session.transactions) == 1
+    # Баланс не изменился (не списали повторно).
+    assert user_repo._store[1].deposit_balance == 1_000_00  # остался 500+500
