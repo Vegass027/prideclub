@@ -469,6 +469,70 @@ service-token (с полным доступом к backend API) лежит го�
   > FastAPI StaticFiles уже корректно отдаёт файлы из `club_uploads` volume
   > (`apps/backend/app/main.py:166`). **Первопричина не закрыта** — нужно
   > вернуть `build:` для `frontend` (см. отдельную задачу).
+
+- ✅ **Pravki-paused-window-open-2026-08-14 — серия из 4 коммитов в `feature/paused-member-ux`**
+  (текущая ветка): `dfa3b2c` (backend race-fix) + `1f86217` (bot copy + merge indentation)
+  + `7a988f8` (frontend filter) + `a6cf949` (vitest-тесты MembersPage).
+  Три связанных бага найдены через разведку, юзер-репорт «София получает
+  ложный текст про закрытое окно», и vitest-тест `MembersPage`. Каждое
+  закрытие — отдельный коммит (атомарность, чтобы bisect не ломался).
+
+  > **2026-08-14 snapshot A — race-fix в `PenaltyService.apply_catch`** (commit `dfa3b2c`).
+  > Между SELECT membership (строка 97 в `penalty_service.py`) и
+  > `lock_for_update(user)` (строка 105) есть окно гонки: параллельная
+  > транзакция (другой catch этого юзера или `cron apply_window_expired`)
+  > могла переключить `membership.status` через `recompute_pause_status`
+  > и закоммитить. До фикса объект `violator` в identity map SQLAlchemy
+  > оставался staled — код шёл дальше, `min(penalty, balance)` мог быть > 0
+  > (потому что другая транзакция не обнулила balance, только статус),
+  > и Penalty создавался для жертвы с `membership.status != ACTIVE`.
+  > Фикс: `await self._session.refresh(violator)` + повторная проверка
+  > после `lock_for_update`. Финансово безопасно и до (amount-guard ниже),
+  > но семантически inconsistent: UI жертвы мог мигнуть «поймали» →
+  > «вы на паузе». Тест `test_apply_catch_rereads_violator_status_after_user_lock`
+  > через RaceyUserRepo (мутирует `violator.status` во время
+  > `lock_for_update`) подтверждает лов — без фикса тест падает с
+  > «DID NOT RAISE MembershipNotActiveError». Это **defense-in-depth** на
+  > race-condition; фронтовый фильтр paused (snapshot C ниже) — это
+  > UX, не security. Оба слоя нужны.
+
+  > **2026-08-14 snapshot B — bot `paused+window_open` правдивый copy**
+  > (commit `1f86217`). Старый текст `REJECT_PAUSED_OR_WINDOW` жёстко
+  > говорил «окно чек-ина закрыто» для ВСЕХ paused-кейсов. Для Софии
+  > (paused, депозит=0, окно 09:00–22:06, время 09:08) это было ложью
+  > (окно открыто). Добавлен шаблон `REJECT_PAUSED_WINDOW_OPEN` —
+  > мотивирующий текст «окно ещё открыто ({start}–{end}), пополни депозит
+  > в мини-аппе прямо сейчас и успеешь сделать чек-ин сегодня». В
+  > `_prefilter()` (apps/bot/bot/handlers/checkin.py) разветвление по
+  > `state.is_within_checkin_window`. **Variant B** для приоритетов:
+  > единственная ветка paused+left переехала на позицию между
+  > `joined_late` и `window_closed`, сохраняя §Z-22 контракт
+  > `caught_today (#3) > paused (#6)`. Бонус-фикс восстановил
+  > `IndentationError` на строке 209 (после merge-конфликта `dae137b9`
+  > 2026-08-13 21:16) — без этого бот не импортировался бы при следующем
+  > рестарте контейнера. Тесты `apps/bot/tests/`: 59 passed (раньше не
+  > запускались из-за IndentationError).
+
+  > **2026-08-14 snapshot C — frontend-фильтр paused в MembersPage**
+  > (commit `7a988f8` + tests `a6cf949`). Backend `MemberRowOut` теперь
+  > возвращает `membership_status: str` (defensive default `"active"` для
+  > backward-compatible). Frontend `MembersPage` фильтрует violators по
+  > `m.status === 'missed' && m.can_catch && m.membership_status === 'active'`.
+  > Paused-юзеры (депозит=0) остаются в общем списке «Все участники»,
+  > БЕЗ кнопки «Поймать» (через условный `onCatch` на `<MemberRowItem>`).
+  > `useHabitSse(habitId)` подключён в MembersPage — раньше был только в
+  > TodayPage. Через SSE `catch` event в `sse:habit:{habit_id}` (транслируется
+  > backend'ом через `publish_catch_event` Celery task после успешного
+  > `apply_catch`) у других зрителей /members срабатывает
+  > `invalidateQueries(["members", habitId])` через существующую логику в
+  > `streamController.ts:201-214` — paused-юзер исчезает из секции
+  > «Можно поймать» в течение <1s после поимки. Polling 30s через
+  > `useMembers.refetchInterval` уже работает — покрывает сценарий
+  > «topup → снова active» без добавления SSE для topup. Vitest-тесты
+  > `apps/frontend/src/pages/Members/__tests__/MembersPage.test.tsx`
+  > (4 кейса: paused, active, left, mixed) — все проходят, мимоходом
+  > нашли баг в моём первом коммите (лишняя кнопка «Поймать» в общем
+  > списке, без учёта `membership_status` — исправлено через --amend).
 - ⚠️ **Alembic upgrade через compose не выполняет ALTER TYPE ADD VALUE**
   (2026-08-09, НЕ закрыто). `docker compose run --rm backend alembic upgrade head`
   стартует контейнер, но не пишет в БД — миграция висит. Workaround: ручной

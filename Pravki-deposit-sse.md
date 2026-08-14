@@ -13,6 +13,54 @@
 > `ac6951f feat(backend): Pravki-deposit-sse Z-1+Z-2+Z-2.8 — global deposit on users`.
 > Подробности и точечные расхождения с планом — см. §Z-2.9.
 
+> **Snapshot 2026-08-14, race-fix и frontend filter.** Серия из 4 коммитов в
+> `feature/paused-member-ux` (`dfa3b2c` + `1f86217` + `7a988f8` + `a6cf949`):
+>
+> 1. **`dfa3b2c fix(backend): re-check violator.status after user-lock in apply_catch`** —
+>    обновление §Z-2.4. После `lock_for_update(user)` добавлены
+>    `await self._session.refresh(violator)` + повторная проверка `MembershipNotActiveError`.
+>    Закрывает race-окно, в котором параллельная транзакция могла переключить
+>    `membership.status` через `recompute_pause_status` и закоммитить. Финансово
+>    защита была и до (amount-guard), но семантически inconsistent — Penalty
+>    создавался для жертвы с `membership.status != ACTIVE`. Тест
+>    `test_apply_catch_rereads_violator_status_after_user_lock` через
+>    `RaceyUserRepo` (мутирует `violator.status` во время `lock_for_update`)
+>    ловит регрессию: без фикса тест падает с `DID NOT RAISE MembershipNotActiveError`.
+>
+> 2. **`1f86217 fix(bot): правдивый paused+window_open copy + restore merge indentation`** —
+>    обновление §Z-5.1 (bot pre-filter для paused). Старый `REJECT_PAUSED_OR_WINDOW`
+>    жёстко говорил «окно закрыто» для ВСЕХ paused-кейсов. Добавлен
+>    `REJECT_PAUSED_WINDOW_OPEN` для случая paused + окно открыто:
+>    «депозит пуст, но окно ещё открыто ({start}–{end}), пополни сейчас и
+>    успеешь чек-ин сегодня». В `_prefilter()` разветвление по
+>    `state.is_within_checkin_window`. Variant B для приоритетов: единственная
+>    ветка paused+left переехала на позицию между `joined_late` и
+>    `window_closed` — сохраняет §Z-22 контракт `caught_today (#3) > paused (#6)`,
+>    но для paused+closed показывает объединённый текст. Бонус: восстановлен
+>    `IndentationError` на строке 209 (после merge-конфликта `dae137b9`
+>    2026-08-13 21:16) — без этого фикса бот не импортировался бы при следующем
+>    рестарте контейнера.
+>
+> 3. **`7a988f8 fix(frontend): hide paused members from catch list + connect SSE invalidate`**
+>    — обновление §Z-6.5 (frontend SSE) и `apps/frontend/src/pages/Members/MembersPage.tsx`.
+>    Backend `MemberRowOut` теперь возвращает `membership_status: str = "active"`
+>    (defensive default, backward-compatible). Frontend `MembersPage` фильтрует
+>    violators по `m.status === 'missed' && m.can_catch && m.membership_status === 'active'`,
+>    и `<MemberRowItem>` получает `onCatch` только когда `m.membership_status === 'active' &&
+>    m.can_catch` — paused-юзер остаётся в общем списке без кнопки «Поймать».
+>    `useHabitSse(habitId)` подключён к `MembersPage` (раньше только в `TodayPage`)
+>    — real-time invalidate на `catch` event через `streamController.ts:201-214`.
+>
+> 4. **`a6cf949 test(frontend): add MembersPage tests for paused filter`** —
+>    vitest-тесты для `MembersPage.test.tsx` (4 кейса: paused, active, left, mixed).
+>    Мимоходом нашли баг в коммите 3: `<MemberRowItem>` рендерил кнопку «Поймать»
+>    в общем списке по `can_catch` без учёта `membership_status`. Исправлено
+>    через `--amend` в том же коммите 3 (frontend fix), тесты вошли отдельным
+>    коммитом 4.
+>
+> Подробности и точечные расхождения с планом — см. `docs/AGENT_BOOTSTRAP.md` §9
+> (snapshot A/B/C).
+
 ---
 
 ## 0. Контекст и принципы
@@ -178,6 +226,20 @@ Sanity-проверки (отдельный блок в `upgrade()` через `
 - `transaction` row — без изменений.
 
 **Hot path:** один `SELECT FOR UPDATE` на user (вместо одного на membership). Это автоматически (см. Q1) сериализует параллельные catch в разных клубах одного юзера — два catch не могут одновременно списать депозит.
+
+**Defense-in-depth: race-fix от 2026-08-14 (commit `dfa3b2c`).** Между `violator = await self._membership_repo.get(...)` (без лока, шаг выше) и `lock_for_update(user)` существует окно гонки: параллельная транзакция (другой catch этого юзера или cron `apply_window_expired`) могла изменить `membership.status` через `recompute_pause_status` и закоммитить. После `lock_for_update(user)` код сериализован с этими операциями, но `violator` объект — из identity map SQLAlchemy, загружен **до** лока. Без `refresh` использовался бы staled статус. Финансово `amount-guard` ниже ловит (если balance уже обнулён, `min(penalty, 0)=0` → reject), но семантически inconsistent — Penalty создавался для жертвы с `membership.status != ACTIVE`. Фикс:
+
+```python
+violator_user = await self._user_repo.lock_for_update(violator.user_id)
+assert violator_user is not None, "violator membership has no user"
+
+# Pravki-paused-race-2026-08-14: re-read под user-lock'ом.
+await self._session.refresh(violator)
+if violator.status != MembershipStatus.ACTIVE:
+    raise MembershipNotActiveError()
+```
+
+Один дополнительный `SELECT` (~1ms overhead). Тест `test_apply_catch_rereads_violator_status_after_user_lock` через `RaceyUserRepo` (мутирует `violator.status` во время `lock_for_update`) подтверждает лов — без фикса тест падает с `DID NOT RAISE MembershipNotActiveError`. **Это orthogonal к §Z-22 canonical order priority** — race-fix не меняет порядок проверок, только добавляет повторную проверку статуса.
 
 ### Z-2.5 `PaymentService._apply` (topup)
 

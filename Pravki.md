@@ -443,6 +443,19 @@ After:  Images 7 (2.1 GB), Build Cache 24 (1.8 GB), / 9%
 | Депозит привязан к чему? | К `(user_id, habit_id)` — хранится на `memberships.deposit_balance` |
 | UI пополнения? | **Максимально простой мок** — кнопка `+ Пополнить`, пресет суммы, нажал → деньги на депозите. Цель — тестировать штрафы/ловлю/призовой фонд |
 
+### 9.1. Решения 2026-08-14 — paused window open / race-fix / frontend filter
+
+> Snapshot 2026-08-14, серия из 4 коммитов `dfa3b2c` + `1f86217` + `7a988f8` + `a6cf949` на ветке `feature/paused-member-ux`. Все задеплоены на проде.
+
+| Вопрос | Решение |
+|---|---|
+| Pravki-paused-window-open: paused-юзер отправил чек-ин В ОКНЕ — что говорить? | **Не врать про окно.** Старый `REJECT_PAUSED_OR_WINDOW` жёстко говорил «окно закрыто» для всех paused-кейсов. Добавлен `REJECT_PAUSED_WINDOW_OPEN` — мотивирующий текст «депозит пуст, но окно ещё открыто ({start}–{end}), пополни сейчас и успеешь чек-ин сегодня». В `_prefilter()` разветвление по `state.is_within_checkin_window` |
+| Pravki-paused-race: в `apply_catch` есть ли окно гонки между SELECT и `lock_for_update(user)`? | **Да, defense-in-depth через `session.refresh(violator)` + повторная проверка.** Параллельная транзакция могла переключить `membership.status` через `recompute_pause_status` и закоммитить. До фикса код шёл дальше со staled `violator` из identity map SQLAlchemy. Тест `test_apply_catch_rereads_violator_status_after_user_lock` через `RaceyUserRepo` (мутирует `violator.status` во время `lock_for_update`) подтверждает лов |
+| Pravki-paused-race: race-fix в apply_catch пересекается с canonical order §Z-22 (`caught_today #3 > paused #6`)? | **Нет, это orthogonal.** Race-fix — только re-check после user-lock, не трогает порядок проверок. §Z-22 контракт сохранён: combo `caught+paused` по-прежнему выигрывает `caught_today`. Variant B (частичный перенос paused между `joined_late` и `window_closed`) сделан в bot prefilter (`1f86217`), не в apply_catch |
+| Pravki-paused-frontend: показывать ли paused-юзеров в списке «кого можно поймать»? | **Не показывать.** Через новое поле API `MemberRowOut.membership_status` (defensive default `"active"`) фронт фильтрует violators: `m.status === 'missed' && m.can_catch && m.membership_status === 'active'`. Сам paused-юзер остаётся видимым в общем списке «Все участники», но **без кнопки «Поймать»** — через условную передачу `onCatch` в `<MemberRowItem>`. Race-fix (race-condition) на бэкенде остаётся defense-in-depth |
+| Pravki-paused-frontend: paused в /members + topup → снова active — нужны ли SSE-события для real-time обновления? | **Catch event — да (через существующий `useHabitSse`). Topup event — нет (polling 30s через `useMembers.refetchInterval` уже работает).** Минимально-инвазивно: catch event уже идёт через `sse:habit:{habit_id}` (Pravki §Z-6), и `streamController.ts:201-214` уже инвалидирует `["members", habitId]` на нём. Подключение `useHabitSse(habitId)` в `MembersPage` — 1 строка. SSE для topup не добавлялся — пользователь явно согласился на polling для сценария «появление» (задержка 30 сек не критична). Обратный сценарий «исчезновение» (catch → paused) защищён race-fix на бэкенде |
+| Pravki-paused-frontend: vitest-тесты для MembersPage — пишем или откладываем? | **Пишем** (commit `a6cf949`, 4 кейса: paused/active/left/mixed). Не отложено. Мимоходом нашли баг в первом коммите frontend-фикса: `<MemberRowItem>` рендерил кнопку «Поймать» в общем списке по `can_catch` без учёта `membership_status` (filter на violators работал только на заголовок секции, не на кнопку в others). Исправлено через `--amend` в том же коммите |
+
 ## 10. Workflow развертывания
 
 ```bash
