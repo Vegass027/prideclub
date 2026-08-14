@@ -70,6 +70,13 @@ class _NoStreakSession:
     async def flush(self) -> None:
         pass
 
+    async def refresh(self, obj: Any) -> None:
+        # Pravki-paused-race-2026-08-14: refresh используется в
+        # PenaltyService.apply_catch для re-read'а membership.status после
+        # lock_for_update(user). Тесты test_penalty_checkin_status не
+        # моделируют race (нет смены status во время lock'а) — refresh no-op.
+        return None
+
     async def execute(self, stmt: Any) -> Any:
         class _Result:
             def first(self_inner) -> Any:

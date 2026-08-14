@@ -105,6 +105,25 @@ class PenaltyService:
         violator_user = await self._user_repo.lock_for_update(violator.user_id)
         assert violator_user is not None, "violator membership has no user"
 
+        # Pravki-paused-race-2026-08-14: defense-in-depth. Между SELECT
+        # violator (шаг 1) и lock_for_update(user) (шаг 2) существует окно
+        # гонки: параллельная транзакция (другой catch того же юзера,
+        # или cron apply_window_expired) могла изменить membership.status
+        # через recompute_pause_status и закоммитить. После user-lock'а
+        # мы сериализованы с этими операциями (теперь мы видим свежие
+        # данные на user-row), но `violator` объект — из identity map
+        # SQLAlchemy, загружен ДО лока. Без refresh'а мы бы использовали
+        # staled статус. Финансово amount-guard ниже ловит (если
+        # balance уже обнулён, то min(penalty, 0)=0 → reject). Но
+        # семантически inconsistent: Penalty создаётся для жертвы с
+        # membership.status != ACTIVE → UI жертвы может мигнуть
+        # "поймали" → "уже на паузе".
+        # Решение: перечитать violator под user-lock'ом + повторная
+        # проверка. Один additional SELECT из БД, ~1ms overhead.
+        await self._session.refresh(violator)
+        if violator.status != MembershipStatus.ACTIVE:
+            raise MembershipNotActiveError()
+
         habit = await self._habit_repo.get(str(violator.habit_id))
         if habit is None:
             raise HabitNotFoundError()
