@@ -1181,24 +1181,33 @@ async def test_prefilter_window_closed_falls_back_on_missing_window_times() -> N
 
 
 # ============================================================================
-# Pravki §Z-22 (hole #2): bot pre-filter для not_checkin_topic.
+# Pravki §Z-22 (hole #2): bot pre-filter для WRONG_TOPIC.
 #
-# Сценарий: state.checkin_topic_thread_id=42, message.message_thread_id=99
-# (например, юзер шлёт в General вместо топика «Чек-ины»). Бот должен
-# ответить REJECT_WRONG_TOPIC и НЕ вызывать backend.post().
+# Topic-scoped клубы (после миграции 010) привязаны к конкретному топику.
+# Если юзер шлёт видео в другой топик (General/Chat) — бот МОЛЧИТ
+# (return ""), чтобы не спамить в топиках обычного обсуждения.
 #
 # Canonical order v2: позиция #9 (после WINDOW_CLOSED #8). Оба из
 # категории IV (Wrong time/topic).
+#
+# Поведение по типу клуба:
+#   - Topic-scoped (state.checkin_topic_thread_id != None): бот молчит
+#     если сообщение из другого топика (не REJECT).
+#   - Legacy (state.checkin_topic_thread_id is None): branch skipped,
+#     любой thread_id принимается (тест test_prefilter_no_topic_thread_id_legacy_accepts_any).
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_prefilter_wrong_topic_returns_REJECT_WRONG_TOPIC() -> None:
+async def test_prefilter_wrong_topic_silent_returns_empty_string() -> None:
     """state.checkin_topic_thread_id=42, message.message_thread_id=99
-    → REJECT_WRONG_TOPIC, backend.post НЕ вызывается.
+    → бот МОЛЧИТ (не отвечает в чужой топик), backend.post НЕ вызывается.
+
+    Topic-scoped клуб: чужой топик (General) — это не наша зона, бот
+    не вмешивается. Раньше бот ругался REJECT_WRONG_TOPIC, теперь молчит.
     """
     msg = _make_video_note_message()
-    msg.message_thread_id = 99  # отличается от state (default FakeMessage = 4)
+    msg.message_thread_id = 99  # отличается от state (default FakeMessage = 12)
     bot = FakeBot()
     backend = FakeBackendClient(
         habit_state={
@@ -1215,15 +1224,14 @@ async def test_prefilter_wrong_topic_returns_REJECT_WRONG_TOPIC() -> None:
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
-    # Бот ответил REJECT_WRONG_TOPIC
-    assert len(bot.sent) == 1
-    text = bot.sent[0]["text"]
-    assert "топик" in text.lower(), f"Expected топик-текст, got: {text!r}"
-    assert "↩" in text, f"Expected reply-префикс, got: {text!r}"
-
-    # Backend.post НЕ вызывался
+    # Бот МОЛЧИТ — НЕ отправляет ничего (ни "топик", ни "↩").
+    assert len(bot.sent) == 0, (
+        f"Бот должен молчать в не-check-in топике, "
+        f"но отправил: {bot.sent!r}"
+    )
+    # Backend.post НЕ вызывался.
     assert len(backend.calls) == 0, (
-        f"backend.post не должен вызываться при wrong topic, "
+        f"backend.post не должен вызываться при молчании, "
         f"got calls: {backend.calls!r}"
     )
 
@@ -1290,10 +1298,12 @@ async def test_prefilter_no_topic_thread_id_legacy_accepts_any() -> None:
 
 @pytest.mark.asyncio
 async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
-    """Canonical order v2: #9 WRONG_TOPIC после #8 WINDOW_CLOSED.
+    """Canonical order v2: #8 WINDOW_CLOSED > #9 WRONG_TOPIC (молчание).
 
     Если оба окна нарушены (юзер шлёт не в тот топик И вне окна),
-    WINDOW_CLOSED срабатывает первым (canonical order #8 выше #9).
+    WINDOW_CLOSED срабатывает первым (canonical order #8 выше #9)
+    и отвечает REJECT_OUT_OF_WINDOW с временем окна. WRONG_TOPIC после
+    #3 уже молчит, но он не достигается — WINDOW_CLOSED выше.
     """
     msg = _make_video_note_message()
     msg.message_thread_id = 99  # wrong topic

@@ -363,13 +363,21 @@ async def _prefilter(
 
     # Pravki §Z-22 (hole #2): 9. WRONG_TOPIC — позиция #9 в canonical order v2.
     # Сравниваем message_thread_id из Telegram-сообщения с ожидаемым
-    # checkin_topic_thread_id из state. Если checkin_topic_thread_id IS NULL
-    # (legacy-режим без топиков) — любой thread_id принимается, branch skipped.
+    # checkin_topic_thread_id из state.
+    #
+    # Поведение по типу клуба:
+    #   - Topic-scoped (state_thread_id != None): если сообщение НЕ из
+    #     checkin_topic_thread_id — бот МОЛЧИТ (return ""). Не отвечает в
+    #     General/Chat, чтобы не спамить в топиках обычного обсуждения.
+    #   - Legacy (state_thread_id is None): условие False — branch skipped.
+    #     Бот НЕ вмешивается ни в какие топики, любой thread_id = чек-ин.
+    #     Это клубы созданные до миграции 010 (habit_topics), их поведение
+    #     не должно ломаться.
     state_thread_id = state.get("checkin_topic_thread_id")
     sent_thread_id = getattr(message, "message_thread_id", None)
     if state_thread_id is not None and sent_thread_id != state_thread_id:
         log.info(
-            "prefilter_wrong_topic",
+            "prefilter_wrong_topic_silent",
             extra={
                 "user_id": user_id,
                 "chat_id": chat_id,
@@ -377,7 +385,7 @@ async def _prefilter(
                 "got": sent_thread_id,
             },
         )
-        return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
+        return ""  # молчание — это не наш топик, мы тут не вмешиваемся
 
     # Pravki §Z-22 (Step 4, hole #4): 10. FORWARDED — позиция #10 в canonical order v2.
     # Пересланные сообщения (Message.forward_origin != None) не принимаются —
