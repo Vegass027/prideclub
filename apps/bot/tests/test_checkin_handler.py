@@ -1477,12 +1477,20 @@ async def test_prefilter_caught_today_priority_over_membership_left() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prefilter_window_closed_priority_over_membership_paused() -> None:
-    """Canonical order v2: #8 WINDOW_CLOSED > #6 MEMBERSHIP_PAUSED.
+async def test_prefilter_paused_window_closed_returns_REJECT_PAUSED_OR_WINDOW() -> None:
+    """Pravki-paused-window-open-2026-08-14: PAUSED + window_closed.
 
-    Если оба нарушены (юзер paused И вне окна) — показываем окно,
-    потому что это более специфичная информация (конкретное время),
-    чем "пополни депозит" (общая инструкция).
+    Дизайн `feature/paused-member-ux`: для paused-юзера ВСЕ остальные
+    проверки (caught_today, already_checked_in, joined_late, window_closed,
+    wrong_topic) неприменимы — он на паузе и не может двинуться дальше
+    без пополнения депозита. Поэтому выбран объединённый текст
+    REJECT_PAUSED_OR_WINDOW (обе причины: депозит пуст + окно закрыто).
+
+    До этой правки тест назывался
+    `test_prefilter_window_closed_priority_over_membership_paused` и
+    требовал canonical order #8 WINDOW_CLOSED > #6 MEMBERSHIP_PAUSED
+    (только про окно, без "паузе"). Дизайн был пересмотрен: теперь обе
+    причины объединяются. Этот тест фиксирует новое (осознанное) поведение.
     """
     msg = _make_video_note_message()
     bot = FakeBot()
@@ -1495,8 +1503,10 @@ async def test_prefilter_window_closed_priority_over_membership_paused() -> None
             "already_checked_in": False,
             "checked_in_at": None,
             "is_joined_late": False,
-            "is_within_checkin_window": False,  # закрыто
-            "membership_status": "paused",  # оба нарушены
+            "is_within_checkin_window": False,  # окно закрыто
+            "membership_status": "paused",      # + депозит пуст
+            "deposit_balance": 0,
+            "penalty_amount": 25000,
             "checkin_window_start": "06:00",
             "checkin_window_end": "12:00",
         },
@@ -1504,11 +1514,84 @@ async def test_prefilter_window_closed_priority_over_membership_paused() -> None
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
+    assert len(bot.sent) == 1
     text = bot.sent[0]["text"]
-    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
-    assert "12:00" in text
-    assert "паузе" not in text.lower(), (
-        f"paused не должен выиграть у WINDOW_CLOSED (canonical #6 < #8). Got: {text!r}"
+    # ОБЕ причины упомянуты — это и есть объединённый текст по дизайну paused-member-ux.
+    assert "окно" in text.lower(), (
+        f"Expected WINDOW_CLOSED side в объединённом тексте, got: {text!r}"
+    )
+    assert "закрыто" in text.lower(), (
+        f"Expected explicit 'закрыто' (окно правда закрыто), got: {text!r}"
+    )
+    assert "паузе" in text.lower(), (
+        f"Expected PAUSED side в объединённом тексте, got: {text!r}"
+    )
+    assert "12:00" in text, f"Expected window end time, got: {text!r}"
+    assert "0,00 ₽" in text and "250,00 ₽" in text, (
+        f"Expected balance и penalty подставленными, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для paused prefilter, got calls: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_paused_window_open_returns_REJECT_PAUSED_WINDOW_OPEN() -> None:
+    """Pravki-paused-window-open-2026-08-14: PAUSED + window_OPEN.
+
+    PAUSED-юзер отправил чек-ин ВНУТРИ окна чек-ина. Окно открыто — НЕ
+    врём про "закрыто". Текст REJECT_PAUSED_WINDOW_OPEN:
+      - только причина: депозит пуст (одна, а не две)
+      - CTA: "окно ещё открыто, пополни и успеешь сегодня"
+
+    Это закрывает баг Софии (2026-08-13, депозит=0 + окно 09:00–22:06,
+    сейчас 09:08 — старый код говорил "окно закрыто", что было ложью).
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,  # окно ОТКРЫТО
+            "membership_status": "paused",
+            "deposit_balance": 0,
+            "penalty_amount": 25000,
+            "checkin_window_start": "09:00",
+            "checkin_window_end": "22:06",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    # Правда: депозит пуст, окно открыто
+    assert "паузе" in text.lower(), (
+        f"Expected 'паузе' (юзер на паузе), got: {text!r}"
+    )
+    assert "пополни" in text.lower(), (
+        f"Expected CTA 'пополни' (recovery path), got: {text!r}"
+    )
+    # НЕ врём про закрытое окно
+    assert "закрыто" not in text.lower(), (
+        f"НЕ должно быть 'закрыто' (окно открыто) — иначе бот врёт юзеру. Got: {text!r}"
+    )
+    # CTA "успеешь сегодня" — мотивирует к действию, а не откладывает на завтра
+    assert "09:00" in text and "22:06" in text, (
+        f"Expected window times (юзер должен видеть до скольки успеет), got: {text!r}"
+    )
+    assert "сегодня" in text.lower() or "сегодня" in text, (
+        f"Expected 'успеешь ... сегодня' (CTA), got: {text!r}"
+    )
+    # backend.post НЕ вызывается — prefilter отбивает
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для paused prefilter, got calls: {backend.calls!r}"
     )
 
 

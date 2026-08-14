@@ -206,33 +206,9 @@ async def _prefilter(
         # Без state пропускаем pre-filter.
         return None
 
-if not state.get("found"):
+    if not state.get("found"):
         log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
         return ""
-
-    # Feature/paused-member-ux: PAUSED-юзер должен получить объединённое
-    # сообщение "пополни депозит + окно закрыто", а не REJECT_OUT_OF_WINDOW
-    # или REJECT_ALREADY_CHECKED_IN. Идёт ПЕРЕД всеми проверками, потому
-    # что для paused-юзера они неприменимы — даже если он "уже отметился"
-    # вчера, сегодня он всё равно на паузе и не может двинуться дальше
-    # без пополнения депозита.
-    if state.get("membership_status") == "paused":
-        log.info(
-            "prefilter_paused",
-            extra={
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "deposit_balance": state.get("deposit_balance"),
-                "penalty_amount": state.get("penalty_amount"),
-            },
-        )
-        return checkin_texts.REJECT_PAUSED_OR_WINDOW.format(
-            name=name,
-            balance=_format_kopecks_for_bot(state.get("deposit_balance", 0)),
-            penalty=_format_kopecks_for_bot(state.get("penalty_amount", 0)),
-            start=state.get("checkin_window_start", "?"),
-            end=state.get("checkin_window_end", "?"),
-        )
 
     # Pravki-bug-fixes §Z-21 (Item 4): ВАЖНО — проверяем caught_today ПЕРЕД
     # блоком already_checked_in. Семантика:
@@ -299,6 +275,70 @@ if not state.get("found"):
             end=state.get("checkin_window_end", "?"),
         )
 
+    # Pravki-paused-window-open-2026-08-14 + Variant B (merge conflict fix):
+    # ЕДИНАЯ ветка membership_status PAUSED/LEFT — идёт ПОСЛЕ state-of-day
+    # (caught_today, already_checked_in, joined_late) — для combo caught+paused
+    # выигрывает caught (финансовая информация важнее), но ДО WINDOW_CLOSED —
+    # чтобы для paused+closed показать ОБЪЕДИНЁННЫЙ текст (пауза + окно вместе),
+    # а не только "окно закрыто" (тогда юзер бы не увидел recovery path —
+    # "пополни депозит").
+    #
+    # До этой правки было ДВЕ ветки (одна шла ДО caught/already/joined_late,
+    # вторая ПОСЛЕ wrong_topic — обе "мертвые" по очереди). Это ломало
+    # §Z-22 контракт caught > paused (тест
+    # test_prefilter_caught_today_priority_over_membership_paused падал).
+    #
+    # Решение: одна ветка с правильным приоритетом.
+    #   - caught_today=True + paused → caught (раньше, #3 > #6) ✅ §Z-22
+    #   - already_checked_in=True + paused → already (раньше, #4 > #6) ✅
+    #   - is_joined_late=True + paused → joined_late (раньше, #5 > #6) ✅
+    #   - is_within_checkin_window=False + paused → paused (раньше, #6 < #8) —
+    #     объединённый текст про "окно + депозит"
+    #   - is_within_checkin_window=True + paused → paused (раньше, #6 < #8) —
+    #     новый текст "окно открыто, пополни и успеешь"
+    #
+    # Pravki-paused-window-open-2026-08-14: расщепление copy по реальному
+    # состоянию окна чек-ина. Backend в HabitStateResponse уже посчитал
+    # is_within_checkin_window через habit.is_within_checkin_window(now_utc)
+    # в TZ клуба (apps/backend/app/api/v1/internal_bot.py:420). Бот НЕ
+    # дублирует tz-логику.
+    #
+    #   is_within_checkin_window == False → REJECT_PAUSED_OR_WINDOW
+    #     (юзер пришёл после окна: "окно закрыто + депозит пуст + приходи завтра")
+    #   is_within_checkin_window == True  → REJECT_PAUSED_WINDOW_OPEN
+    #     (юзер пришёл в окне: правдивое "депозит пуст, но окно ещё открыто,
+    #      пополни сейчас и успеешь чек-ин сегодня")
+    membership_status_value = state.get("membership_status")
+    if membership_status_value == "paused":
+        balance = _format_kopecks_for_bot(state.get("deposit_balance", 0))
+        penalty = _format_kopecks_for_bot(state.get("penalty_amount", 0))
+        start = state.get("checkin_window_start", "?")
+        end = state.get("checkin_window_end", "?")
+        is_window_open = state.get("is_within_checkin_window") is True
+        log.info(
+            "prefilter_paused",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "deposit_balance": state.get("deposit_balance"),
+                "penalty_amount": state.get("penalty_amount"),
+                "is_within_checkin_window": state.get("is_within_checkin_window"),
+            },
+        )
+        if is_window_open:
+            return checkin_texts.REJECT_PAUSED_WINDOW_OPEN.format(
+                name=name, balance=balance, penalty=penalty, start=start, end=end,
+            )
+        return checkin_texts.REJECT_PAUSED_OR_WINDOW.format(
+            name=name, balance=balance, penalty=penalty, start=start, end=end,
+        )
+    if membership_status_value == "left":
+        log.info(
+            "prefilter_membership_left",
+            extra={"user_id": user_id, "chat_id": chat_id},
+        )
+        return checkin_texts.REJECT_MEMBERSHIP_LEFT.format(name=name)
+
     # Pravki §Z-22 (hole #1): WINDOW_CLOSED — идёт ПОСЛЕ state-of-day
     # (caught_today, already_checked_in, joined_late). См. большой комментарий
     # выше. Backend в HabitStateResponse уже посчитал is_within_checkin_window
@@ -334,32 +374,6 @@ if not state.get("found"):
             },
         )
         return checkin_texts.REJECT_WRONG_TOPIC.format(name=name)
-
-    # Pravki §Z-22 (Step 3, hole #3): 6. MEMBERSHIP_PAUSED / 7. MEMBERSHIP_LEFT.
-    # Canonical order v2 (см. CheckinRejectCode docstring).
-    # Идём ПОСЛЕ state-of-day (caught_today, already_checked_in, joined_late)
-    # и ПОСЛЕ WINDOW_CLOSED (#8) и WRONG_TOPIC (#9), потому что:
-    #   - для пойманного юзера показываем "поймали" (#3), а не "пополни депозит"
-    #   - для юзера вне окна показываем "окно закрыто" (#8), а не "пополни"
-    #   - для юзера в неправильном топике показываем "не тот топик" (#9)
-    # Только если все вышестоящие checks прошли — показываем membership.
-    #
-    # status=None означает "нет membership" (юзер не в клубе) — НЕ проверяем
-    # в prefilter (бот ответит только если пользователь был ранее активным).
-    # membership_not_found обрабатывается backend defense-in-depth.
-    membership_status_value = state.get("membership_status")
-    if membership_status_value == "paused":
-        log.info(
-            "prefilter_membership_paused",
-            extra={"user_id": user_id, "chat_id": chat_id},
-        )
-        return checkin_texts.REJECT_MEMBERSHIP_PAUSED.format(name=name)
-    if membership_status_value == "left":
-        log.info(
-            "prefilter_membership_left",
-            extra={"user_id": user_id, "chat_id": chat_id},
-        )
-        return checkin_texts.REJECT_MEMBERSHIP_LEFT.format(name=name)
 
     # Pravki §Z-22 (Step 4, hole #4): 10. FORWARDED — позиция #10 в canonical order v2.
     # Пересланные сообщения (forward_date != None в aiogram Message) не
