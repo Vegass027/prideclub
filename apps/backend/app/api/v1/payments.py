@@ -167,6 +167,13 @@ async def subscribe(
     # layered architecture: одна транзакция = один handler).
     await session.commit()
 
+    # Pravki §Z-13.3 fix: dep_tx.amount = только депозит. Нужен price_month
+    # из habit, чтобы посчитать total_charged_kopecks (полная сумма списания
+    # для alert в UI). Делаем один SELECT — альтернатива (вернуть price_month
+    # из сервиса 4-м элементом tuple) требует менять сигнатуру и тесты.
+    habit = await HabitRepository(session).get(payload.habit_id)
+    assert habit is not None, "habit must exist after successful subscribe_and_join"
+
     return SubscribeResponse(
         ok=True,
         transaction_id=str(transaction.id),
