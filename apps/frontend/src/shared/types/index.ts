@@ -98,6 +98,16 @@ export interface MemberRow {
   status: CheckinStatus;
   checkin_count: number;
   can_catch: boolean;
+  /**
+   * Pravki-paused-frontend-2026-08-14: реальный статус membership жертвы.
+   * Отличается от `status` (CheckinStatus) тем, что описывает состояние
+   * членства, а не сегодняшнего чек-ина. Frontend фильтрует violators
+   * только по `status === "missed" && can_catch && membership_status === "active"`
+   * чтобы не предлагать ловить paused/left. Защита от race-condition с
+   * переключением status остаётся на backend (MembershipNotActiveError
+   * в apply_catch + re-check после user-lock).
+   */
+  membership_status: MembershipStatus;
   /** Relative path /api/v1/users/{id}/photo (Pravki §7.1 v3.1). NULL = no avatar. */
   photo_url: string | null;
 }

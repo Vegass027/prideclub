@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { useCatch, useMembers } from "@/shared/hooks";
+import { useCatch, useHabitSse, useMembers } from "@/shared/hooks";
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { EmptyState } from "@/shared/ui/EmptyState";
@@ -26,6 +26,20 @@ export function MembersPage() {
   const { habitId } = useParams<{ habitId: string }>();
   const { data, isLoading, isError, error, refetch } = useMembers(habitId);
   const catchMutation = useCatch(habitId);
+  // Pravki-paused-frontend-2026-08-14: real-time invalidate списка участников
+  // через SSE — событие `catch` в habit-stream (publish_catch_event в backend)
+  // триггерит `invalidateQueries(["members", habitId])` в streamController.
+  // Без этого UX задержка обновления зависела бы только от polling
+  // useMembers.refetchInterval=30s. Сценарий защиты:
+  //   1) катчер ловит жертву → apply_catch → backend списывает депозит →
+  //      recompute_pause_status → membership.status = PAUSED →
+  //      publish_catch_event в habit-stream → SSE invalidate у всех
+  //      смотрящих /members → paused-юзер исчезает из «Можно поймать» <1s.
+  //   2) катчер пробует поймать юзера с membership.status=PAUSED (race
+  //      с фронтом): backend refresh+re-check в apply_catch (commit 3
+  //      сегодняшней серии) → MembershipNotActiveError → UI toast
+  //      «Членство не активно». UX не silent-fail.
+  useHabitSse(habitId);
   // Pravki-deposit-sse.md §Z-11: убран headerRight "Сменить клуб" — переход
   // в /profile через BottomNav достаточен, кнопка в шапке дублировала навигацию.
   const backTo = "/profile";
@@ -74,7 +88,17 @@ export function MembersPage() {
   }
 
   const items = data?.items ?? [];
-  const violators = items.filter((m) => m.status === "missed" && m.can_catch);
+  // Pravki-paused-frontend-2026-08-14: фильтр \"Можно поймать\" теперь
+  // учитывает membership_status. Paused-юзер (deposit=0) остаётся видимым
+  // в общем списке участников клуба, но БЕЗ кнопки «Поймать» — с него
+  // всё равно нечего взять. Защита от race-condition — на backend
+  // (MembershipNotActiveError в apply_catch + re-check после user-lock).
+  const violators = items.filter(
+    (m) =>
+      m.status === "missed" &&
+      m.can_catch &&
+      m.membership_status === "active",
+  );
   const others = items.filter((m) => !violators.includes(m));
 
   return (
@@ -123,7 +147,21 @@ export function MembersPage() {
           <ul className="space-y-2">
             {others.map((m) => (
               <li key={m.membership_id}>
-                <MemberRowItem row={m} onCatch={() => handleCatch(m)} />
+                {/* Pravki-paused-frontend-2026-08-14 fix: кнопка «Поймать»
+                    рендерится ТОЛЬКО если member активен И may_catch.
+                    Без этого в общем списке «Все участники» у paused/left
+                    была бы бесполезная кнопка (catch всё равно вернёт
+                    MembershipNotActiveError → toast). Передача onCatch
+                    только когда он будет реально использоваться — гарантия
+                    через контракт MemberRowItem: кнопка существует ⇔ onCatch. */}
+                <MemberRowItem
+                  row={m}
+                  onCatch={
+                    m.membership_status === "active" && m.can_catch
+                      ? () => handleCatch(m)
+                      : undefined
+                  }
+                />
               </li>
             ))}
           </ul>

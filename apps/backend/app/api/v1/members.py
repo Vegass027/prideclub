@@ -35,6 +35,14 @@ class MemberRowOut(BaseModel):
     photo_url — relative путь /api/v1/users/{id}/photo (Pravki §7.1 v3.1).
     NULL = нет аватарки или worker не подтянул. Frontend оборачивает
     в new URL(photo_url, window.location.origin).
+
+    membership_status: Pravki-paused-frontend-2026-08-14. Отдельное поле от
+    status (CheckinStatus) — описывает состояние ЧЛЕНСТВА, а не чек-ина.
+    Используется фронтом для UX-фильтра в MembersPage: paused-юзеры
+    (депозит=0) не показываются в секции «Кого можно поймать» —
+    с них всё равно нечего взять. Защита от race-condition с catch
+    остаётся на бэкенде (MembershipNotActiveError в apply_catch +
+    re-check после user-lock от коммита 3 сегодняшней серии).
     """
 
     membership_id: str
@@ -44,6 +52,7 @@ class MemberRowOut(BaseModel):
     status: str
     checkin_count: int
     can_catch: bool
+    membership_status: str = "active"  # 'active' | 'paused' | 'left' (defensive)
     photo_url: str | None = None
 
 
@@ -156,6 +165,9 @@ async def list_members(
                     and status == "missed"
                     and str(m.id) not in penalty_set
                 ),
+                # Pravki-paused-frontend-2026-08-14: проброс актуального
+                # membership.status в API для UX-фильтра во фронте.
+                membership_status=m.status.value,
                 photo_url=photo_url,
             )
         )
