@@ -214,6 +214,30 @@ async def _prefilter(
         log.warning("prefilter_habit_not_found", extra={"chat_id": chat_id})
         return ""
 
+    # Pravki-qa-batch-2026-08-14 (#4): WRONG_TOPIC поднят в самый верх canonical order
+    # (сразу после habit_not_found). Семантика: topic-фильтр — это «это вообще
+    # не наш разговор, бот тут ни при чём», а не «отклонить конкретный чек-ин по
+    # причине X». Если сообщение пришло не из check-in топика, бот логически не
+    # должен доходить до already_checked_in / paused / caught_today / любых
+    # других state-of-day причин — они осмысленны только ВНУТРИ topic, где реально
+    # происходит чек-ин. Иначе каждая новая state-проверка в будущем создавала бы
+    # ровно такой же баг: бот «прорывается» через topic-фильтр и заговаривает в
+    # General. Тесты test_prefilter_wrong_topic_silent_priority_* закрепляют
+    # контракт.
+    state_thread_id = state.get("checkin_topic_thread_id")
+    sent_thread_id = getattr(message, "message_thread_id", None)
+    if state_thread_id is not None and sent_thread_id != state_thread_id:
+        log.info(
+            "prefilter_wrong_topic_silent",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "expected": state_thread_id,
+                "got": sent_thread_id,
+            },
+        )
+        return ""  # молчание — это не наш топик, мы тут не вмешиваемся
+
     # Pravki-bug-fixes §Z-21 (Item 4): ВАЖНО — проверяем caught_today ПЕРЕД
     # блоком already_checked_in. Семантика:
     # - Для status='caught' оба флага = True (есть и Checkin, и Penalty),
@@ -227,7 +251,7 @@ async def _prefilter(
     # - Для status='done' — caught_today=False, branch skipped → уходим в
     #   already_checked_in ниже.
     #
-    # Pravki §Z-22 (hole #1): canonical order v2 (после ревизии).
+    # Pravki §Z-22 (hole #1): canonical order v3 (после QA batch 2026-08-14).
     # state-of-day (caught_today, already_checked_in, is_joined_late) идёт
     # ПЕРЕД WINDOW_CLOSED. Причина: поймать можно ТОЛЬКО того, кто пропустил
     # окно, значит caught_today=True почти ВСЕГДА сопровождается
@@ -361,33 +385,8 @@ async def _prefilter(
             end=state.get("checkin_window_end", "?"),
         )
 
-    # Pravki §Z-22 (hole #2): 9. WRONG_TOPIC — позиция #9 в canonical order v2.
-    # Сравниваем message_thread_id из Telegram-сообщения с ожидаемым
-    # checkin_topic_thread_id из state.
-    #
-    # Поведение по типу клуба:
-    #   - Topic-scoped (state_thread_id != None): если сообщение НЕ из
-    #     checkin_topic_thread_id — бот МОЛЧИТ (return ""). Не отвечает в
-    #     General/Chat, чтобы не спамить в топиках обычного обсуждения.
-    #   - Legacy (state_thread_id is None): условие False — branch skipped.
-    #     Бот НЕ вмешивается ни в какие топики, любой thread_id = чек-ин.
-    #     Это клубы созданные до миграции 010 (habit_topics), их поведение
-    #     не должно ломаться.
-    state_thread_id = state.get("checkin_topic_thread_id")
-    sent_thread_id = getattr(message, "message_thread_id", None)
-    if state_thread_id is not None and sent_thread_id != state_thread_id:
-        log.info(
-            "prefilter_wrong_topic_silent",
-            extra={
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "expected": state_thread_id,
-                "got": sent_thread_id,
-            },
-        )
-        return ""  # молчание — это не наш топик, мы тут не вмешиваемся
-
     # Pravki §Z-22 (Step 4, hole #4): 10. FORWARDED — позиция #10 в canonical order v2.
+    # (WRONG_TOPIC теперь в самом верху — см. Pravki-qa-batch-2026-08-14 #4.)
     # Пересланные сообщения (Message.forward_origin != None) не принимаются —
     # антифрод (юзер может переслать чужое видео-кружок). В aiogram 3.30
     # правильный сигнал пересылки — Message.forward_origin

@@ -1297,13 +1297,88 @@ async def test_prefilter_no_topic_thread_id_legacy_accepts_any() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
-    """Canonical order v2: #8 WINDOW_CLOSED > #9 WRONG_TOPIC (молчание).
+async def test_prefilter_wrong_topic_priority_over_window_closed() -> None:
+    """Canonical order v3: WRONG_TOPIC (молчание) ВЫШЕ WINDOW_CLOSED.
 
-    Если оба окна нарушены (юзер шлёт не в тот топик И вне окна),
-    WINDOW_CLOSED срабатывает первым (canonical order #8 выше #9)
-    и отвечает REJECT_OUT_OF_WINDOW с временем окна. WRONG_TOPIC после
-    #3 уже молчит, но он не достигается — WINDOW_CLOSED выше.
+    Pravki-qa-batch-2026-08-14 (#4): topic-фильтр теперь первый — бот молчит
+    в не-чек-ин топиках независимо от других причин. Даже если окно закрыто,
+    если сообщение не из checkin_topic — бот НЕ должен отвечать "окно закрыто"
+    в General/уведомлениях.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic (вне checkin_topic)
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # окно закрыто
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # WRONG_TOPIC выигрывает у WINDOW_CLOSED (canonical v3) — бот МОЛЧИТ.
+    assert len(bot.sent) == 0, (
+        f"Бот должен молчать в не-чек-ин топике даже при WINDOW_CLOSED, "
+        f"got: {bot.sent!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться, got: {backend.calls!r}"
+    )
+
+
+# ============================================================================
+# Pravki-qa-batch-2026-08-14 (#4): WRONG_TOPIC поднят в самый верх canonical
+# order. Тесты ниже фиксируют что WRONG_TOPIC выигрывает у каждой state-of-day
+# причины — иначе бот «прорвётся» через topic-фильтр в General и заговорит.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_priority_over_already_checked_in() -> None:
+    """Canonical order v3: WRONG_TOPIC > ALREADY_CHECKED_IN.
+
+    Раньше (v2) ALREADY_CHECKED_IN выигрывал — бот отвечал "ты уже отметился"
+    даже в General. Теперь молчит.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": True,  # уже отметился
+            "checked_in_at": "2026-08-14T10:00:00Z",
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 0, (
+        f"WRONG_TOPIC выигрывает у ALREADY_CHECKED_IN — бот должен молчать. "
+        f"got: {bot.sent!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_priority_over_caught_today() -> None:
+    """Canonical order v3: WRONG_TOPIC > CAUGHT_TODAY.
+
+    Раньше бот отвечал "поймали" в General если юзер был пойман. Теперь молчит.
     """
     msg = _make_video_note_message()
     msg.message_thread_id = 99  # wrong topic
@@ -1315,9 +1390,38 @@ async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
             "proof_types": ["video_note"],
             "checkin_topic_thread_id": 42,
             "already_checked_in": False,
-            "checked_in_at": None,
             "is_joined_late": False,
-            "is_within_checkin_window": False,  # закрыто
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+            "caught_today": True,  # юзер пойман
+            "checkin_status": "caught",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 0, (
+        f"WRONG_TOPIC выигрывает у CAUGHT_TODAY — бот должен молчать. "
+        f"got: {bot.sent!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_priority_over_joined_late() -> None:
+    """Canonical order v3: WRONG_TOPIC > JOINED_LATE."""
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "is_joined_late": True,  # вступил после дедлайна
+            "is_within_checkin_window": True,
+            "membership_status": "active",
             "checkin_window_start": "06:00",
             "checkin_window_end": "12:00",
         },
@@ -1325,13 +1429,43 @@ async def test_prefilter_wrong_topic_after_passed_window_check() -> None:
 
     await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
 
-    # WINDOW_CLOSED (#8) выигрывает у WRONG_TOPIC (#9)
-    text = bot.sent[0]["text"]
-    assert "окно" in text.lower(), f"Expected WINDOW_CLOSED text, got: {text!r}"
-    assert "06:00" in text and "12:00" in text
-    assert "топик" not in text.lower(), (
-        f"WRONG_TOPIC не должен выиграть у WINDOW_CLOSED "
-        f"(canonical order #9 < #8). Got: {text!r}"
+    assert len(bot.sent) == 0, (
+        f"WRONG_TOPIC выигрывает у JOINED_LATE — бот должен молчать. "
+        f"got: {bot.sent!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_wrong_topic_priority_over_paused() -> None:
+    """Canonical order v3: WRONG_TOPIC > PAUSED.
+
+    Раньше бот отвечал "пополни депозит" в General. Теперь молчит.
+    """
+    msg = _make_video_note_message()
+    msg.message_thread_id = 99  # wrong topic
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 42,
+            "already_checked_in": False,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",  # на паузе (депозит=0)
+            "deposit_balance": 0,
+            "penalty_amount": 25000,
+            "checkin_window_start": "06:00",
+            "checkin_window_end": "12:00",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 0, (
+        f"WRONG_TOPIC выигрывает у PAUSED — бот должен молчать. "
+        f"got: {bot.sent!r}"
     )
 
 
