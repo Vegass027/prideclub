@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime  # noqa: F401  # legacy: forward_date тесты
 from typing import Any
 
 import pytest
@@ -42,8 +42,13 @@ class FakeMessage:
     text: str | None = None
     photo: Any = None
     video_note: FakeVideoNote | None = None
-    # Pravki §Z-22 (Step 4, hole #4): forward_date != None означает
-    # пересланное сообщение. None = оригинал (default).
+    # Pravki §Z-22 (Step 4, hole #4): forward_origin != None означает
+    # пересланное сообщение (aiogram 3.30: MessageOriginUser | HiddenUser
+    # | Chat | Channel). None = оригинал (default).
+    # forward_date оставлен для backward-compat со старыми тестами —
+    # бот-код больше его НЕ читает (forward_date в aiogram 3.30 всегда None
+    # для современных форвардов), но в unit-тестах с fake иногда удобно.
+    forward_origin: Any = None
     forward_date: Any = None
 
     @property
@@ -204,9 +209,14 @@ def test_parse_proof_photo() -> None:
 
 
 def test_parse_proof_forwarded_message() -> None:
-    """Pravki §Z-22 (Step 4, hole #4): forward_date != None → is_forwarded=True."""
+    """Pravki §Z-22 (Step 4, hole #4): Message.forward_origin != None → is_forwarded=True.
+
+    Используем truthy-mock-объект вместо реального MessageOrigin — для unit-теста
+    важно проверить только сигнал атрибута. Реальный MessageOriginUser парсится
+    в test_parse_proof_forwarded_message_via_real_update (через Update.model_validate).
+    """
     msg = _make_video_note_message()
-    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    msg.forward_origin = object()  # любой truthy-объект имитирует MessageOrigin
     payload = _parse_proof(msg)  # type: ignore[arg-type]
     assert payload is not None
     assert payload["is_forwarded"] is True
@@ -1598,23 +1608,28 @@ async def test_prefilter_paused_window_open_returns_REJECT_PAUSED_WINDOW_OPEN() 
 # ============================================================================
 # Pravki §Z-22 (Step 4, hole #4): bot pre-filter для forwarded messages.
 #
-# Сценарий: message.forward_date != None (пересланное сообщение в Telegram).
+# Сценарий: Message.forward_origin != None (пересланное сообщение в Telegram).
 # Бот должен ответить REJECT_FORWARDED, не дожидаясь worker'а.
 #
 # Canonical order v2: позиция #10 (после WINDOW_CLOSED #8, WRONG_TOPIC #9,
 # MEMBERSHIP_PAUSED #6, MEMBERSHIP_LEFT #7).
 #
-# Особенность: forward_date доступен ТОЛЬКО в aiogram Message (Telegram
-# update). Backend его не получает в state, только в payload.is_forwarded.
+# Особенность: Message.forward_origin доступен ТОЛЬКО в aiogram Message
+# (Telegram update). Backend его не получает в state, только в payload.is_forwarded.
 # Поэтому для FORWARDED bot prefilter — ОБЯЗАТЕЛЬНЫЙ (а не defense-in-depth).
+#
+# В aiogram 3.30:
+#   - Message.forward_date — None для современных форвардов (старый Bot API 1.x).
+#   - Message.forward — bound method, ВСЕГДА is not None (false-positive!).
+#   - Message.forward_origin — правильный сигнал (MessageOrigin object или None).
 # ============================================================================
 
 
 @pytest.mark.asyncio
 async def test_prefilter_forwarded_returns_REJECT_FORWARDED() -> None:
-    """message.forward_date != None → REJECT_FORWARDED, backend.post НЕ вызывается."""
+    """Message.forward_origin != None → REJECT_FORWARDED, backend.post НЕ вызывается."""
     msg = _make_video_note_message()
-    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)  # любой не-None
+    msg.forward_origin = object()  # truthy-mock имитирует MessageOrigin
     bot = FakeBot()
     backend = FakeBackendClient(
         habit_state={
@@ -1648,9 +1663,9 @@ async def test_prefilter_forwarded_returns_REJECT_FORWARDED() -> None:
 
 @pytest.mark.asyncio
 async def test_prefilter_not_forwarded_proceeds() -> None:
-    """message.forward_date=None (default) → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ."""
+    """Message.forward_origin=None (default) → prefilter пропускает, backend.post ВЫЗЫВАЕТСЯ."""
     msg = _make_video_note_message()
-    msg.forward_date = None  # default FakeMessage, но для явности
+    msg.forward_origin = None  # default FakeMessage, но для явности
     bot = FakeBot()
     backend = FakeBackendClient(
         habit_state={
@@ -1683,7 +1698,7 @@ async def test_prefilter_caught_today_priority_over_forwarded() -> None:
     а не "пересланные видео".
     """
     msg = _make_video_note_message()
-    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    msg.forward_origin = object()  # truthy-mock имитирует MessageOrigin
     bot = FakeBot()
     backend = FakeBackendClient(
         habit_state={
@@ -1721,7 +1736,7 @@ async def test_prefilter_window_closed_priority_over_forwarded() -> None:
     важнее, чем "пересланные видео" (общая инструкция).
     """
     msg = _make_video_note_message()
-    msg.forward_date = datetime(2026, 8, 11, 12, 0, 0, tzinfo=UTC)
+    msg.forward_origin = object()  # truthy-mock имитирует MessageOrigin
     bot = FakeBot()
     backend = FakeBackendClient(
         habit_state={
@@ -1747,3 +1762,149 @@ async def test_prefilter_window_closed_priority_over_forwarded() -> None:
     assert "пересланные" not in text.lower(), (
         f"FORWARDED не должен выиграть у WINDOW_CLOSED (canonical #10 < #8). Got: {text!r}"
     )
+
+
+# ============================================================================
+# Contract test: парсинг реального Telegram Update с forwarded video_note через
+# aiogram.Update.model_validate(...). Закрепляет контракт с aiogram/Telegram:
+# в aiogram 3.30 forward_date НЕ сигнализирует о пересылке (None), а
+# forward_origin — правильный атрибут. Без этого теста регрессия возможна
+# если aiogram снова сменит схему полей.
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_prefilter_forwarded_via_real_parsed_update() -> None:
+    """Реально распарсенный Update с forward_origin → REJECT_FORWARDED.
+
+    Парсим настоящий Telegram Update dict через aiogram.Update.model_validate
+    (как Bot делает это в проде), проверяем что Message.forward_origin
+    правильно десериализуется и bot prefilter ловит форвард.
+    """
+    from aiogram.types import Update
+
+    update_dict = {
+        "update_id": 99999,
+        "message": {
+            "message_id": 42,
+            "date": 1700000000,
+            "chat": {"id": -1004467477629, "type": "supergroup", "title": "Club"},
+            "from": {
+                "id": 7295309649,
+                "is_bot": False,
+                "first_name": "Alice",
+            },
+            "message_thread_id": 12,
+            "forward_origin": {
+                "type": "user",
+                "date": 1699999999,
+                "sender_user": {
+                    "id": 222222,
+                    "is_bot": False,
+                    "first_name": "Bob",
+                },
+                "message_id": 99,
+            },
+            "video_note": {
+                "duration": 5,
+                "length": 240,
+                "file_id": "DQACAgIAAxkBAA",
+                "file_unique_id": "AgAD",
+                "file_size": 12345,
+            },
+        },
+    }
+
+    msg = Update.model_validate(update_dict).message
+    # Sanity: forward_date в aiogram 3.30 ВСЕГДА None для современных форвардов
+    # (если это изменится — наш fix перестанет работать, тест поймает регрессию).
+    assert msg.forward_date is None, (
+        f"forward_date должно быть None в aiogram 3.30 для современных форвардов, "
+        f"got {msg.forward_date!r}. Возможно aiogram обновил схему — проверьте "
+        f"использование forward_origin в checkin.py."
+    )
+    # forward_origin — реальный MessageOriginUser (не None).
+    assert msg.forward_origin is not None
+    assert msg.forward_origin.__class__.__name__ == "MessageOriginUser"
+
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот должен ответить REJECT_FORWARDED, не пропускать к backend.
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "пересланные видео" in text.lower(), (
+        f"Expected REJECT_FORWARDED для forward_origin=MessageOriginUser, got: {text!r}"
+    )
+    assert len(backend.calls) == 0, (
+        f"backend.post не должен вызываться для forwarded, got: {backend.calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_not_forwarded_via_real_parsed_update() -> None:
+    """Реально распарсенный Update БЕЗ forward_origin → prefilter пропускает."""
+    from aiogram.types import Update
+
+    update_dict = {
+        "update_id": 100000,
+        "message": {
+            "message_id": 43,
+            "date": 1700000000,
+            "chat": {"id": -1004467477629, "type": "supergroup", "title": "Club"},
+            "from": {
+                "id": 7295309649,
+                "is_bot": False,
+                "first_name": "Alice",
+            },
+            "message_thread_id": 12,
+            # БЕЗ forward_origin — это оригинальное видео.
+            "video_note": {
+                "duration": 5,
+                "length": 240,
+                "file_id": "DQACAgIAAxkBAA",
+                "file_unique_id": "AgAD",
+                "file_size": 12345,
+            },
+        },
+    }
+
+    msg = Update.model_validate(update_dict).message
+    # Sanity: forward_origin должен быть None для оригинала.
+    assert msg.forward_origin is None
+
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот НЕ должен отклонить как forwarded — идём к backend.
+    assert len(backend.calls) == 1
+    assert "Принято" in bot.sent[0]["text"]
