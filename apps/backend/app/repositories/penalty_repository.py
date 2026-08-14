@@ -102,3 +102,25 @@ class PenaltyRepository:
             membership_ids=[membership_id],
             club_date=club_date,
         )
+
+    async def amount_for_today(
+        self,
+        *,
+        membership_id: str,
+        club_date,
+    ) -> int:
+        """Сумма penalty за club_date для одного membership (в копейках).
+
+        Pravki-paused-window-open-2026-08-14: для TodayResponse — нужно
+        отличить "пропуск + штраф списан" от "пропуск без штрафа"
+        (когда apply_window_expired вернул None из-за deposit=0).
+        Возвращает 0 если штрафа нет. Использует один SQL-запрос с
+        COALESCE(SUM, 0).
+        """
+        result = await self._session.execute(
+            select(func.coalesce(func.sum(Penalty.amount), 0)).where(
+                Penalty.membership_id == membership_id,
+                Penalty.date == club_date,
+            )
+        )
+        return int(result.scalar_one())

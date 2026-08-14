@@ -81,6 +81,15 @@ export interface CheckinStatusOut {
   streak_days: number;
   penalties_count: number;
   penalties_total: number;
+  /**
+   * Pravki-paused-window-open-2026-08-14: сумма штрафа за сегодня (в копейках).
+   * 0 если штрафа сегодня не было. Используется в TodayPage для условного
+   * рендера: при status="missed" текст «Штраф списан в фонд» показывается
+   * ТОЛЬКО если penalty_for_today_kopecks > 0. Без этого поля UI показывал
+   * "Штраф уже списан" для ЛЮБОГО missed (включая случай deposit=0 когда
+   * apply_window_expired возвращает None без создания Penalty).
+   */
+  penalty_for_today_kopecks: number;
   deadline_at: string | null;
 }
 

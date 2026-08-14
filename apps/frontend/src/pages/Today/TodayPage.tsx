@@ -402,9 +402,21 @@ export function TodayPage() {
       {checkin.status === "missed" && (
         <section className="mt-4 rounded-card border border-danger/30 bg-danger/10 p-4 text-sm">
           <strong className="block text-danger">Сегодня пропуск.</strong>
-          <span className="text-muted">
-            Штраф уже списан в призовой фонд клуба.
-          </span>
+          {/* Pravki-paused-window-open-2026-08-14: текст о штрафе показывается
+              только если penalty_for_today_kopecks > 0. До этого поля UI
+              показывал "Штраф уже списан в призовой фонд" для ЛЮБОГО missed,
+              что было ложью — apply_window_expired при balance=0 возвращает
+              None без создания Penalty (см. apps/backend/app/services/
+              penalty_service.py:apply_window_expired, строки ~254-258). */}
+          {checkin.penalty_for_today_kopecks > 0 ? (
+            <span className="text-muted">
+              Штраф {formatKopecks(checkin.penalty_for_today_kopecks)} списан в призовой фонд клуба.
+            </span>
+          ) : (
+            <span className="text-muted">
+              Пропуск сегодня. Штраф не списан — депозит пуст, ловить некому.
+            </span>
+          )}
         </section>
       )}
 

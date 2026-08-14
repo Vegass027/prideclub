@@ -124,6 +124,9 @@ async def today(
             streak_days=stats.streak_days,
             penalties_count=stats.penalties_count,
             penalties_total=stats.penalties_total,
+            # Pravki-paused-window-open-2026-08-14: прокидываем сумму штрафа
+            # за сегодня для условного рендера "штраф списан" в TodayPage.
+            penalty_for_today_kopecks=stats.penalty_for_today_kopecks,
             deadline_at=None,
         ),
     )

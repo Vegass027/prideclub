@@ -78,6 +78,7 @@ const TODAY_OK: TodayResponse = {
     streak_days: 0,
     penalties_count: 0,
     penalties_total: 0,
+    penalty_for_today_kopecks: 0,
     deadline_at: null,
   },
 };
@@ -242,6 +243,75 @@ describe("TodayPage — warning-блок при недостаточном де�
     // No "💰 Пополнить депозит" button (только когда can_checkin=false).
     expect(
       screen.queryByRole("button", { name: /Пополнить депозит/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// =============================================================================
+// Pravki-paused-window-open-2026-08-14: фикс лжи в TodayPage
+// («Штраф уже списан» для ЛЮБОГО missed). Условный рендер:
+//   - missed + penalty_for_today_kopecks > 0 → "Штраф N списан в фонд"
+//   - missed + penalty_for_today_kopecks == 0 → "Пропуск сегодня. Штраф не списан"
+// =============================================================================
+describe("TodayPage — условный текст про штраф при missed (2026-08-14)", () => {
+  const makeTodayMissed = (
+    penalty_for_today_kopecks: number,
+  ): TodayResponse => ({
+    ...TODAY_OK,
+    checkin: {
+      status: "missed",
+      checkin_count: 0,
+      streak_days: 0,
+      penalties_count: penalty_for_today_kopecks > 0 ? 1 : 0,
+      penalties_total: penalty_for_today_kopecks,
+      penalty_for_today_kopecks,
+      deadline_at: null,
+    },
+  });
+
+  it("missed + penalty_for_today_kopecks > 0 → текст 'Штраф N списан в фонд'", async () => {
+    mockWalletGet.mockResolvedValue(WALLET_OK);
+    mockTodayGet.mockResolvedValue(makeTodayMissed(25_000)); // 250₽
+
+    renderWithProviders(<TodayPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Планка/)).toBeInTheDocument();
+    });
+
+    // Заголовок «Сегодня пропуск» показывается в обоих кейсах.
+    expect(screen.getByText(/Сегодня пропуск/i)).toBeInTheDocument();
+    // Сумма штрафа в ₽ — formatKopecks форматирует Intl.NumberFormat ru-RU,
+    // ожидаем "250 ₽" (с тонким пробелом U+202F между числом и валютой).
+    // Используем regex: "250" + "списан" могут быть в разных span'ах,
+    // но они в одном parent <section>.
+    const sectionsWithMissed = screen.getAllByText(/Сегодня пропуск/i);
+    const parentSection = sectionsWithMissed[0].closest("section") as HTMLElement | null;
+    expect(parentSection).not.toBeNull();
+    expect(parentSection!.textContent).toMatch(/250/);
+    expect(parentSection!.textContent).toMatch(/списан в призовой фонд клуба/);
+    // НЕ должно быть "штраф не списан" при penalty > 0.
+    expect(
+      screen.queryByText(/Штраф не списан/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("missed + penalty_for_today_kopecks == 0 → текст 'Пропуск сегодня. Штраф не списан'", async () => {
+    mockWalletGet.mockResolvedValue(WALLET_OK);
+    mockTodayGet.mockResolvedValue(makeTodayMissed(0));
+
+    renderWithProviders(<TodayPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Планка/)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/Сегодня пропуск/i)).toBeInTheDocument();
+    // Главный контракт: НЕ лжём про штраф.
+    expect(screen.getByText(/Штраф не списан/i)).toBeInTheDocument();
+    // Не должно быть "списан в призовой фонд" при penalty=0.
+    expect(
+      screen.queryByText(/списан в призовой фонд/i),
     ).not.toBeInTheDocument();
   });
 });

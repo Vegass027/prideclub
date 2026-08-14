@@ -50,6 +50,7 @@ class TodayStats:
     streak_days: int
     penalties_count: int
     penalties_total: int
+    penalty_for_today_kopecks: int = 0  # Pravki-paused-window-open-2026-08-14
 
 
 class CheckinService:
@@ -317,6 +318,12 @@ class CheckinService:
         penalties_count, penalties_total = await self._penalty_repo.totals_for_membership(
             str(membership.id), as_violator=True
         )
+        # Pravki-paused-window-open-2026-08-14: сумма штрафа за сегодня —
+        # для условного рендера в TodayPage ("штраф списан" только если
+        # реально был, иначе просто "пропуск сегодня").
+        penalty_for_today_kopecks = await self._penalty_repo.amount_for_today(
+            membership_id=str(membership.id), club_date=club_date
+        )
         streak = await self._compute_streak(membership.id, club_date)
         stats = TodayStats(
             status=status,
@@ -324,6 +331,7 @@ class CheckinService:
             streak_days=streak,
             penalties_count=penalties_count,
             penalties_total=penalties_total,
+            penalty_for_today_kopecks=penalty_for_today_kopecks,
         )
         return habit, membership, stats
 

@@ -488,6 +488,24 @@ class FakePenaltyRepo:
             club_date=club_date,
         )
 
+    async def amount_for_today(
+        self,
+        *,
+        membership_id: str,
+        club_date,
+    ) -> int:
+        """Сумма Penalty за club_date для одного membership.
+
+        Pravki-paused-window-open-2026-08-14: новый метод в PenaltyRepository,
+        нужен для условного рендера в TodayPage ("штраф списан" только
+        если penalty_for_today_kopecks > 0).
+        """
+        total = 0
+        for p in self._store.values():
+            if str(p.membership_id) == str(membership_id) and p.date == club_date:
+                total += int(p.amount)
+        return total
+
 
 class FakeBonusRuleRepo:
     """Замена BonusRuleRepository. Тест задаёт правила через `set(event, threshold, rule)`."""

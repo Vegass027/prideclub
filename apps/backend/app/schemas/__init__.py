@@ -160,6 +160,13 @@ class CheckinStatusOut(BaseModel):
     checkin_count — общее число done-чекинов за всё время (total).
     streak_days — consecutive (текущая серия подряд, обнуляется если
     сегодня не отмечен). penalties_count/total — антифрод-метрики.
+
+    penalty_for_today_kopecks: Pravki-paused-window-open-2026-08-14.
+    Сумма штрафа за сегодня (если был). Нужна, чтобы UI TodayPage мог
+    отличить "пропуск + штраф списан" от "пропуск, штраф не списан"
+    (deposit=0 → apply_window_expired возвращает None без создания
+    Penalty). До этого поля текст "Штраф уже списан в призовой фонд"
+    показывался для ЛЮБОГО missed, что было ложью.
     """
 
     status: str  # done | missed | pending | not_started
@@ -167,6 +174,7 @@ class CheckinStatusOut(BaseModel):
     streak_days: int
     penalties_count: int
     penalties_total: int  # в копейках
+    penalty_for_today_kopecks: int = 0  # 0 = штрафа сегодня не было
     deadline_at: datetime | None
 
 

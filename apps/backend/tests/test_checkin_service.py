@@ -10,6 +10,7 @@ from app.core.exceptions import (
     CheckinWindowClosedError,
 )
 from app.models.checkin import Checkin
+from app.models.penalty import Penalty
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage, ProofValidationError
 from tests.fakes import (
@@ -379,3 +380,106 @@ async def test_get_today_status_streak_zero_when_no_checkins() -> None:
     assert stats.penalties_total == 0
     # окно чек-ина [00:00, 23:59] в make_habit — открыто в 00:00 МСК
     assert stats.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_get_today_status_penalty_for_today_kopecks_zero_when_no_penalties() -> None:
+    """Pravki-paused-window-open-2026-08-14: `penalty_for_today_kopecks`
+    должен быть 0 если за club_date нет ни одного Penalty.
+
+    TodayPage использует это поле для условного рендера: если 0 и
+    status="missed" — показывает "штраф не списан, депозит пуст".
+    Без явного теста будущий рефакторинг `amount_for_today` может
+    сломать контракт (например, вернуть None вместо 0), и UI снова
+    начнёт врать.
+    """
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    _habit, _m, stats = await service.get_today_status(
+        user_id=1,
+        habit_id=str(habit.id),
+        now_utc=datetime.now(tz=UTC),
+    )
+    assert stats.penalty_for_today_kopecks == 0
+
+
+@pytest.mark.asyncio
+async def test_get_today_status_penalty_for_today_kopecks_reflects_today_penalties() -> None:
+    """Pravki-paused-window-open-2026-08-14: penalty за сегодня
+    (через apply_catch или apply_window_expired) корректно отражается
+    в `penalty_for_today_kopecks`. Пенальти за другие дни НЕ должны
+    попадать — поле строго за club_date.
+    """
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    session = FakeSession(checkin_repo)
+
+    # Penalty за club_date (попадает в today_penalty_for_kopecks)
+    penalty_repo.add(
+        Penalty(
+            id=str(uuid4()),
+            membership_id=str(m.id),
+            catcher_membership_id=None,
+            amount=12500,  # = 125₽
+            fund_share=12500,
+            catcher_bonus_points=0,
+            reason="caught",
+            date=date.today(),
+            bonus_applied=False,
+        )
+    )
+    # Penalty за ВЧЕРА (НЕ должно попадать)
+    from datetime import timedelta
+
+    yesterday = date.today() - timedelta(days=1)
+    penalty_repo.add(
+        Penalty(
+            id=str(uuid4()),
+            membership_id=str(m.id),
+            catcher_membership_id=None,
+            amount=99999,
+            fund_share=99999,
+            catcher_bonus_points=0,
+            reason="caught",
+            date=yesterday,
+            bonus_applied=False,
+        )
+    )
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    _habit, _m, stats = await service.get_today_status(
+        user_id=1,
+        habit_id=str(habit.id),
+        now_utc=datetime.now(tz=UTC),
+    )
+    assert stats.penalty_for_today_kopecks == 12500, (
+        f"Ожидали 12500 (только сегодняшний penalty), получили {stats.penalty_for_today_kopecks}. "
+        f"Старый penalty за вчера НЕ должен попадать."
+    )
