@@ -209,6 +209,188 @@ async def test_penalty_full_amount_to_fund() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_window_expired_writes_waived_marker_when_deposit_zero() -> None:
+    """Pravki-no-deposit-waived-marker (разведка 2026-08-16): при deposit=0
+    apply_window_expired пишет маркер Penalty(reason=WAIVED_NO_DEPOSIT,
+    amount=0) вместо silent return None.
+
+    Без этого маркера день остаётся «непомеченным» в БД → apply_catch
+    после topup юзера списывает деньги за уже прошедший день (финансовая
+    дыра: «человек в гневе, что развод»).
+
+    Контракт:
+    - Возвращает None (caller `close_catch_window` не уведомляет, в
+      `penalized` не инкрементирует — это не реальный штраф, а маркер).
+    - Создаёт ровно 1 Penalty с reason=WAIVED_NO_DEPOSIT, amount=0.
+    - НЕ создаёт Transaction (нет финансового события).
+    - НЕ вызывает recompute_pause_status (баланс не менялся).
+    - user.deposit_balance остаётся 0.
+    - habit.prize_pool остаётся 0.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit.penalty_amount = 1000  # больше deposit, чтобы amount <= 0
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
+
+    session = _NoStreakSession()
+    checkin_repo = FakeCheckinRepo()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    result = await service.apply_window_expired(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    # Возвращаем None — caller не должен уведомлять / инкрементить.
+    assert result is None
+
+    # Ровно 1 Penalty с правильными полями.
+    assert len(session.penalties) == 1, (
+        f"Ожидали 1 маркерную Penalty, получили {len(session.penalties)}"
+    )
+    waived = session.penalties[0]
+    assert waived.reason == PenaltyReason.WAIVED_NO_DEPOSIT
+    assert waived.amount == 0
+    assert waived.fund_share == 0
+    assert waived.catcher_membership_id is None
+    assert waived.catcher_bonus_points == 0
+    assert waived.bonus_applied is False
+    assert waived.membership_id == str(violator.id)
+    assert waived.date == date(2026, 1, 1)
+
+    # НИКАКИХ финансовых последствий.
+    assert session.transactions == [], (
+        "Transaction(amount=0) НЕ должен создаваться — это не финансовое событие"
+    )
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 0, (
+        "deposit не должен меняться в WAIVED-ветке"
+    )
+    habit_after = await habit_repo.get(str(habit.id))
+    assert habit_after is not None
+    assert habit_after.prize_pool == 0, (
+        "prize_pool не должен инкрементиться в WAIVED-ветке"
+    )
+
+
+class _SessionWithExistingPenaltyCheck(_NoStreakSession):
+    """Fake-сессия: execute() возвращает ранее добавленные Penalty.
+
+    Нужна для теста идемпотентности apply_window_expired. Без этого
+    _NoStreakSession.execute() всегда возвращает пустой результат →
+    existing-check проходит → второй вызов создал бы дубль WAIVED.
+    В реальной Postgres дубль блокируется UNIQUE-индексом
+    uq_penalty_per_day_reason, но fake-сессия его не симулирует —
+    отсюда необходимость в этом хелпере.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._existing_penalties: list[Penalty] = []
+
+    def add(self, obj: Any) -> None:
+        super().add(obj)
+        if isinstance(obj, Penalty):
+            self._existing_penalties.append(obj)
+
+    async def execute(self, stmt: Any) -> Any:
+        # existing-check в apply_window_expired (lines 244-252) делает
+        # SELECT из penalties — возвращаем последнюю добавленную как
+        # «найденную существующую». В реальной БД это была бы та же
+        # строка из предыдущей транзакции.
+        existing = (
+            self._existing_penalties[-1] if self._existing_penalties else None
+        )
+
+        class _Result:
+            def first(self_inner) -> Any:
+                return existing
+
+            def all(self_inner) -> list:
+                return list(self._existing_penalties)
+
+        return _Result()
+
+
+@pytest.mark.asyncio
+async def test_apply_window_expired_idempotent_after_waived_marker() -> None:
+    """Идемпотентность: второй вызов apply_window_expired для того же
+    (membership, date) при deposit=0 НЕ создаёт дубль маркера.
+
+    Сценарий из прод-реальности: cron `close_catch_window` запускается
+    ежечасно (:05) и вызывает apply_window_expired для каждого активного
+    member'а без чек-ина. Если по любой причине вызов повторился в
+    течение часа (retry, несколько воркеров, ручной restart) — второй
+    вызов должен быть no-op, иначе получим 2 WAIVED-записи и
+    PenaltyAlreadyProcessedError в apply_catch из-за UNIQUE-конфликта.
+
+    Контракт:
+    - Оба вызова возвращают None.
+    - Ровно 1 Penalty в session (не 2).
+    - 0 Transactions (no-op).
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit.penalty_amount = 1000
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
+
+    session = _SessionWithExistingPenaltyCheck()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    # Первый вызов — создаёт маркер.
+    result1 = await service.apply_window_expired(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+    assert result1 is None
+    assert len(session.penalties) == 1
+    assert session.penalties[0].reason == PenaltyReason.WAIVED_NO_DEPOSIT
+
+    # Второй вызов — existing-check ловит маркер из первого вызова
+    # через _SessionWithExistingPenaltyCheck.execute() → return None
+    # ДО ветки amount <= 0. Никакого дубля.
+    result2 = await service.apply_window_expired(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+    assert result2 is None
+    assert len(session.penalties) == 1, (
+        f"Идемпотентность нарушена: ожидали 1 WAIVED-маркер, "
+        f"получили {len(session.penalties)} дублей"
+    )
+    assert session.transactions == []
+
+
+@pytest.mark.asyncio
 async def test_apply_catch_rereads_violator_status_after_user_lock() -> None:
     """Pravki-paused-race-2026-08-14: defense-in-depth против race-окна.
 

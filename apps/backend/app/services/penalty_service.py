@@ -253,8 +253,44 @@ class PenaltyService:
 
         amount = min(habit.penalty_amount, violator_user.deposit_balance)
         if amount <= 0:
-            # Депозит исчерпан. Статус пересчитается в recompute ниже.
-            # Без построчного `status = PAUSED` (Pravki правка B).
+            # Pravki-no-deposit-waived-marker (разведка 2026-08-16): депозит
+            # пуст — списывать нечего. Пишем маркер WAIVED_NO_DEPOSIT (amount=0),
+            # чтобы день был помечен в БД как «уже разрешённый». Без этого
+            # apply_catch после topup юзера успешно списывал бы деньги за уже
+            # прошедший день → финансовая дыра.
+            #
+            # Маркер НЕ финансовое событие, поэтому:
+            #   - Checkin НЕ пишем (юзер не «пропустил», у него просто не было денег)
+            #   - Transaction НЕ создаём (amount=0 не двигает баланс)
+            #   - recompute_pause_status НЕ вызываем (balance не менялся,
+            #     статус и так консистентен)
+            # existing-check выше (строки 244-252) ловит дубль при повторном
+            # запуске cron'а для того же (membership, date) → INSERT с теми же
+            # (membership_id, date, reason) даст UNIQUE-конфликт в проде,
+            # а fake-сессия в тестах увидит существующую запись через execute().
+            waived = Penalty(
+                id=str(uuid4()),
+                membership_id=violator_membership_id,
+                catcher_membership_id=None,
+                amount=0,
+                fund_share=0,
+                catcher_bonus_points=0,
+                reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+                date=club_date,
+                bonus_applied=False,
+            )
+            self._session.add(waived)
+            await self._session.flush()
+            self._logger.info(
+                "penalty_window_expired_waived",
+                extra={
+                    "violator_membership_id": violator_membership_id,
+                    "amount": 0,
+                    "habit_id": str(habit.id),
+                    "club_date": str(club_date),
+                    "user_deposit_at_close": violator_user.deposit_balance,
+                },
+            )
             return None
 
         violator_user.deposit_balance -= amount
