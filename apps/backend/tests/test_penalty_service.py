@@ -390,6 +390,332 @@ async def test_apply_window_expired_idempotent_after_waived_marker() -> None:
     assert session.transactions == []
 
 
+class _SessionWithDateFilteredExistingCheck(_NoStreakSession):
+    """Fake session: execute() возвращает Penalty, совпадающую по дате из WHERE.
+
+    Расширение _SessionWithExistingPenaltyCheck: при наличии нескольких
+    Penalty в `_existing_penalties` возвращает только ту, чей `date` равен
+    значению из `Penalty.date == X` в WHERE clause. Это имитирует реальный
+    SELECT, который фильтрует по дате.
+
+    Нужно для теста apply_catch с WAIVED за ВЧЕРА + catch за СЕГОДНЯ:
+    вчерашний маркер не должен ловить сегодняшний запрос.
+
+    Также корректно обрабатывает JOIN-запрос MembershipService.recompute_pause_status
+    (select(Membership, Habit.penalty_amount).join(...)) — для таких запросов
+    возвращает пустой результат, как и _NoStreakSession (recompute в тестах
+    без надобности, реальная логика покрыта интеграционными тестами).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._existing_penalties: list[Penalty] = []
+
+    def add(self, obj: Any) -> None:
+        super().add(obj)
+        if isinstance(obj, Penalty):
+            self._existing_penalties.append(obj)
+
+    async def execute(self, stmt: Any) -> Any:
+        # Различаем тип запроса по froms: SELECT из penalties → existing-check,
+        # JOIN Membership+Habit → recompute_pause_status (пустой результат).
+        is_penalty_query = False
+        try:
+            for f in stmt.get_final_froms():
+                if getattr(f, "name", None) == "penalties":
+                    is_penalty_query = True
+                    break
+        except Exception:
+            is_penalty_query = False
+
+        if not is_penalty_query:
+            # JOIN или другой запрос — пустой результат.
+            class _Result:
+                def first(self_inner) -> Any:
+                    return None
+
+                def all(self_inner) -> list:
+                    return []
+
+            return _Result()
+
+        # Извлекаем target_date из WHERE clause (Penalty.date == X).
+        target_date = None
+        whereclause = getattr(stmt, "whereclause", None)
+        if whereclause is not None and hasattr(whereclause, "get_children"):
+            for child in whereclause.get_children():
+                left = getattr(child, "left", None)
+                if getattr(left, "name", None) == "date":
+                    target_date = child.right.value
+                    break
+
+        if target_date is not None:
+            matching = [p for p in self._existing_penalties if p.date == target_date]
+        else:
+            matching = list(self._existing_penalties)
+
+        existing = matching[0] if matching else None
+
+        class _Result:
+            def first(self_inner) -> Any:
+                return existing
+
+            def all(self_inner) -> list:
+                return matching
+
+        return _Result()
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejected_when_waived_marker_exists() -> None:
+    """WAIVED_NO_DEPOSIT за club_date → apply_catch отвергается.
+
+    Сценарий из разведки 2026-08-16: после того как apply_window_expired
+    создал WAIVED-маркер (юзер не мог платить), юзер топит депозит.
+    Другой участник пытается поймать его за тот же день → должен быть
+    reject, иначе деньги списываются повторно (финансовая дыра).
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))  # юзер уже пополнил
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Имитируем, что apply_window_expired ранее создал WAIVED за сегодня.
+    waived = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=None,
+        amount=0,
+        fund_share=0,
+        catcher_bonus_points=0,
+        reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+        date=date(2026, 1, 1),
+        bonus_applied=False,
+    )
+    session.add(waived)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    with pytest.raises(PenaltyAlreadyProcessedError) as exc_info:
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 1, 1),
+            catcher_membership_id=str(uuid4()),
+        )
+
+    # Код ошибки — единый для всех reason'ов (см. Q2 в Pravki-no-deposit-waived-marker.md).
+    assert exc_info.value.code == "penalty_already_processed", (
+        f"Ожидали penalty_already_processed, получили {exc_info.value.code}"
+    )
+
+    # Никаких новых Penalty не создалось.
+    assert len(session.penalties) == 1, (
+        f"Должна быть только WAIVED, получили {len(session.penalties)}"
+    )
+    # Баланс жертвы не тронут.
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500, "deposit не должен меняться"
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejected_when_window_closed_penalty_exists() -> None:
+    """Бонус-закрытие дыры: WINDOW_CLOSED_NO_CATCH за club_date →
+    apply_catch отвергается.
+
+    До расширения идемпотентности фильтр `reason == CAUGHT` пропускал
+    этот случай (reason отличался), и UNIQUE-индекс uq_penalty_per_day_reason
+    тоже не срабатывал. Прямой POST /catch в обход UI can_catch=False
+    списывал штраф дважды.
+
+    UI уже блокирует через can_catch=False (penalty_set содержит WINDOW_CLOSED),
+    но defense-in-depth на уровне сервиса обязателен.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Имитируем, что cron close_catch_window ранее создал WINDOW_CLOSED_NO_CATCH.
+    window_penalty = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=None,
+        amount=habit.penalty_amount,
+        fund_share=habit.penalty_amount,
+        catcher_bonus_points=0,
+        reason=PenaltyReason.WINDOW_CLOSED_NO_CATCH,
+        date=date(2026, 1, 1),
+        bonus_applied=False,
+    )
+    session.add(window_penalty)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    with pytest.raises(PenaltyAlreadyProcessedError) as exc_info:
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 1, 1),
+            catcher_membership_id=str(uuid4()),
+        )
+
+    assert exc_info.value.code == "penalty_already_processed"
+
+    # Никаких новых Penalty — только существующая WINDOW_CLOSED_NO_CATCH.
+    assert len(session.penalties) == 1
+    assert session.penalties[0].reason == PenaltyReason.WINDOW_CLOSED_NO_CATCH
+    # Баланс жертвы не тронут (это и есть закрытие дыры — без reject'а
+    # deposit ушёл бы на -penalty).
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejected_when_existing_caught_penalty() -> None:
+    """Регрессия: повторный catch поверх существующего CAUGHT → reject.
+
+    Это было защищено раньше явным фильтром `reason == CAUGHT`, теперь
+    покрывается общим условием (любая Penalty за день). Проверяем что
+    старое поведение сохранено.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Имитируем, что первый catch ранее успешно создал CAUGHT.
+    existing_caught = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=str(uuid4()),
+        amount=habit.penalty_amount,
+        fund_share=habit.penalty_amount,
+        catcher_bonus_points=1,
+        reason=PenaltyReason.CAUGHT,
+        date=date(2026, 1, 1),
+        bonus_applied=False,
+    )
+    session.add(existing_caught)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    with pytest.raises(PenaltyAlreadyProcessedError):
+        await service.apply_catch(
+            catcher_user_id=3,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 1, 1),
+            catcher_membership_id=str(uuid4()),
+        )
+
+    # Никаких новых Penalty, баланс не тронут.
+    assert len(session.penalties) == 1
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_succeeds_for_other_date_when_waived_marker_for_previous_day() -> None:
+    """WAIVED за ВЧЕРА + catch за СЕГОДНЯ → catch УСПЕШЕН.
+
+    Проверяет, что расширение идемпотентности не делает over-reject:
+    каждый клуб-день независим. Маркер за вчерашний день НЕ должен
+    блокировать catch за сегодня.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Имитируем, что вчера apply_window_expired создал WAIVED.
+    yesterday_waived = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=None,
+        amount=0,
+        fund_share=0,
+        catcher_bonus_points=0,
+        reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+        date=date(2026, 1, 1),  # вчера
+        bonus_applied=False,
+    )
+    session.add(yesterday_waived)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    # Catch за СЕГОДНЯ (другой день) — должен пройти.
+    penalty = await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 2),  # сегодня
+        catcher_membership_id=str(uuid4()),
+    )
+
+    assert penalty.reason == PenaltyReason.CAUGHT
+    assert penalty.amount == habit.penalty_amount
+    # Теперь 2 Penalty: вчерашний WAIVED + сегодняшний CAUGHT.
+    assert len(session.penalties) == 2
+    # Баланс списан за сегодняшний catch.
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500 - habit.penalty_amount
+
+
 @pytest.mark.asyncio
 async def test_apply_catch_rereads_violator_status_after_user_lock() -> None:
     """Pravki-paused-race-2026-08-14: defense-in-depth против race-окна.

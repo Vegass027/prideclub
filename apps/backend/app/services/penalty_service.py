@@ -128,12 +128,28 @@ class PenaltyService:
         if habit is None:
             raise HabitNotFoundError()
 
-        # Идемпотентность: уникальный ключ (membership_id, date, reason).
+        # Идемпотентность: если за день есть ЛЮБАЯ Penalty
+        # (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_NO_DEPOSIT) —
+        # повторный catch для того же дня отвергается.
+        #
+        # Это закрывает несколько дыр (Pravki-no-deposit-waived-marker,
+        # разведка 2026-08-16):
+        # 1) После WAIVED_NO_DEPOSIT (см. apply_window_expired WAIVED-ветка)
+        #    юзер топит депозит → apply_catch должен отвергаться, иначе
+        #    списываются деньги за уже прошедший день.
+        # 2) Бонус — прямой POST /catch поверх существующего
+        #    WINDOW_CLOSED_NO_CATCH теперь корректно отвергается.
+        #    Раньше фильтр `reason == CAUGHT` пропускал, и UNIQUE-индекс
+        #    uq_penalty_per_day_reason тоже не срабатывал (reason
+        #    отличался). Это позволяло обойти can_catch=False через прямой
+        #    запрос в обход UI и списать штраф дважды.
+        # 3) Регрессия — повторный catch поверх существующего CAUGHT.
+        #    Это было защищено раньше явно через reason-фильтр, теперь
+        #    покрывается общим условием.
         existing = await self._session.execute(
             Penalty.__table__.select().where(
                 Penalty.membership_id == violator_membership_id,
                 Penalty.date == club_date,
-                Penalty.reason == PenaltyReason.CAUGHT.value,
             )
         )
         if existing.first() is not None:
