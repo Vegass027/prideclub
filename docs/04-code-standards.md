@@ -647,6 +647,42 @@ cap. 11 vitest unit покрывают reconnect-логику.
 конструктор, в тестах — моки. Не создавать engine/session pool внутри handler'ов,
 не создавать EventSource внутри хука — выносить в controller.
 
+### Идемпотентность штрафов (Pravki-no-deposit-waived-marker, разведка 2026-08-16)
+
+> Реализовано в `apps/backend/app/services/penalty_service.py` (PR #1 §Z-21 +
+> коммиты `5bfeec7` + `241115f`).
+
+**`apply_window_expired`** при `deposit == 0` пишет **маркерную запись**
+`Penalty(reason=WAIVED_NO_DEPOSIT, amount=0)` вместо silent `return None`.
+Без маркера день остаётся «непомеченным» в БД → после topup юзера другой
+участник может успешно его поймать (см. `Pravki-no-deposit-waived-marker.md` —
+«человек в гневе уходит»).
+
+**Маркер — не финансовое событие:**
+- `Checkin` НЕ пишется (юзер не «пропустил», у него просто не было денег).
+- `Transaction` НЕ создаётся (`amount=0` не двигает баланс).
+- `recompute_pause_status` НЕ вызывается (баланс не менялся).
+- `apply_window_expired` возвращает `None` — caller (`close_catch_window`)
+  НЕ уведомляет и НЕ инкрементит `penalized`.
+
+**`apply_catch` idempotency** — если за `(membership_id, date)` есть **ЛЮБАЯ**
+Penalty (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_NO_DEPOSIT), повторный catch
+отвергается как `PenaltyAlreadyProcessedError(code="penalty_already_processed")`.
+Фильтр `reason == CAUGHT` убран — это закрывает 3 дыры (см. commit `241115f`):
+1. PRIMARY — после WAIVED за день catch отвергается.
+2. BONUS — прямой POST /catch поверх WINDOW_CLOSED_NO_CATCH (UNIQUE-индекс
+   `uq_penalty_per_day_reason` не срабатывал, потому что reason отличался).
+4. REGRESSION — повторный catch поверх CAUGHT (был защищён reason-фильтром).
+
+Каждый клуб-день независим: WAIVED за вчера НЕ блокирует catch за сегодня.
+
+**Правило для будущих разработчиков:**
+> Если ты добавляешь новый reason в `PenaltyReason` enum — идемпотентность
+> `apply_catch` уже покрывает его автоматически (общий фильтр по любой
+> Penalty за день). Никаких изменений в `apply_catch` не нужно.
+> Маркер для нового reason (если требуется) пишется в `apply_window_expired`
+> аналогично WAIVED-ветке.
+
 ### Транзакции и сессии
 - Одна транзакция = один handler/middleware.
 - Сервисы принимают `AsyncSession` как аргумент, **не управляют commit/rollback**.
