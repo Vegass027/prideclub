@@ -108,12 +108,50 @@ if existing.first() is not None:
 
 ### Результаты прогона
 
-| Слой | Baseline (pre-#1) | После #4 (HEAD `4dc2b08`) |
-|---|---|---|
-| `apps/backend/tests/test_penalty_service.py` | 6 passed | **12 passed** (+6 новых) |
-| `apps/backend/tests` (полный) | 393 passed, 16 failed (pre-existing admin/photo) | **399 passed, 16 failed** (+6, baseline unchanged) |
-| `apps/worker/tests/test_close_catch_window.py` | 4 failed (pre-existing test-infra) | **4 failed** (unchanged) |
-| `apps/worker/tests` (полный) | 9 failed, 77 passed (pre-existing) | **9 failed, 77 passed** (unchanged) |
+| Слой | Baseline (pre-#1) | После #4 (HEAD `4dc2b08`) | После commit A (HEAD `fffa7c4`, финал PR) |
+|---|---|---|---|
+| `apps/backend/tests/test_penalty_service.py` | 6 passed | **12 passed** (+6) | **17 passed** (+5 новых для `mark_waived_unable_to_pay`) |
+| `apps/backend/tests` (полный) | 393 passed, 16 failed | **399 passed**, 16 failed | **404 passed**, 16 failed (+11 = +5 коммит A + 6 time-sensitive flaky теперь passed потому что время после 09:00 UTC) |
+| `apps/worker/tests/test_close_catch_window.py` | 4 failed (pre-existing) | 4 failed (unchanged) | **4 failed** (unchanged) |
+| `apps/worker/tests` (полный) | 9 failed, 77 passed | 9 failed, 77 passed | **9 failed, 77 passed** (unchanged) |
+
+## Production state (snapshot 2026-08-17, HEAD `fffa7c4`)
+
+**На проде развёрнуты все 5 функциональных коммитов + chore:**
+
+- `3796531` (feat/constants) — добавлен `PenaltyReason.WAIVED_NO_DEPOSIT` (переименован в #A)
+- `5bfeec7` (feat/penalty) — `apply_window_expired` пишет WAIVED для ACTIVE+deposit=0
+- `241115f` (feat/penalty) — `apply_catch` idempotency на все reason'ы (бонус: закрыта дыра WINDOW_CLOSED_NO_CATCH+catch)
+- `4dc2b08` (refactor/worker) — удалён мёртвый дубль в `close_catch_window`
+- `9c32d6f` (feat/penalty) — **основное закрытие дыры**: rename enum + `mark_waived_unable_to_pay` для PAUSED + интеграция в cron + счётчик `waived`
+- `9fe3fbc` (docs) — синхронизация документов с фактическим состоянием
+- `fffa7c4` (chore/e2e) — удаление одноразового E2E-скрипта после успешного прогона на Софье
+
+**E2E на реальных данных Софьи (id=5361424459) — PASSED:**
+- Софья PAUSED, deposit=0 → cron → 2 WAIVED маркера создано (клубы с закрытым окном; третий клуб 'Чтение' был `skipped: window_open` — by design)
+- 0 Transaction с amount=0 за тот же интервал
+- Topup (0→25000), ACTIVE → catch за этот день → `PenaltyAlreadyProcessedError(code=penalty_already_processed)`
+- Депозит не списан (остался 25000) — дыра закрыта
+
+### Rollback (точка отката)
+
+**Безопасный откат — на `eaffd9d`** (pre-PR, до `3796531`):
+
+```bash
+git -c user.name=Vegass -c user.email=dmitriy@vegass.dev reset --hard eaffd9d
+# Затем повторить шаги deploy: rsync + build backend/worker --no-cache + up -d.
+# ⚠️ ВАЖНО: после отката старая `apply_catch` снова имеет PRIMARY дыру
+# (фильтр reason == CAUGHT, маркеры в БД больше не пишутся). Дыра
+# возвращается — задокументированный trade-off отката.
+```
+
+**Частичных откатов НЕТ** (см. анализ в чате 2026-08-17). Промежуточные состояния:
+- `3796531` (только enum value, без логики) — бессмысленно
+- `3796531`+`5bfeec7` (ACTIVE+deposit=0 path) — ХУДШЕЕ: маркеры пишутся, но apply_catch их не видит (PRIMARY дыра ОТКРЫТА хуже чем было)
+- `241115f` (расширенная idempotency) — runtime-safe, PRIMARY дыра всё ещё открыта
+- `4dc2b08` (refactor) — runtime-safe, PRIMARY дыра открыта
+
+Только `eaffd9d` (полный pre-PR) или `fffa7c4` (финал PR) — безопасные состояния.
 
 ## Production verify (после деплоя)
 
