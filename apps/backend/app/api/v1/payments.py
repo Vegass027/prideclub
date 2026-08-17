@@ -119,7 +119,10 @@ async def subscribe(
     Безопасность:
     - TelegramUserDbDep: initData проверен middleware; user.id — авторитетный.
     - subscription_accepted: server-side gate (см. §Z-13.1 матрица).
-    - deposit_amount_kopecks: gt=0 (Pydantic), le=10M (cap 100k ₽).
+    - deposit_amount_kopecks: ge=0 (Pydantic), le=10M (cap 100k ₽).
+      Pravki-subscription-2026-08-17: допускается 0 в кейсе 3a (подписка истекла)
+      если user.deposit_balance >= habit.penalty_amount — backend списывает
+      только price_month, депозит не трогается (smart renew).
     - idempotency_key: min_length=8, max_length=128 (защита от пустых/огромных строк).
     - MembershipService.subscribe_and_join: SELECT FOR UPDATE на user
       сериализует параллельные subscribe/topup этого юзера.

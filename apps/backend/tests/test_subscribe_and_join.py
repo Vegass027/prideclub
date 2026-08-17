@@ -1596,3 +1596,301 @@ async def test_subscribe_without_subscription_fee_creates_single_deposit_topup()
     assert len(session.transactions) == 1
     # Баланс не изменился (не списали повторно).
     assert user_repo._store[1].deposit_balance == 1_000_00  # остался 500+500
+
+
+# ---------------------------------------------------------------------------
+# Pravki-subscription-2026-08-17 §Z-13.5: smart renew
+# ---------------------------------------------------------------------------
+#
+# Семантика: если у юзера на deposit_balance уже достаточно для штрафа
+# (user.deposit_balance >= habit.penalty_amount), при продлении подписки
+# (кейс 3a, charged_subscription=True) backend допускает deposit_amount_kopecks=0.
+# Списывается ТОЛЬКО price_month, deposit_balance не трогается.
+#
+# Кейс 3b (активная подписка) с deposit_amount_kopecks=0 — отвергается
+# (нечего топить, InsufficientDepositChoiceError). Smart renew — только
+# для case 3a.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribe_smart_renew_charges_only_subscription_when_deposit_sufficient() -> None:
+    """Pravki-subscription-2026-08-17: deposit=1000₽ >= penalty=500₽ + pay_deposit=0
+    → charged только подписка, deposit_balance не изменился, dep_tx.amount=0.
+
+    Сценарий: PAUSED membership с истёкшей подпиской, deposit уже достаточный.
+    Юзер продлевает подписку — backend НЕ требует пополнения депозита заново.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=1_000_00)  # 1000₽ на счету
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() - timedelta(days=1)  # вчера — истекла
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    m, tx, charged = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=0,    # ← smart renew: 0
+        subscription_accepted=True,
+        idempotency_key="smart-renew-1",
+    )
+
+    # Membership реактивирована, subscription_until обновлена.
+    assert m.status == MembershipStatus.ACTIVE
+    assert m.subscription_until == date.today() + timedelta(days=30)
+
+    # charged=True — подписку списали.
+    assert charged is True
+
+    # User.deposit_balance НЕ изменился (1000₽).
+    assert user_repo._store[1].deposit_balance == 1_000_00
+
+    # dep_tx существует для idempotency, amount=0.
+    dep_tx = session.transactions_by_key["subscribe:smart-renew-1:dep"]
+    assert dep_tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert dep_tx.amount == 0
+    assert dep_tx.balance_after == 1_000_00  # депозит не двигался
+
+    # sub_tx: списываем ТОЛЬКО price_month, dep_tx без денег.
+    sub_tx = session.transactions_by_key["subscribe:smart-renew-1:sub"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
+    assert sub_tx.amount == 1_000_00
+    assert sub_tx.balance_after == 1_000_00  # депозит не менялся
+
+    # Обе транзакции указывают на ту же membership.
+    assert dep_tx.related_membership_id == m.id
+    assert sub_tx.related_membership_id == m.id
+
+
+@pytest.mark.asyncio
+async def test_subscribe_smart_renew_rejects_zero_when_deposit_insufficient() -> None:
+    """Pravki-subscription-2026-08-17: deposit=0 < penalty=500₽ + pay_deposit=0
+    → InsufficientDepositChoiceError (нельзя продлить без пополнения депозита).
+
+    Сценарий: юзер с истёкшей подпиской И пустым депозитом. Smart renew
+    здесь НЕ работает — backend требует deposit_amount_kopecks >= penalty.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=0)  # депозит пуст
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() - timedelta(days=1)  # истекла
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    with pytest.raises(InsufficientDepositChoiceError) as exc_info:
+        await service.subscribe_and_join(
+            user_id=1,
+            habit_id=str(habit.id),
+            deposit_amount_kopecks=0,    # ← smart renew НЕ работает: deposit < penalty
+            subscription_accepted=True,
+            idempotency_key="smart-renew-no-deposit-1",
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "insufficient_deposit_choice"
+    assert exc_info.value.extras == {
+        "required_kopecks": 500_00,
+        "chosen_kopecks": 0,
+    }
+    # Никаких транзакций не создано.
+    assert len(session.transactions) == 0
+
+
+@pytest.mark.asyncio
+async def test_subscribe_smart_renew_with_extra_topup() -> None:
+    """Pravki-subscription-2026-08-17: deposit=1000₽ >= penalty + pay_deposit=200₽
+    → charged только подписка, deposit_balance=1200₽ (было 1000 + добавили 200).
+
+    Сценарий: юзер с истёкшей подпиской И достаточным депозитом хочет ещё
+    немного пополнить. Smart renew позволяет: подписка списывается, extra topup
+    идёт на deposit_balance. Итоговый баланс = 1000 + 200 = 1200₽.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=1_000_00)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() - timedelta(days=1)
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    m, tx, charged = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=200_00,    # ← extra topup поверх существующего депозита
+        subscription_accepted=True,
+        idempotency_key="smart-renew-with-topup-1",
+    )
+
+    # Membership реактивирована.
+    assert m.status == MembershipStatus.ACTIVE
+    assert m.subscription_until == date.today() + timedelta(days=30)
+
+    # charged=True — подписку списали.
+    assert charged is True
+
+    # User.deposit_balance = 1000 + 200 = 1200₽.
+    assert user_repo._store[1].deposit_balance == 1_200_00
+
+    # dep_tx: amount=200₽ (только добавленная часть, не весь итоговый депозит).
+    dep_tx = session.transactions_by_key["subscribe:smart-renew-with-topup-1:dep"]
+    assert dep_tx.type == TransactionType.DEPOSIT_TOPUP.value
+    assert dep_tx.amount == 200_00
+    assert dep_tx.balance_after == 1_200_00
+
+    # sub_tx: списываем ТОЛЬКО price_month, dep_tx.balance_after показывает ПОСЛЕ topup.
+    sub_tx = session.transactions_by_key["subscribe:smart-renew-with-topup-1:sub"]
+    assert sub_tx.type == TransactionType.SUBSCRIPTION.value
+    assert sub_tx.amount == 1_000_00
+    assert sub_tx.balance_after == 1_000_00  # до topup (1000₽)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_smart_renew_active_sub_with_zero_deposit_rejected() -> None:
+    """Pravki-subscription-2026-08-17: smart renew ТОЛЬКО для case 3a.
+    Case 3b (активная подписка) + deposit_amount_kopecks=0 → InsufficientDepositChoiceError.
+
+    Сценарий: у юзера подписка ещё активна (subscription_until >= today),
+    deposit достаточный, шлёт deposit_amount_kopecks=0. Это бессмысленный
+    запрос (нечего топить), backend должен отвергнуть.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=1_000_00)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() + timedelta(days=10)  # активна ещё 10 дней
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    with pytest.raises(InsufficientDepositChoiceError) as exc_info:
+        await service.subscribe_and_join(
+            user_id=1,
+            habit_id=str(habit.id),
+            deposit_amount_kopecks=0,    # ← case 3b + 0: нельзя
+            subscription_accepted=False,
+            idempotency_key="active-sub-zero-deposit-1",
+        )
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "insufficient_deposit_choice"
+    # Никаких транзакций не создано.
+    assert len(session.transactions) == 0
+
+
+@pytest.mark.asyncio
+async def test_subscribe_smart_renew_idempotent_retry_returns_existing_zero_dep_tx() -> None:
+    """Pravki-subscription-2026-08-17: повторный POST с тем же idempotency_key
+    после smart renew → возврат (existing_m, existing_dep_tx, charged=True),
+    dep_tx.amount=0 сохраняется.
+
+    Сценарий: фронт retry'ит запрос (например, после потери ответа). Backend
+    не должен списать деньги повторно.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _habit_with_prices(penalty=500_00, price_month=1_000_00)
+    habit_repo.add(habit)
+    user_repo = FakeUserRepo()
+    _seed_user(user_repo, user_id=1, deposit=1_000_00)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(
+        user_id=1,
+        habit_id=str(habit.id),
+        status=MembershipStatus.PAUSED,
+    )
+    existing_m = next(iter(membership_repo._store.values()))  # type: ignore[attr-defined]
+    existing_m.subscription_until = date.today() - timedelta(days=1)
+
+    session = _FakeSession(membership_repo=membership_repo)
+    service = _make_service(
+        session=session,
+        user_repo=user_repo,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+    )
+
+    # Первый вызов: smart renew.
+    m1, tx1, charged1 = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=0,
+        subscription_accepted=True,
+        idempotency_key="smart-renew-idem-1",
+    )
+    assert charged1 is True
+    assert tx1.amount == 0
+    balance_after_first = user_repo._store[1].deposit_balance
+
+    # Retry: тот же idempotency_key. set_query_key — fake session смотрит на dep_key сначала.
+    session.set_query_key(["subscribe:smart-renew-idem-1:dep", "subscribe:smart-renew-idem-1:sub"])
+    m2, tx2, charged2 = await service.subscribe_and_join(
+        user_id=1,
+        habit_id=str(habit.id),
+        deposit_amount_kopecks=0,
+        subscription_accepted=True,
+        idempotency_key="smart-renew-idem-1",
+    )
+
+    # Та же транзакция, тот же membership, тот же charged_flag.
+    assert tx2.id == tx1.id
+    assert m2.id == m1.id
+    assert charged2 is True
+    # Баланс не изменился (не списали повторно).
+    assert user_repo._store[1].deposit_balance == balance_after_first
+    # В БД всё ещё 2 транзакции (sub_tx + dep_tx с amount=0), не больше.
+    assert len(session.transactions) == 2

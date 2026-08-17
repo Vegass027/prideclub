@@ -498,24 +498,31 @@ class AdminHabitAvailableChatsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Pravki-subscribe-and-join.md §Z-12.1: POST /api/v1/payments/subscribe
+# Pravki-subscribe-and-join.md §Z-12.1 + Pravki-subscription-2026-08-17 (smart renew)
 # ---------------------------------------------------------------------------
 
 
 class SubscribeRequest(BaseModel):
     """Request для объединённой оплаты «подписка + депозит + создание ACTIVE membership».
 
-    Pravki-subscribe-and-join.md §Z-12.1:
+    Pravki-subscribe-and-join.md §Z-12.1 + Pravki-subscription-2026-08-17 (smart renew):
     - `subscription_accepted` — server-side gate (см. §Z-13.1 матрица). Допустимо
       True и False если у юзера есть активная подписка (existing.subscription_until >= today).
       Если подписки нет — должно быть True, иначе 422.
+    - `deposit_amount_kopecks` — допускается 0 если у юзера на deposit_balance
+      уже достаточно для штрафа этого клуба (user.deposit_balance >= habit.penalty_amount).
+      В этом случае backend списывает ТОЛЬКО price_month (smart renew — не требуем
+      пополнение депозита заново). Иначе (deposit_balance < penalty) — должно быть
+      >= habit.penalty_amount, иначе 422 insufficient_deposit_choice.
     - `idempotency_key` — client-generated UUID4 (uuid4 из фронта), позволяет safe-retry
       без двойного списания. Префикс «subscribe:» добавляется на backend для отделения
       от idempotency_key обычных topup'ов.
     """
 
     habit_id: str
-    deposit_amount_kopecks: int = Field(gt=0, le=10_000_000)
+    # Pravki-subscription-2026-08-17: ослаблено gt=0 → ge=0 для smart renew
+    # (см. MembershipService.subscribe_and_join шаг 5 — ветка с deposit_balance>=penalty).
+    deposit_amount_kopecks: int = Field(ge=0, le=10_000_000)
     subscription_accepted: bool
     idempotency_key: str = Field(min_length=8, max_length=128)
 

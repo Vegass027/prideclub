@@ -342,7 +342,65 @@ class MembershipService:
             raise ValueError(f"user {user_id} not found for subscribe_and_join")
 
         # Шаг 5: валидация deposit_amount.
-        if deposit_amount_kopecks < habit.penalty_amount:
+        #
+        # Pravki-subscription-2026-08-17 (smart renew): для кейса 3a
+        # (charged_subscription=True) допускаем гибкий topup — достаточно чтобы
+        # итоговый баланс (u.deposit_balance + deposit_amount_kopecks) >= habit.penalty_amount.
+        # Семантика: продление подписки + опциональный extra topup. Юзер с
+        # достаточным депозитом может продлить подписку без требования полного
+        # штрафа в качестве topup (pay_deposit=0 → списывается ТОЛЬКО price_month,
+        # депозит не трогается; pay_deposit>0 → списывается price_month + extra topup).
+        #
+        # dep_tx создаётся с amount=0 для сохранения idempotency_key (canonical
+        # ключ для retry/lookup), но фактически денег не двигает в случае pay_deposit=0.
+        #
+        # Кейс 3b (подписка ещё активна) — deposit_amount_kopecks=0 не имеет
+        # смысла (нечего топить), идём в старую ветку с InsufficientDepositChoiceError.
+        # Старая строгая проверка: deposit_amount_kopecks >= habit.penalty_amount.
+        if charged_subscription:
+            # Smart renew: итоговый баланс >= penalty.
+            effective_deposit = u.deposit_balance + deposit_amount_kopecks
+            if effective_deposit < habit.penalty_amount:
+                self._logger.info(
+                    "subscribe_rejected_insufficient_choice",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "required_kopecks": habit.penalty_amount,
+                        "chosen_kopecks": deposit_amount_kopecks,
+                        "user_deposit_balance": u.deposit_balance,
+                        "reason": "smart_renew_total_below_penalty",
+                    },
+                )
+                raise InsufficientDepositChoiceError(
+                    required_kopecks=habit.penalty_amount,
+                    chosen_kopecks=deposit_amount_kopecks,
+                )
+            if deposit_amount_kopecks == 0:
+                self._logger.info(
+                    "subscribe_smart_renew_skip_deposit",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "user_deposit_balance": u.deposit_balance,
+                        "penalty_amount": habit.penalty_amount,
+                        "reason": "deposit_already_sufficient",
+                    },
+                )
+            elif deposit_amount_kopecks > 0:
+                self._logger.info(
+                    "subscribe_smart_renew_with_extra_topup",
+                    extra={
+                        "user_id": user_id,
+                        "habit_id": habit_id,
+                        "user_deposit_balance": u.deposit_balance,
+                        "extra_topup_kopecks": deposit_amount_kopecks,
+                        "effective_deposit_kopecks": effective_deposit,
+                        "penalty_amount": habit.penalty_amount,
+                    },
+                )
+        elif deposit_amount_kopecks < habit.penalty_amount:
+            # Кейс 3b (активная подписка) — строгая проверка: deposit_amount >= penalty.
             self._logger.info(
                 "subscribe_rejected_insufficient_choice",
                 extra={
@@ -350,6 +408,7 @@ class MembershipService:
                     "habit_id": habit_id,
                     "required_kopecks": habit.penalty_amount,
                     "chosen_kopecks": deposit_amount_kopecks,
+                    "user_deposit_balance": u.deposit_balance,
                 },
             )
             raise InsufficientDepositChoiceError(
