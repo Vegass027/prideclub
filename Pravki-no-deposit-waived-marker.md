@@ -36,12 +36,12 @@ pre-#2 код). В БД не оставалось **никакого следа*
 
 | Компонент | До | После |
 |---|---|---|
-| `apply_window_expired` при `deposit == 0` | `return None` (silent) | Создаёт `Penalty(reason=WAIVED_NO_DEPOSIT, amount=0)` + `flush()` + `return None`. **Checkin/Transaction/recompute НЕ трогаются.** |
+| `apply_window_expired` при `deposit == 0` | `return None` (silent) | Создаёт `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)` + `flush()` + `return None`. **Checkin/Transaction/recompute НЕ трогаются.** |
 | `apply_catch` idempotency | `WHERE reason == CAUGHT` | `WHERE (membership_id, date)` — любая Penalty за день блокирует catch. Единый код `penalty_already_processed` для всех reason'ов. |
 | `close_catch_window._close_for_habit` | Дублирующий вызов `apply_window_expired` после `continue` (мёртвый код) | Удалён (10 строк). |
-| `PenaltyReason` enum (Python) | `CAUGHT`, `WINDOW_CLOSED_NO_CATCH` | Добавлен `WAIVED_NO_DEPOSIT`. **Не Postgres ENUM**, а `StrEnum` — SQLAlchemy coercion пишет строку в VARCHAR. |
+| `PenaltyReason` enum (Python) | `CAUGHT`, `WINDOW_CLOSED_NO_CATCH` | Добавлен `WAIVED_UNABLE_TO_PAY`. **Не Postgres ENUM**, а `StrEnum` — SQLAlchemy coercion пишет строку в VARCHAR. |
 
-### Контракт маркера `WAIVED_NO_DEPOSIT`
+### Контракт маркера `WAIVED_UNABLE_TO_PAY`
 
 ```python
 Penalty(
@@ -51,7 +51,7 @@ Penalty(
     amount=0,
     fund_share=0,
     catcher_bonus_points=0,
-    reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+    reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
     date=club_date,
     bonus_applied=False,
 )
@@ -81,7 +81,7 @@ if existing.first() is not None:
 
 | # | Дыра | Как закрыта |
 |---|---|---|
-| 1 | **PRIMARY** — после `WAIVED_NO_DEPOSIT` за день catch списывал деньги повторно | `apply_catch` видит `WAIVED` в existing-check → отвергает |
+| 1 | **PRIMARY** — после `WAIVED_UNABLE_TO_PAY` за день catch списывал деньги повторно | `apply_catch` видит `WAIVED` в existing-check → отвергает |
 | 2 | **BONUS** — прямой `POST /catch` поверх `WINDOW_CLOSED_NO_CATCH` (UNIQUE `uq_penalty_per_day_reason` пропускал из-за reason) | `apply_catch` existing-check без фильтра по reason → отвергает |
 | 3 | **REGRESSION** — повторный catch поверх `CAUGHT` | Защищён reason-фильтром раньше, теперь общим условием |
 | 4 | **DEAD CODE** — `close_catch_window` дублирующий вызов `apply_window_expired` (unreachable) | Удалён (10 строк) |
@@ -92,14 +92,14 @@ if existing.first() is not None:
 - Никакая миграция Alembic не нужна. Нет `ALTER TYPE penalty_reason ADD VALUE` —
   Postgres ENUM `penalty_reason` не существует (в схеме только `checkin_status`).
 - Python `StrEnum` `PenaltyReason` коэрсится в строку через SQLAlchemy
-  (`Mapped[PenaltyReason]` → `String(64)`), значение `"waived_no_deposit"`
+  (`Mapped[PenaltyReason]` → `String(64)`), значение `"waived_unable_to_pay"`
   принимается без каких-либо изменений БД.
 
 ## Тестовая матрица (6 новых тестов, всё зелёное)
 
 | Тест | Файл | Контракт |
 |---|---|---|
-| `test_apply_window_expired_writes_waived_marker_when_deposit_zero` | `tests/test_penalty_service.py` | `deposit=0` → создаётся `Penalty(reason=WAIVED_NO_DEPOSIT, amount=0)`, `result is None`, нет `Transaction`, баланс не изменился, `prize_pool` не инкремент |
+| `test_apply_window_expired_writes_waived_marker_when_deposit_zero` | `tests/test_penalty_service.py` | `deposit=0` → создаётся `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)`, `result is None`, нет `Transaction`, баланс не изменился, `prize_pool` не инкремент |
 | `test_apply_window_expired_idempotent_after_waived_marker` | то же | Два вызова `apply_window_expired` для одного `(membership, date)` при `deposit=0` → одна `Penalty` в session (existing-check ловит дубль) |
 | `test_apply_catch_rejected_when_waived_marker_exists` | то же | `WAIVED` за сегодня + `apply_catch(today)` → `PenaltyAlreadyProcessedError(code="penalty_already_processed")`, нет новых Penalty |
 | `test_apply_catch_rejected_when_window_closed_penalty_exists` | то же | `WINDOW_CLOSED_NO_CATCH` за сегодня + `apply_catch(today)` → reject (бонус — закрытие дыры #2) |
@@ -128,12 +128,12 @@ ssh privichki-prod 'rsync -az --delete /tmp/privichki_new/worker/  /app/apps/wor
 ssh privichki-prod 'cd /app/infra && docker compose build backend worker --no-cache && docker compose up -d backend worker'
 
 # 3. Проверка что новое значение enum видно в работающем контейнере
-ssh privichki-prod 'docker exec habit-backend python -B -c "from app.core.constants import PenaltyReason; print(PenaltyReason.WAIVED_NO_DEPOSIT.value)"'
-# → waived_no_deposit
+ssh privichki-prod 'docker exec habit-backend python -B -c "from app.core.constants import PenaltyReason; print(PenaltyReason.WAIVED_UNABLE_TO_PAY.value)"'
+# → waived_unable_to_pay
 
 # 4. (опционально) ручной сценарий на проде: создать тестового юзера, обнулить
 # deposit, дождаться cron close_catch_window (ежечасно в :05), убедиться что
-# в таблице penalties появилась строка с reason='waived_no_deposit'.
+# в таблице penalties появилась строка с reason='waived_unable_to_pay'.
 ```
 
 ## Backlog (отдельные задачи, НЕ в этом PR)
@@ -146,7 +146,7 @@ Defense-in-depth на уровне схемы БД. Сейчас `reason` VARCHA
 ```sql
 ALTER TABLE penalties 
 ADD CONSTRAINT chk_penalty_reason 
-CHECK (reason IN ('caught', 'window_closed_no_catch', 'waived_no_deposit'));
+CHECK (reason IN ('caught', 'window_closed_no_catch', 'waived_unable_to_pay'));
 ```
 
 Перед применением на проде: `SELECT DISTINCT reason FROM penalties;` —
@@ -158,7 +158,7 @@ CHECK (reason IN ('caught', 'window_closed_no_catch', 'waived_no_deposit'));
 Сейчас `TodayPage` показывает «штраф не списан» и для WAIVED, и для
 «день ещё не наступил как missed». Если захотим показать
 «Прощён (депозит был пуст)» явно — расширить `TodayResponse` полем
-`penalty_outcome: 'charged' | 'waived_no_deposit' | 'none'`, добавить
+`penalty_outcome: 'charged' | 'waived_unable_to_pay' | 'none'`, добавить
 text-key в `shared/texts/`. Дизайн-решение требуется.
 
 ### `BL-003`: расширить `CheckinEvent.payload` полем `checkin_status`
@@ -169,7 +169,7 @@ text-key в `shared/texts/`. Дизайн-решение требуется.
 **не устраняет** — нужно расширить `_publish_checkin_rejected` и маппер
 на фронте. **Отдельный PR.**
 
-### `BL-004`: Audit-trail для `WAIVED_NO_DEPOSIT`
+### `BL-004`: Audit-trail для `WAIVED_UNABLE_TO_PAY`
 
 Потенциально полезный observability-сигнал — записывать в `audit_log`
 (если появится) или отдельную таблицу
@@ -190,7 +190,7 @@ text-key в `shared/texts/`. Дизайн-решение требуется.
 `test_close_season.py` × 1, `test_process_checkin.py` × 1,
 `test_process_penalty.py` × 2, `test_worker_cron_chain.py` × 1) —
 все ожидают `penalty.reason == WINDOW_CLOSED_NO_CATCH` или `penalized=1`,
-получают `WAIVED_NO_DEPOSIT` или `penalized=0`.
+получают `WAIVED_UNABLE_TO_PAY` или `penalized=0`.
 
 **Решение (отдельный PR):**
 - Добавить параметр `deposit_balance: int = 1000` в `add_user` helper.
@@ -246,6 +246,67 @@ baseline=393 passed (те же самые тесты, флаки-поведен�
 **Workaround до фикса:** запускать `test_joined_late_protection.py` вечером
 (после 12:00 MSK). Или просто игнорировать эти 6 failures в baseline —
 они pre-existing, не регрессия от текущих изменений (проверено stash'ом).
+
+### `BL-007`: subscription expiry → LEFT (новый feature, не в этом PR)
+
+**Pre-investigation 2026-08-17** (юзер поднял задачу, разведка сделана до
+стопа). Зафиксировано для следующего захода, **не делаем сейчас** — сначала
+закрываем WAIVED-маркер для PAUSED/LEFT (этот PR).
+
+**Что хочет юзер:** когда `subscription_until < today`, юзер переходит в
+`LEFT` (НЕ удаляется из клуба как участник, мембершип сохраняется), в UI
+появляется кнопка "Продлить участие" и списание подписки. Логика оплаты:
+- Если `deposit >= habit.penalty_amount` → оплачивается только подписка
+- Если `deposit < habit.penalty_amount` → подписка + депозит (как сейчас)
+
+**Что нужно построить:**
+
+| Компонент | Что |
+|---|---|
+| **Backend: новая cron-таска** `worker.tasks.expire_subscriptions.run` | Ежедневно (02:00 UTC, до `expire_bonus_points`). Находит `Membership(status=ACTIVE, subscription_until < today)` → переводит в `LEFT`. Skip PAUSED/LEFT (LEFT уже там, PAUSED не управляется подпиской). |
+| **Backend: новый метод** `MembershipService.expire_subscription(membership_id)` | Defensive проверки, `m.status = LEFT`, не трогать deposit. Идемпотентно (повторный вызов на LEFT — no-op). |
+| **Backend: новая notification** `NotificationType.SUBSCRIPTION_EXPIRED` | Опционально — Telegram-сообщение юзеру. i18n через `apps/bot/bot/texts/subscription_expired.py`. |
+| **Backend: расширение `subscribe_and_join`** | Поддержка "только подписка" если `deposit >= penalty_amount` (только для renew, не для new join). Возможно — новый параметр `mode: "renew_subscription_only" \| "renew_with_deposit" \| "first_join"`. **Решение по API ещё не принято.** |
+| **Frontend: бейдж "Подписка истекла"** в `apps/frontend/src/pages/Profile/index.tsx` | Красный бейдж + кнопка "Продлить участие" для membership `status=LEFT` с `subscription_until < today`. |
+| **Frontend: баннер на `/habits/:id/today`** | Если `subscription_until < today` — баннер: "Подписка истекла, продлите участие". |
+| **Frontend: filter в `/habits/:id/members`** | LEFT-юзеры НЕ показываются в списке "можно поймать" (сейчас `can_catch` не проверяет `membership_status`). Отдельная правка UI noise. |
+| **Docs: обновления** | `docs/04-code-standards.md` (grace period если решим ввести), `docs/09-prod-readiness.md` (новая строка в таблице). |
+
+**Открытые вопросы (требуют решения перед реализацией):**
+
+1. **Reaction activation:** `subscribe_and_join` уже умеет реактивировать LEFT→ACTIVE
+   (кейс 3a, services/membership_service.py:332-336). Отдельный endpoint не нужен —
+   юзер жмёт "Продлить участие" → открывается `JoinPayModal` → POST /payments/subscribe.
+2. **Логика "только подписка":** автоматическая ветка в `subscribe_and_join` или
+   новый параметр от UI. **Решение не принято.**
+3. **Уведомление при истечении:** (I) Сразу в Telegram-бот, (II) только в UI при
+   следующем заходе, (III) оба.
+4. **Grace period** (дни между `subscription_until < today` и фактическим LEFT):
+   (I) жёстко день в день, (II) N дней (например 3).
+5. **Где показывать бейдж "продлить":** (I) `/profile`, (II) `/habits/:id/today`,
+   (III) `/habits/:id/members`, (IV) все три.
+6. **Что делать с уже существующим долгом** (если deposit < penalty и подписка
+   истекла): тот же сценарий "нужна и подписка и депозит".
+
+**Связь с WAIVED-маркером (BL из этого PR):**
+- Если BL-007 вводится до того, как закрыт WAIVED-маркер для PAUSED/LEFT,
+  это **порождает** новые случаи дыры: cron `expire_subscriptions` переводит
+  ACTIVE→LEFT → следующий cron `close_catch_window` пропускает (LEFT skip)
+  → юзер топит депозит → его можно поймать. **Дыра расширяется.**
+- Поэтому BL-007 делается **после** того, как WAIVED-маркер покрывает PAUSED/LEFT
+  (этот PR).
+
+**Workaround до BL-007:** юзеры с протухшей подпиской могут вручную
+перезайти через `POST /payments/subscribe` (бэкенд уже умеет, кейс 3a).
+Бот-уведомлений нет, нужно самим заходить в мини-апп.
+
+**Текущее состояние прод-данных (2026-08-17):** Sofia — единственный
+пользователь с множественными memberships (3). У неё подписка скорее всего
+недавно (joined_at 2026-08-14/15). Реальных случаев "subscription_until < today"
+на проде пока нет (софья не дошла до 30-дневного лимита). Можно не спешить.
+
+**Оценка:** средняя задача, 4-6 атомарных коммитов, ~3-5 дней работы.
+Не блокирует WAIVED-маркер для текущей итерации.
 
 ## История решений
 

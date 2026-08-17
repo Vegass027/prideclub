@@ -93,7 +93,7 @@
 | amount | INT | Сумма штрафа |
 | fund_share | INT | Сумма в призовой фонд (= amount) |
 | catcher_bonus_points | INT | Бонусы охотнику |
-| reason | VARCHAR | `caught` / `window_closed_no_catch` / `waived_no_deposit` |
+| reason | VARCHAR | `caught` / `window_closed_no_catch` / `waived_unable_to_pay` |
 | bonus_applied | BOOLEAN | Начислен ли бонус за этот улов |
 | date | DATE | Для уникального индекса |
 | idempotency_key | VARCHAR UNIQUE | `penalty:{membership_id}:{date}` |
@@ -105,7 +105,10 @@
 **Значения `reason`** (Pravki-no-deposit-waived-marker, разведка 2026-08-16):
 - `caught` — юзер пойман кэтчером в течение окна; apply_catch.
 - `window_closed_no_catch` — окно закрылось без поимки; apply_window_expired при `deposit > 0`.
-- `waived_no_deposit` — окно закрылось, но `deposit == 0` → штраф списать нечего,
+- `waived_unable_to_pay` — день закрылся, юзер не мог заплатить (`status=PAUSED`,
+  т.е. `deposit < penalty_amount`). Штраф списать нечего → записывается маркерная
+  запись `amount=0`. Покрывает и deposit=0, и частичный deposit < penalty
+  (Wide-семантика, см. `Pravki-no-deposit-waived-marker.md`). Подробности — `Pravki-no-deposit-waived-marker.md`.
   записана маркерная запись `amount=0`. Маркер нужен для идемпотентности
   `apply_catch` (любой Penalty за день = catch отвергается). Подробности —
   `Pravki-no-deposit-waived-marker.md`.
