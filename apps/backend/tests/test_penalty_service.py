@@ -211,7 +211,7 @@ async def test_penalty_full_amount_to_fund() -> None:
 @pytest.mark.asyncio
 async def test_apply_window_expired_writes_waived_marker_when_deposit_zero() -> None:
     """Pravki-no-deposit-waived-marker (разведка 2026-08-16): при deposit=0
-    apply_window_expired пишет маркер Penalty(reason=WAIVED_NO_DEPOSIT,
+    apply_window_expired пишет маркер Penalty(reason=WAIVED_UNABLE_TO_PAY,
     amount=0) вместо silent return None.
 
     Без этого маркера день остаётся «непомеченным» в БД → apply_catch
@@ -221,7 +221,7 @@ async def test_apply_window_expired_writes_waived_marker_when_deposit_zero() -> 
     Контракт:
     - Возвращает None (caller `close_catch_window` не уведомляет, в
       `penalized` не инкрементирует — это не реальный штраф, а маркер).
-    - Создаёт ровно 1 Penalty с reason=WAIVED_NO_DEPOSIT, amount=0.
+    - Создаёт ровно 1 Penalty с reason=WAIVED_UNABLE_TO_PAY, amount=0.
     - НЕ создаёт Transaction (нет финансового события).
     - НЕ вызывает recompute_pause_status (баланс не менялся).
     - user.deposit_balance остаётся 0.
@@ -263,7 +263,7 @@ async def test_apply_window_expired_writes_waived_marker_when_deposit_zero() -> 
         f"Ожидали 1 маркерную Penalty, получили {len(session.penalties)}"
     )
     waived = session.penalties[0]
-    assert waived.reason == PenaltyReason.WAIVED_NO_DEPOSIT
+    assert waived.reason == PenaltyReason.WAIVED_UNABLE_TO_PAY
     assert waived.amount == 0
     assert waived.fund_share == 0
     assert waived.catcher_membership_id is None
@@ -373,7 +373,7 @@ async def test_apply_window_expired_idempotent_after_waived_marker() -> None:
     )
     assert result1 is None
     assert len(session.penalties) == 1
-    assert session.penalties[0].reason == PenaltyReason.WAIVED_NO_DEPOSIT
+    assert session.penalties[0].reason == PenaltyReason.WAIVED_UNABLE_TO_PAY
 
     # Второй вызов — existing-check ловит маркер из первого вызова
     # через _SessionWithExistingPenaltyCheck.execute() → return None
@@ -468,7 +468,7 @@ class _SessionWithDateFilteredExistingCheck(_NoStreakSession):
 
 @pytest.mark.asyncio
 async def test_apply_catch_rejected_when_waived_marker_exists() -> None:
-    """WAIVED_NO_DEPOSIT за club_date → apply_catch отвергается.
+    """WAIVED_UNABLE_TO_PAY за club_date → apply_catch отвергается.
 
     Сценарий из разведки 2026-08-16: после того как apply_window_expired
     создал WAIVED-маркер (юзер не мог платить), юзер топит депозит.
@@ -494,7 +494,7 @@ async def test_apply_catch_rejected_when_waived_marker_exists() -> None:
         amount=0,
         fund_share=0,
         catcher_bonus_points=0,
-        reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+        reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
         date=date(2026, 1, 1),
         bonus_applied=False,
     )
@@ -683,7 +683,7 @@ async def test_apply_catch_succeeds_for_other_date_when_waived_marker_for_previo
         amount=0,
         fund_share=0,
         catcher_bonus_points=0,
-        reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+        reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
         date=date(2026, 1, 1),  # вчера
         bonus_applied=False,
     )
@@ -714,6 +714,265 @@ async def test_apply_catch_succeeds_for_other_date_when_waived_marker_for_previo
     violator_user = await user_repo.get(1)
     assert violator_user is not None
     assert violator_user.deposit_balance == 500 - habit.penalty_amount
+
+
+@pytest.mark.asyncio
+async def test_mark_waived_unable_to_pay_creates_marker_for_paused() -> None:
+    """Pravki-no-deposit-waived-marker (коммит A 2026-08-17):
+    mark_waived_unable_to_pay для PAUSED юзера → создаётся маркер.
+
+    Контракт:
+    - Возвращает Penalty (не None).
+    - reason=WAIVED_UNABLE_TO_PAY, amount=0.
+    - НЕ создаёт Transaction (no-op для финансов).
+    - НЕ вызывает recompute_pause_status (баланс не менялся).
+    - membership_id, date установлены правильно.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    # Явно выставляем PAUSED (add_for по умолчанию ACTIVE).
+    violator.status = MembershipStatus.PAUSED
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))  # Wide: deposit может быть любым
+
+    session = _NoStreakSession()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    marker = await service.mark_waived_unable_to_pay(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    assert marker is not None
+    assert marker.reason == PenaltyReason.WAIVED_UNABLE_TO_PAY
+    assert marker.amount == 0
+    assert marker.fund_share == 0
+    assert marker.catcher_membership_id is None
+    assert marker.catcher_bonus_points == 0
+    assert marker.bonus_applied is False
+    assert marker.membership_id == str(violator.id)
+    assert marker.date == date(2026, 1, 1)
+
+    # Никаких финансовых последствий.
+    assert session.transactions == [], (
+        "WAIVED-маркер не должен создавать Transaction"
+    )
+    user_after = await user_repo.get(1)
+    assert user_after is not None
+    assert user_after.deposit_balance == 0, (
+        "deposit_balance не должен меняться в mark_waived_unable_to_pay"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_waived_unable_to_pay_skips_active_membership() -> None:
+    """Defensive: ACTIVE membership — НЕ наш случай. Возвращает None,
+    ничего не пишет.
+
+    ACTIVE должен идти через apply_window_expired, не через эту функцию.
+    Если кто-то случайно вызовет mark_waived_unable_to_pay для ACTIVE —
+    мы не должны создавать WAIVED-маркер (иначе ломается контракт:
+    для ACTIVE+deposit>=penalty списываем полный штраф, а не маркер).
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    # По умолчанию add_for ставит ACTIVE — оставляем.
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _NoStreakSession()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    result = await service.mark_waived_unable_to_pay(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    assert result is None, "ACTIVE должен skip'аться"
+    assert session.penalties == [], (
+        "Для ACTIVE ничего не пишем — это контракт apply_window_expired"
+    )
+    assert session.transactions == []
+
+
+@pytest.mark.asyncio
+async def test_mark_waived_unable_to_pay_skips_existing_marker() -> None:
+    """Идемпотентность: existing WAIVED за день → return None, не создаём дубль.
+
+    Сценарий: cron retry (второй запуск в течение часа для того же клуба) —
+    не должен создавать вторую WAIVED-запись. existing-check ловит.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    violator.status = MembershipStatus.PAUSED
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Имитируем уже созданный WAIVED от предыдущего cron-запуска.
+    existing_waived = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=None,
+        amount=0,
+        fund_share=0,
+        catcher_bonus_points=0,
+        reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
+        date=date(2026, 1, 1),
+        bonus_applied=False,
+    )
+    session.add(existing_waived)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    result = await service.mark_waived_unable_to_pay(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    assert result is None
+    assert len(session.penalties) == 1, (
+        f"Идемпотентность нарушена: ожидали 1 маркер, получили {len(session.penalties)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_waived_unable_to_pay_skips_existing_caught_penalty() -> None:
+    """Race-защита: если PAUSED юзер был пойман между моментом когда
+    определился статус и моментом когда cron пишет маркер — existing
+    CAUGHT за день ловится, return None (нет дубля).
+
+    Без этой защиты: cron мог бы создать WAIVED поверх CAUGHT, нарушая
+    уникальный UNIQUE uq_penalty_per_day_reason.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    violator.status = MembershipStatus.PAUSED  # уже PAUSED
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=0))
+
+    session = _SessionWithDateFilteredExistingCheck()
+    # Race: catcher уже успел создать CAUGHT за день.
+    existing_caught = Penalty(
+        id=str(uuid4()),
+        membership_id=str(violator.id),
+        catcher_membership_id=str(uuid4()),
+        amount=habit.penalty_amount,
+        fund_share=habit.penalty_amount,
+        catcher_bonus_points=1,
+        reason=PenaltyReason.CAUGHT,
+        date=date(2026, 1, 1),
+        bonus_applied=False,
+    )
+    session.add(existing_caught)
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    result = await service.mark_waived_unable_to_pay(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    assert result is None
+    assert len(session.penalties) == 1, "Не должно быть дубля поверх CAUGHT"
+
+
+@pytest.mark.asyncio
+async def test_mark_waived_unable_to_pay_works_with_partial_deposit() -> None:
+    """Wide-семантика: PAUSED с deposit=24000 (penalty=25000) — тоже
+    получает маркер. Юзер не может позволить штраф → прощаем полностью.
+
+    Это закрывает сценарий "закончились почти все деньги, кроме 100₽" —
+    раньше такой юзер был PAUSED (deposit < penalty), но если бы мы
+    требовали strict deposit==0 для маркера, то дыра оставалась бы
+    открытой: catch через direct API после topup всё равно списал бы
+    полный penalty.
+    """
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit.penalty_amount = 25000  # больше deposit, юзер PAUSED
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    violator.status = MembershipStatus.PAUSED
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=24000))  # частичный депозит
+
+    session = _NoStreakSession()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+    )
+
+    marker = await service.mark_waived_unable_to_pay(
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+    )
+
+    assert marker is not None
+    assert marker.reason == PenaltyReason.WAIVED_UNABLE_TO_PAY
+    assert marker.amount == 0
+    assert session.transactions == [], "Wide: deposit не списываем"
+    user_after = await user_repo.get(1)
+    assert user_after is not None
+    assert user_after.deposit_balance == 24000, "deposit остаётся нетронутым"
 
 
 @pytest.mark.asyncio

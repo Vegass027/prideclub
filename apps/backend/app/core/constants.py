@@ -26,12 +26,14 @@ class CheckinStatus(StrEnum):
 class PenaltyReason(StrEnum):
     CAUGHT = "caught"
     WINDOW_CLOSED_NO_CATCH = "window_closed_no_catch"
-    # Pravki-no-deposit-waived-marker (разведка 2026-08-16):
-    # маркерная запись для случая, когда apply_window_expired НЕ смог
-    # списать штраф из-за пустого депозита (amount=0). Гарантирует, что
-    # день помечен как «уже разрешённый» в БД → apply_catch отвергается
-    # даже после topup юзером.
-    WAIVED_NO_DEPOSIT = "waived_no_deposit"
+    # Pravki-no-deposit-waived-marker (разведка 2026-08-16, коммит A 2026-08-17):
+    # маркерная запись для случая, когда юзер был PAUSED на момент закрытия окна
+    # чек-ина (deposit < penalty_amount). Списание невозможно → записываем
+    # amount=0 маркер, чтобы день был помечен в БД как «уже разрешённый».
+    # Гарантирует, что apply_catch после topup юзера отвергается для этого дня.
+    # Имя WAIVED_UNABLE_TO_PAY (а не NO_DEPOSIT) потому что покрывает и deposit=0,
+    # и частичный deposit < penalty. Миграция не нужна (VARCHAR, 0 строк в проде).
+    WAIVED_UNABLE_TO_PAY = "waived_unable_to_pay"
 
 
 class ProofType(StrEnum):

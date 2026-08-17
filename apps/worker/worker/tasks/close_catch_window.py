@@ -48,10 +48,10 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
     )
 
     penalized = 0
+    waived_count = 0
     notifications: list[tuple[Membership, int]] = []
     async for membership in membership_repo.iter_for_habit(str(habit.id)):
-        if membership.status != MembershipStatus.ACTIVE:
-            continue
+        # Общие фильтры (одинаковы для ACTIVE и PAUSED).
         existing = await checkin_repo.get_for_date(str(membership.id), club_date)
         if existing is not None:
             continue
@@ -61,19 +61,35 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
         # None здесь невозможен в проде; defensive check избыточен.
         if membership.joined_at.date() >= club_date:
             continue
-        penalty = await penalty_service.apply_window_expired(
-            violator_membership_id=str(membership.id),
-            club_date=club_date,
-        )
-        if penalty is not None:
-            penalized += 1
-            notifications.append(
-                (membership, int(penalty.amount))
+        # Ветвление по статусу.
+        # Pravki-no-deposit-waived-marker (коммит A 2026-08-17):
+        # PAUSED юзер (deposit < penalty через recompute_pause_status) не может
+        # платить — помечаем день как «уже разрешённый» через WAIVED-маркер,
+        # чтобы apply_catch после topup не списал деньги повторно за тот день.
+        # ACTIVE идёт через apply_window_expired (списание штрафа или редкий
+        # ACTIVE+deposit=0 → WAIVED). LEFT skip'ается явно.
+        if membership.status == MembershipStatus.ACTIVE:
+            penalty = await penalty_service.apply_window_expired(
+                violator_membership_id=str(membership.id),
+                club_date=club_date,
             )
+            if penalty is not None:
+                penalized += 1
+                notifications.append(
+                    (membership, int(penalty.amount))
+                )
+        elif membership.status == MembershipStatus.PAUSED:
+            marker = await penalty_service.mark_waived_unable_to_pay(
+                violator_membership_id=str(membership.id),
+                club_date=club_date,
+            )
+            if marker is not None:
+                waived_count += 1
 
     return {
         "habit_id": str(habit.id),
         "penalized": penalized,
+        "waived": waived_count,
         "notifications": notifications,
     }
 

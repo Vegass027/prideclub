@@ -129,14 +129,15 @@ class PenaltyService:
             raise HabitNotFoundError()
 
         # Идемпотентность: если за день есть ЛЮБАЯ Penalty
-        # (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_NO_DEPOSIT) —
+        # (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_UNABLE_TO_PAY) —
         # повторный catch для того же дня отвергается.
         #
         # Это закрывает несколько дыр (Pravki-no-deposit-waived-marker,
         # разведка 2026-08-16):
-        # 1) После WAIVED_NO_DEPOSIT (см. apply_window_expired WAIVED-ветка)
-        #    юзер топит депозит → apply_catch должен отвергаться, иначе
-        #    списываются деньги за уже прошедший день.
+        # 1) После WAIVED_UNABLE_TO_PAY (см. apply_window_expired WAIVED-ветка
+        #    и mark_waived_unable_to_pay для PAUSED юзеров) юзер топит депозит →
+        #    apply_catch должен отвергаться, иначе списываются деньги за
+        #    уже прошедший день.
         # 2) Бонус — прямой POST /catch поверх существующего
         #    WINDOW_CLOSED_NO_CATCH теперь корректно отвергается.
         #    Раньше фильтр `reason == CAUGHT` пропускал, и UNIQUE-индекс
@@ -270,10 +271,18 @@ class PenaltyService:
         amount = min(habit.penalty_amount, violator_user.deposit_balance)
         if amount <= 0:
             # Pravki-no-deposit-waived-marker (разведка 2026-08-16): депозит
-            # пуст — списывать нечего. Пишем маркер WAIVED_NO_DEPOSIT (amount=0),
+            # пуст — списывать нечего. Пишем маркер WAIVED_UNABLE_TO_PAY (amount=0),
             # чтобы день был помечен в БД как «уже разрешённый». Без этого
             # apply_catch после topup юзера успешно списывал бы деньги за уже
             # прошедший день → финансовая дыра.
+            #
+            # NOTE: основной путь для PAUSED юзеров — через отдельный метод
+            # mark_waived_unable_to_pay, вызываемый из close_catch_window для
+            # status=PAUSED. Эта ветка apply_window_expired пишет WAIVED
+            # только для редкого ACTIVE+deposit=0 (между списанием штрафа и
+            # recompute_pause_status). Контракт маркера единый (reason=WAIVED_UNABLE_TO_PAY,
+            # amount=0), идемпотентность обоих путей покрыта existing-check
+            # в начале apply_window_expired (строки 244-252).
             #
             # Маркер НЕ финансовое событие, поэтому:
             #   - Checkin НЕ пишем (юзер не «пропустил», у него просто не было денег)
@@ -291,7 +300,7 @@ class PenaltyService:
                 amount=0,
                 fund_share=0,
                 catcher_bonus_points=0,
-                reason=PenaltyReason.WAIVED_NO_DEPOSIT,
+                reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
                 date=club_date,
                 bonus_applied=False,
             )
@@ -363,3 +372,90 @@ class PenaltyService:
             },
         )
         return penalty
+
+    async def mark_waived_unable_to_pay(
+        self,
+        *,
+        violator_membership_id: str,
+        club_date,
+    ) -> Penalty | None:
+        """Записать маркер WAIVED_UNABLE_TO_PAY для PAUSED юзера без чек-ина.
+
+        Pravki-no-deposit-waived-marker (разведка 2026-08-16, коммит A 2026-08-17).
+        Вызывается из close_catch_window._close_for_habit для membership со
+        status=PAUSED (авто-пауза через recompute_pause_status при deposit < penalty).
+
+        Контракт:
+        - Только для status=PAUSED. Иначе return None (defensive — ACTIVE
+          идёт через apply_window_expired, LEFT skip'ается явно).
+        - Идемпотентность: existing Penalty за (membership_id, date) →
+          return None. Защищает от дублей при retry cron'а + от гонки
+          с manual catch (если кто-то успел поймать юзера между моментом
+          когда PAUSED определился и моментом когда мы пишем маркер).
+        - Маркер НЕ финансовое событие:
+          * Checkin НЕ пишем (юзер не «пропустил», у него пауза)
+          * Transaction НЕ создаём (amount=0 не двигает баланс)
+          * recompute_pause_status НЕ вызываем (balance не менялся)
+        - Возвращает созданную Penalty для единообразия с apply_window_expired,
+          но caller (close_catch_window) использует только truthy-check
+          для инкремента waived-счётчика.
+
+        Отличие от apply_window_expired WAIVED-ветки:
+        apply_window_expired WAIVED пишет маркер для ACTIVE+deposit=0
+        (крайне редкий случай между списанием и recompute).
+        Эта функция пишет маркер для PAUSED (нормальный основной случай).
+        """
+        violator = await self._membership_repo.get(violator_membership_id)
+        if violator is None:
+            return None
+        if violator.status != MembershipStatus.PAUSED:
+            # Defensive: ACTIVE/LEFT — не наш случай.
+            # ACTIVE идёт через apply_window_expired, LEFT skip'ается в выве.
+            return None
+
+        # Идемпотентность: existing Penalty за день = уже разрешённый день.
+        existing = await self._session.execute(
+            Penalty.__table__.select().where(
+                Penalty.membership_id == violator_membership_id,
+                Penalty.date == club_date,
+            )
+        )
+        if existing.first() is not None:
+            return None
+
+        # Читаем habit для логирования (id пригодится в event'е ниже).
+        habit = await self._habit_repo.get(str(violator.habit_id))
+        # user — для текущего deposit_balance в логе. Если user_repo не
+        # инжектирован (некоторые тесты конструируют PenaltyService без
+        # user_repo) — пропускаем поле в логе.
+        user_deposit_at_close: int | None = None
+        if self._user_repo is not None:
+            user = await self._user_repo.get(violator.user_id)
+            if user is not None:
+                user_deposit_at_close = user.deposit_balance
+
+        waived = Penalty(
+            id=str(uuid4()),
+            membership_id=violator_membership_id,
+            catcher_membership_id=None,
+            amount=0,
+            fund_share=0,
+            catcher_bonus_points=0,
+            reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
+            date=club_date,
+            bonus_applied=False,
+        )
+        self._session.add(waived)
+        await self._session.flush()
+        self._logger.info(
+            "penalty_window_expired_waived",
+            extra={
+                "violator_membership_id": violator_membership_id,
+                "amount": 0,
+                "habit_id": str(violator.habit_id),
+                "club_date": str(club_date),
+                "user_deposit_at_close": user_deposit_at_close,
+                "via": "mark_waived_unable_to_pay",
+            },
+        )
+        return waived
