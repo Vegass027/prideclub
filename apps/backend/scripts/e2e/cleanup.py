@@ -59,6 +59,7 @@ async def _collect_targets(
     db: E2EDatabase,
     *,
     run_tag: str | None,
+    user_ids: list[int] | None = None,
 ) -> dict[str, list]:
     """Собирает id артефактов БЕЗ изменений. Read-only."""
     summary: dict[str, list] = {
@@ -124,10 +125,14 @@ async def _collect_targets(
                     (r["id"], r["membership_id"], r["amount"], r["reason"], r["date"])
                 )
 
-        # e2e users (по synthetic ids, не зависит от habits)
+        # e2e users (по synthetic ids, не зависит от habits).
+        # Pravki-subscription-2026-08-17 §Z-22 E2E: --user-ids CLI arg
+        # позволяет сценариям с другим диапазоном (99005+) использовать
+        # тот же cleanup без хардкода новых IDs.
+        effective_user_ids = user_ids if user_ids is not None else E2E_USER_IDS
         user_rows = await conn.fetch(
             "SELECT id, first_name FROM users WHERE id = ANY($1::bigint[])",
-            E2E_USER_IDS,
+            effective_user_ids,
         )
         for r in user_rows:
             summary["users"].append((r["id"], r["first_name"]))
@@ -151,6 +156,7 @@ async def _delete_targets(
     db: E2EDatabase,
     *,
     run_tag: str | None,
+    user_ids: list[int] | None = None,
 ) -> dict[str, int]:
     """Удаляет артефакты внутри одной транзакции. Возвращает counts."""
     counts = {
@@ -177,10 +183,13 @@ async def _delete_targets(
                 )
             counts["habits"] = int(res.split()[-1])
 
-            # 2. e2e users (cascades transactions)
+            # 2. e2e users (cascades transactions).
+            # Pravki-subscription-2026-08-17 §Z-22 E2E: см. комментарий выше
+            # в _collect_targets.
+            effective_user_ids = user_ids if user_ids is not None else E2E_USER_IDS
             res = await conn.execute(
                 "DELETE FROM users WHERE id = ANY($1::bigint[])",
-                E2E_USER_IDS,
+                effective_user_ids,
             )
             counts["users"] = int(res.split()[-1])
 
@@ -194,16 +203,19 @@ async def _delete_targets(
             #    действительно снёс всё.
             checks = []
             # memberships для удалённых habit_id уже нет (cascade), проверим
-            # что для E2E_USER_IDS memberships тоже все ушли (user cascade).
+            # что для effective_user_ids memberships тоже все ушли (user cascade).
+            effective_user_ids_for_checks = (
+                user_ids if user_ids is not None else E2E_USER_IDS
+            )
             rm = await conn.fetchval(
                 "SELECT COUNT(*) FROM memberships WHERE user_id = ANY($1::bigint[])",
-                E2E_USER_IDS,
+                effective_user_ids_for_checks,
             )
             checks.append(("memberships", int(rm or 0)))
             # transactions для удалённых users
             rt = await conn.fetchval(
                 "SELECT COUNT(*) FROM transactions WHERE user_id = ANY($1::bigint[])",
-                E2E_USER_IDS,
+                effective_user_ids_for_checks,
             )
             checks.append(("transactions", int(rt or 0)))
             # penalties/checkins — memberships нет, поэтому должно быть 0
@@ -223,6 +235,7 @@ async def _cleanup_redis(
     secrets: Secrets,
     *,
     run_tag: str | None,
+    user_ids: list[int] | None = None,
 ) -> dict[str, int]:
     """Чистит SSE/idem Redis ключи для удалённых habit_id и user_id.
 
@@ -242,6 +255,10 @@ async def _cleanup_redis(
     except Exception:  # noqa: BLE001
         return counts
 
+    # Pravki-subscription-2026-08-17 §Z-22 E2E: --user-ids CLI arg для сценариев
+    # с диапазоном вне E2E_USER_IDS (например 99005+).
+    effective_user_ids = user_ids if user_ids is not None else E2E_USER_IDS
+
     # Собираем ВСЕ e2e habit_id (даже после delete — берём из
     # _collect_targets ДО удаления, что вызывающий гарантирует).
     # Здесь просто читаем из БД ещё раз (habits уже удалены → вернёт 0).
@@ -250,9 +267,9 @@ async def _cleanup_redis(
     try:
         # SSE user-stream keys
         async for key in r.scan_iter(match="sse:user:*"):
-            # Если key соответствует e2e user (99001-99003) — удалить
+            # Если key соответствует e2e user (effective_user_ids) — удалить
             parts = key.split(":")
-            if len(parts) >= 3 and parts[2].isdigit() and int(parts[2]) in E2E_USER_IDS:
+            if len(parts) >= 3 and parts[2].isdigit() and int(parts[2]) in effective_user_ids:
                 await r.delete(key)
                 counts["sse_streams"] += 1
         # SSE habit-stream keys (для удалённых habit — трубно угадать id,
@@ -264,13 +281,13 @@ async def _cleanup_redis(
         # SSE published idempotency для e2e юзеров
         async for key in r.scan_iter(match="sse_published:*"):
             parts = key.split(":")
-            if len(parts) >= 2 and parts[-1].isdigit() and int(parts[-1]) in E2E_USER_IDS:
+            if len(parts) >= 2 and parts[-1].isdigit() and int(parts[-1]) in effective_user_ids:
                 await r.delete(key)
                 counts["sse_published"] += 1
         # Today cache для e2e юзеров (если RedisTodayCache там что-то клал)
         async for key in r.scan_iter(match="today:*"):
             parts = key.split(":")
-            if len(parts) >= 3 and parts[1].isdigit() and int(parts[1]) in E2E_USER_IDS:
+            if len(parts) >= 3 and parts[1].isdigit() and int(parts[1]) in effective_user_ids:
                 await r.delete(key)
                 counts["today_cache"] += 1
     finally:
@@ -328,6 +345,17 @@ async def amain() -> int:
         default=None,
         help="Ограничить удаление только этим run_tag (substring в title).",
     )
+    # Pravki-subscription-2026-08-17 §Z-22 E2E: позволяет сценариям с
+    # другим диапазоном synthetic user_id (например 99005+) использовать
+    # тот же cleanup. Без этого — users 99005+ остаются как orphans после
+    # cleanup (habits cascade'ятся, но users.delete пропускает).
+    p.add_argument(
+        "--user-ids",
+        type=str,
+        default=None,
+        help="Comma-separated synthetic user_id (например '99005,99006,99007,99008'). "
+        "По умолчанию E2E_USER_IDS = [99001, 99002, 99003].",
+    )
     p.add_argument(
         "--no-redis",
         action="store_true",
@@ -336,10 +364,15 @@ async def amain() -> int:
 
     args = p.parse_args()
 
+    # Парсим --user-ids если задан.
+    user_ids_arg: list[int] | None = None
+    if args.user_ids:
+        user_ids_arg = [int(s.strip()) for s in args.user_ids.split(",") if s.strip()]
+
     secrets = load_secrets()
     db = E2EDatabase(secrets.database_url)
 
-    summary = await _collect_targets(db, run_tag=args.run_tag)
+    summary = await _collect_targets(db, run_tag=args.run_tag, user_ids=user_ids_arg)
     _print_plan(summary)
 
     if not any(summary.values()):
@@ -354,11 +387,13 @@ async def amain() -> int:
         print("aborted.")
         return 1
 
-    counts = await _delete_targets(db, run_tag=args.run_tag)
+    counts = await _delete_targets(db, run_tag=args.run_tag, user_ids=user_ids_arg)
     print(f"db cleanup applied: {counts}")
 
     if not args.no_redis:
-        redis_counts = await _cleanup_redis(db, secrets, run_tag=args.run_tag)
+        redis_counts = await _cleanup_redis(
+            db, secrets, run_tag=args.run_tag, user_ids=user_ids_arg,
+        )
         print(f"redis cleanup applied: {redis_counts}")
 
     print("done.")

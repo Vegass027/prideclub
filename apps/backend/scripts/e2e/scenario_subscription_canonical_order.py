@@ -26,6 +26,11 @@ from datetime import UTC, date as _date, datetime, time as _time, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+# Pravki-subscription-2026-08-17 §Z-22 E2E: генерируем RUN_TAG и
+# встраиваем в habit title (как scenario_happy_path.py:RUN_TAG).
+# Cleanup использует substring LIKE '%{run_tag}%' для scoped-удаления.
+RUN_TAG: str = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+
 # STATIC_DIR выставляем ДО импорта app.main (там на module-level create_app).
 _TMP_STATIC = tempfile.mkdtemp(prefix="hc_e2e_static_")
 os.environ.setdefault("STATIC_DIR", _TMP_STATIC)
@@ -229,7 +234,7 @@ async def seed_user_habit_membership(
 
         habit = Habit(
             id=str(uuid4()),
-            title=f"E2E-Subscription-Canonical-{chat_id}",
+            title=f"E2E-Subscription-Canonical-{RUN_TAG}-{chat_id}",
             description="canonical order test",
             chat_id=chat_id,
             checkin_window_start=_time(0, 0),
@@ -293,6 +298,9 @@ def check_bot_text(code: str, **kwargs) -> str | None:
 
 
 async def main() -> int:
+    # Pravki-subscription-2026-08-17 §Z-22 E2E: выводим RUN_TAG в machine-readable
+    # формате чтобы bash мог его захватить: `RUN_TAG=$(... | grep -oE 'RUN_TAG=\S+')`.
+    print(f"RUN_TAG={RUN_TAG}")
     print(f"{CYAN}=== Pravki-subscription-2026-08-17 §CanonicalOrder E2E ==={RESET}")
     print()
 
