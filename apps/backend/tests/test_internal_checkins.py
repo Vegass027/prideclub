@@ -602,6 +602,146 @@ class TestEnqueueCheckinMembershipStatus:
         assert body["task_id"] == "task-ok"
         mock_send.assert_called_once()
 
+    def test_subscription_expired_returns_synchronous_reject(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Pravki-subscription-2026-08-17 §Z-22 (canonical #6):
+        membership.subscription_until < club_date → ok=False, code="subscription_expired".
+        send_task НЕ вызван.
+
+        Сравнение по club_date в TZ клуба (Europe/Moscow), без grace period.
+        subscription_until = today (в Москве) — последний валидный день.
+        subscription_until = yesterday — истекла → reject.
+        """
+        import asyncio
+        from datetime import timedelta
+
+        async def _seed_expired():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000090,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                # Вчера по Москве → подписка точно истекла.
+                sub_until = habit.club_date(datetime.now(tz=UTC)) - timedelta(days=1)
+                m = Membership(
+                    user_id=user.id, habit_id=habit.id,
+                    status="active", subscription_until=sub_until,
+                )
+                s.add(m)
+                await s.flush()
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed_expired())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["code"] == "subscription_expired"
+        mock_send.assert_not_called()
+
+    def test_subscription_today_last_day_enqueues_normally(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Pravki-subscription-2026-08-17 Q2: subscription_until == club_date → ещё валиден.
+        Q2 явно говорит "день-в-день, без grace period". Значит сегодня — последний
+        день подписки, чек-ин разрешён, send_task ВЫЗЫВАЕТСЯ.
+        """
+        import asyncio
+
+        async def _seed_today():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000091,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                sub_until = habit.club_date(datetime.now(tz=UTC))  # today
+                m = Membership(
+                    user_id=user.id, habit_id=habit.id,
+                    status="active", subscription_until=sub_until,
+                )
+                s.add(m)
+                await s.flush()
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed_today())
+
+        with patch(
+            "app.api.v1.internal_checkins.send_task", return_value="task-ok"
+        ) as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["task_id"] == "task-ok"
+        mock_send.assert_called_once()
+
+    def test_subscription_expired_priority_over_paused(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Pravki-subscription-2026-08-17 §Z-22: combo status=paused + sub expired
+        → SUBSCRIPTION_EXPIRED (НЕ MEMBERSHIP_PAUSED). Семантика: "продли подписку"
+        лечит и подписку, и (через recompute пауз) возможный PAUSED.
+        "Пополни депозит" лечит ТОЛЬКО PAUSED, а подписку не лечит → зацикливание.
+        """
+        import asyncio
+        from datetime import timedelta
+
+        async def _seed_combo():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(
+                    s,
+                    chat_id=-1000000000092,
+                    checkin_window_start=dt_time(0, 0),
+                    checkin_window_end=dt_time(23, 59, 59),
+                )
+                sub_until = habit.club_date(datetime.now(tz=UTC)) - timedelta(days=5)
+                m = Membership(
+                    user_id=user.id, habit_id=habit.id,
+                    status="paused", subscription_until=sub_until,
+                )
+                s.add(m)
+                await s.flush()
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed_combo())
+
+        with patch("app.api.v1.internal_checkins.send_task") as mock_send:
+            with TestClient(app) as client:
+                r = client.post(
+                    "/internal/checkins/process",
+                    json=_payload_chat_id(chat_id),
+                    headers={"X-Service-Token": service_token},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        # ВАЖНО: subscription_expired, НЕ membership_paused.
+        assert body["code"] == "subscription_expired"
+        mock_send.assert_not_called()
+
 
 class TestEnqueueCheckinForwarded:
     """Pravki §Z-22 (Step 4, hole #4): synchronous reject for forwarded messages."""

@@ -17,7 +17,7 @@ import os
 import re  # noqa: E402
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from typing import Any
 
@@ -579,3 +579,89 @@ class TestHabitStateEndpoint:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["membership_status"] is None
+
+    def test_habit_state_returns_subscription_until_and_club_today(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Pravki-subscription-2026-08-17: HabitStateResponse содержит
+        subscription_until (из membership) и club_today (TZ клуба через habit.club_date).
+
+        Бот использует эти поля для prefilter #6 SUBSCRIPTION_EXPIRED.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                user = await _make_user(s, 7295309649)
+                habit = await _make_habit(s, proof_types=["video_note"])
+                m = Membership(
+                    user_id=user.id, habit_id=habit.id,
+                    status="active",
+                    subscription_until=date.today() + timedelta(days=15),
+                )
+                s.add(m)
+                await s.commit()
+                return habit.chat_id, user.id, habit.timezone
+
+        chat_id, user_id, tz = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": user_id},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["found"] is True
+        # subscription_until — ISO date в формате YYYY-MM-DD.
+        assert body["subscription_until"] is not None
+        assert body["subscription_until"] == (
+            date.today() + timedelta(days=15)
+        ).isoformat()
+        # club_today — ISO date через habit.club_date(now_utc).
+        # Для Europe/Moscow (UTC+3) и текущего времени в текущий день —
+        # это либо сегодня, либо вчера/завтра в зависимости от того, насколько
+        # близко к полуночи по Москве сейчас. Проверяем только что это валидная date.
+        from datetime import date as _date
+
+        assert body["club_today"] is not None
+        parsed_club_today = _date.fromisoformat(body["club_today"])
+        # club_today должен быть в пределах ±1 день от date.today() (UTC).
+        # (если тест запускается в момент границы суток в Москве,
+        #  разница может быть 1 день).
+        delta = abs((parsed_club_today - date.today()).days)
+        assert delta <= 1, (
+            f"club_today={parsed_club_today} слишком далеко от date.today()={date.today()}"
+        )
+
+    def test_habit_state_subscription_until_none_when_no_membership(
+        self, app: Any, service_token: str, _sqlite_engine: Any
+    ) -> None:
+        """Нет membership → subscription_until=None, club_today заполнен
+        (клуб найден, можно логировать на UI бота)."""
+        import asyncio
+
+        async def _seed():
+            async with session_module._session_factory() as s:
+                await _make_user(s, 7295309649)
+                habit = await _make_habit(s, proof_types=["video_note"])
+                # Намеренно НЕ создаём membership.
+                await s.commit()
+                return habit.chat_id
+
+        chat_id = asyncio.run(_seed())
+
+        with TestClient(app) as client:
+            r = client.get(
+                "/internal/bot/habit_state",
+                params={"chat_id": chat_id, "user_id": 7295309649},
+                headers={"X-Service-Token": service_token},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["found"] is True
+        assert body["subscription_until"] is None
+        assert body["club_today"] is not None  # club_date не зависит от membership

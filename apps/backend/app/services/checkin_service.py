@@ -11,6 +11,7 @@ from app.core.exceptions import (
     CheckinJoinedLateError,
     CheckinMembershipLeftError,
     CheckinMembershipPausedError,
+    CheckinSubscriptionExpiredError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     HabitArchivedError,
@@ -111,6 +112,27 @@ class CheckinService:
         # - status=left → recovery: rejoin через Marketplace (НЕ topup).
         # Сплит важен: бот даёт разные тексты (пополни vs rejoin), потому что
         # кнопки разные.
+        #
+        # Pravki-subscription-2026-08-17 §Z-22 (canonical #6): subscription check
+        # ДО paused/left. Семантика: "продли подписку" лечит и подписку, и (через
+        # recompute пауз) возможный PAUSED. "Пополни депозит" лечит ТОЛЬКО PAUSED,
+        # а подписку не лечит → пользователь зациклится на ошибке PAUSED после topup.
+        # Сравнение по club_date в TZ клуба (Q2): без grace period.
+        # subscription_until == club_date → ещё валиден (последний день).
+        if (
+            membership.subscription_until is not None
+            and membership.subscription_until < habit.club_date(now_utc)
+        ):
+            self._logger.info(
+                "checkin_rejected_subscription_expired",
+                extra={
+                    "user_id": user_id,
+                    "habit_id": habit_id,
+                    "subscription_until": membership.subscription_until.isoformat(),
+                    "club_date": habit.club_date(now_utc).isoformat(),
+                },
+            )
+            raise CheckinSubscriptionExpiredError()
         if membership.status.value == "paused":
             raise CheckinMembershipPausedError()
         if membership.status.value == "left":

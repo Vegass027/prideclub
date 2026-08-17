@@ -175,6 +175,128 @@ async def test_checkin_rejects_left_membership() -> None:
 
 
 @pytest.mark.asyncio
+async def test_checkin_rejects_expired_subscription() -> None:
+    """Pravki-subscription-2026-08-17 §Z-22 (canonical #6): subscription_until < club_date
+    → CheckinSubscriptionExpiredError. Сравнение по club_date в TZ клуба.
+
+    Worker race-fallback (defense-in-depth): если бот bypass / старая версия /
+    прямой вызов — worker тоже режет, чтобы не было ложного "Принято".
+    """
+    from datetime import timedelta
+
+    from app.core.exceptions import CheckinSubscriptionExpiredError
+
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.ACTIVE
+    )
+    # Подписка истекла 5 дней назад по club_date.
+    m.subscription_until = habit.club_date(datetime.now(tz=UTC)) - timedelta(days=5)
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    with pytest.raises(CheckinSubscriptionExpiredError) as exc_info:
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),
+            proof_message_id=1,
+            now_utc=datetime.now(tz=UTC),
+        )
+    assert exc_info.value.code == "subscription_expired"
+
+
+@pytest.mark.asyncio
+async def test_checkin_subscription_priority_over_paused_left() -> None:
+    """Pravki-subscription-2026-08-17 §Z-22: combo status=paused + sub expired
+    → CheckinSubscriptionExpiredError (НЕ CheckinMembershipPausedError).
+
+    Семантика: "продли подписку" лечит и подписку, и (через recompute пауз)
+    возможный PAUSED. "Пополни депозит" лечит ТОЛЬКО PAUSED, а подписку не
+    лечит → пользователь зациклится на ошибке PAUSED после topup.
+    """
+    from datetime import timedelta
+
+    from app.core.exceptions import CheckinSubscriptionExpiredError
+
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.PAUSED
+    )
+    m.subscription_until = habit.club_date(datetime.now(tz=UTC)) - timedelta(days=3)
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    with pytest.raises(CheckinSubscriptionExpiredError) as exc_info:
+        await service.process_checkin(
+            user_id=1,
+            habit_id=str(habit.id),
+            proof=_proof(),
+            proof_message_id=1,
+            now_utc=datetime.now(tz=UTC),
+        )
+    # ВАЖНО: subscription_expired, НЕ membership_paused.
+    assert exc_info.value.code == "subscription_expired"
+
+
+@pytest.mark.asyncio
+async def test_checkin_subscription_today_last_day_passes() -> None:
+    """Pravki-subscription-2026-08-17 Q2: subscription_until == club_date → ещё валиден.
+    "День-в-день, без grace period" — сегодня последний день подписки, чек-ин разрешён.
+    """
+    habit = make_habit()
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    m = membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.ACTIVE
+    )
+    m.subscription_until = habit.club_date(datetime.now(tz=UTC))  # today
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+    service = CheckinService(
+        session=FakeSession(checkin_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+    )
+
+    # Не должно быть subscription_expired; следующая проверка (window_closed)
+    # тоже не должна сработать (окно открыто 06:00–22:00 по умолчанию,
+    # current time UTC < 22:00). Проверяем happy path через PenaltyRepository
+    # return None (no penalty today) → idem создаст Checkin.
+    c, created = await service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=1,
+        now_utc=datetime.now(tz=UTC),
+    )
+    assert created is True
+
+
+@pytest.mark.asyncio
 async def test_checkin_window_closed() -> None:
     from datetime import time
 

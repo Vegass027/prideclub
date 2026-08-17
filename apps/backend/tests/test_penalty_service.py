@@ -288,6 +288,26 @@ async def test_apply_window_expired_writes_waived_marker_when_deposit_zero() -> 
     )
 
 
+class _SessionWithRefresh(_NoStreakSession):
+    """Session с настоящим refresh() — перечитывает атрибуты из FakeMembershipRepo.
+
+    Используется в тестах Pravki-paused-race-2026-08-14 (refresh+re-check status)
+    и Pravki-subscription-2026-08-17 (refresh+re-check subscription_until).
+    SQLAlchemy session.refresh(obj) делает re-SELECT атрибутов из БД; в фейке
+    «БД» — это FakeMembershipRepo._store.
+    """
+
+    def __init__(self, m_repo: FakeMembershipRepo) -> None:
+        super().__init__()
+        self._m_repo = m_repo
+
+    async def refresh(self, obj: Any) -> None:
+        fresh = await self._m_repo.get(str(obj.id))
+        assert fresh is not None
+        obj.status = fresh.status
+        obj.subscription_until = fresh.subscription_until
+
+
 class _SessionWithExistingPenaltyCheck(_NoStreakSession):
     """Fake-сессия: execute() возвращает ранее добавленные Penalty.
 
@@ -1033,24 +1053,6 @@ async def test_apply_catch_rereads_violator_status_after_user_lock() -> None:
     racey_user_repo = _RaceyUserRepo()
     racey_user_repo.add(_make_user(id=1, deposit_balance=500))
 
-    # Session с refresh(), который перечитывает атрибуты из membership_repo
-    # (имитирует SQLAlchemy session.refresh(obj) — повторный SELECT).
-    class _SessionWithRefresh(_NoStreakSession):
-        def __init__(self, m_repo: FakeMembershipRepo) -> None:
-            super().__init__()
-            self._m_repo = m_repo
-
-        async def refresh(self, obj: Any) -> None:
-            """SQLAlchemy session.refresh(obj) — re-query атрибутов из БД.
-
-            В фейке «БД» — это FakeMembershipRepo._store. Перечитываем
-            атрибуты obj из store. После race-мутации violator.status
-            в store == PAUSED, и это проброшено через refresh.
-            """
-            fresh = await self._m_repo.get(str(obj.id))
-            assert fresh is not None
-            obj.status = fresh.status
-
     service = PenaltyService(
         session=_SessionWithRefresh(membership_repo),
         habit_repo=habit_repo,
@@ -1074,6 +1076,100 @@ async def test_apply_catch_rereads_violator_status_after_user_lock() -> None:
     session = service._session
     assert session.penalties == []
     assert session.transactions == []
+
+
+async def test_apply_catch_rejects_violator_with_expired_subscription() -> None:
+    """Pravki-subscription-2026-08-17 §Z-22: violator.subscription_until < club_date
+    → MembershipNotActiveError (defense-in-depth). Семантика: после renew
+    подписки через /payments/subscribe membership реактивируется (recompute
+    воскрешает из PAUSED), но старый catch за этот день остаётся. Защита:
+    reject, чтобы не было двойного штрафа за один день.
+
+    Сравнение по club_date (параметр apply_catch), без grace period.
+    subscription_until == club_date → ещё валиден (последний день, можно ловить).
+    """
+    from datetime import timedelta
+
+    from app.core.exceptions import MembershipNotActiveError
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit.penalty_amount = 100
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.ACTIVE
+    )
+    # Подписка истекла 5 дней назад.
+    violator.subscription_until = date(2026, 1, 1) - timedelta(days=5)
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    service = PenaltyService(
+        session=_SessionWithRefresh(membership_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    with pytest.raises(MembershipNotActiveError):
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 1, 1),  # через 5 дней ПОСЛЕ subscription_until
+            catcher_membership_id=str(uuid4()),
+        )
+
+    # Belt-and-suspenders: НИЧЕГО не создано.
+    session = service._session
+    assert session.penalties == []
+    assert session.transactions == []
+
+
+async def test_apply_catch_subscription_today_last_day_succeeds() -> None:
+    """Pravki-subscription-2026-08-17 Q2: subscription_until == club_date → ещё валиден.
+    "День-в-день, без grace period" — сегодня последний день подписки, можно ловить.
+    """
+    from datetime import date as _date
+
+    from app.core.constants import PenaltyReason
+
+    habit_repo = FakeHabitRepo()
+    habit = make_habit()
+    habit.penalty_amount = 100
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(
+        user_id=1, habit_id=str(habit.id), status=MembershipStatus.ACTIVE
+    )
+    club_day = _date(2026, 1, 1)
+    violator.subscription_until = club_day  # today (last valid day)
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    service = PenaltyService(
+        session=_SessionWithRefresh(membership_repo),
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    # Не должно быть MembershipNotActiveError. Дальше ловим результат
+    # (или другой exception — нам важен сам факт что subscription не отверг).
+    penalty = await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=club_day,
+        catcher_membership_id=str(uuid4()),
+    )
+    assert penalty is not None
+    assert penalty.reason == PenaltyReason.CAUGHT
 
 
 def _make_user(*, id: int, deposit_balance: int) -> Any:

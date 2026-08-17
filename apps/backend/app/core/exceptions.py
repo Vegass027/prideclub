@@ -288,6 +288,24 @@ class CheckinMembershipPausedError(DomainError):
     code = CheckinRejectCode.MEMBERSHIP_PAUSED.value
 
 
+class CheckinSubscriptionExpiredError(DomainError):
+    """422: membership.subscription_until < habit.club_date(now_utc).
+
+    Pravki-subscription-2026-08-17 §Z-22 (canonical #6): подписка истекла,
+    пользователь должен продлить участие через POST /api/v1/payments/subscribe.
+    Ставится ПЕРЕД MEMBERSHIP_PAUSED (#7), потому что "пополни депозит" не
+    лечит истёкшую подписку — пользователь зациклится на ошибке PAUSED после
+    topup. Реакция "продли подписку" лечит ОБЕ причины: подписку и
+    (через recompute_pause_status) возможный PAUSED-статус.
+
+    Q2 (Pravki-subscription-2026-08-17): сравнение по club_date в TZ клуба,
+    без grace period. subscription_until == club_date → ещё валиден (последний день).
+    """
+
+    status_code = 422
+    code = CheckinRejectCode.SUBSCRIPTION_EXPIRED.value
+
+
 class CheckinMembershipLeftError(DomainError):
     """422: membership.status == LEFT (юзер вышел из клуба)."""
 

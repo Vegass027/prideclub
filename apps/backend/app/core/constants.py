@@ -120,16 +120,20 @@ class CheckinRejectCode(StrEnum):
               фактически провалился — первый чек-ин будет завтра)
 
       III. Wrong setup (нужно действие чтобы получить доступ):
-        6. MEMBERSHIP_PAUSED      (пополни депозит)
-        7. MEMBERSHIP_LEFT        (вступи в клуб заново)
+        6. SUBSCRIPTION_EXPIRED   (продли подписку — НЕ раньше PAUSED/LEFT,
+              потому что "пополни депозит" не лечит истёкшую подписку,
+              а "продли подписку" лечит и подписку, и (через recompute
+              пауз) потенциально воскрешает membership из PAUSED).
+        7. MEMBERSHIP_PAUSED      (пополни депозит)
+        8. MEMBERSHIP_LEFT        (вступи в клуб заново)
 
       IV. "Wrong time/topic" (можно исправить перепосылкой/ожиданием):
-        8. WINDOW_CLOSED          (окно закрыто — жди завтра)
-        9. WRONG_TOPIC            (не тот топик — пошли в правильный)
-       10. FORWARDED              (пересланное — запиши своё)
+        9. WINDOW_CLOSED          (окно закрыто — жди завтра)
+       10. WRONG_TOPIC            (не тот топик — пошли в правильный)
+       11. FORWARDED              (пересланное — запиши своё)
 
       V. Proof validation (дешёвая, на техническом уровне):
-       11. WRONG_TYPE / TOO_SHORT / STALE_MESSAGE / EMPTY_TEXT
+       12. WRONG_TYPE / TOO_SHORT / STALE_MESSAGE / EMPTY_TEXT
 
     Позиции 3-5 — это СУЩЕСТВУЮЩИЙ порядок бота (см. checkin.py), мы
     НЕ его меняем. WINDOW_CLOSED/WRONG_TOPIC/FORWARDED (категория IV)
@@ -138,6 +142,8 @@ class CheckinRejectCode(StrEnum):
     "что с ним произошло".
 
     Pravki §Z-22 (prefilter holes, 5-round fix).
+    Pravki-subscription-2026-08-17 §Z-22: SUBSCRIPTION_EXPIRED вставлен
+    в позицию #6 (выше PAUSED/LEFT, см. §III в этом docstring).
     """
 
     # I. Fundamental errors
@@ -147,7 +153,10 @@ class CheckinRejectCode(StrEnum):
     ALREADY_CAUGHT = "caught_today"
     ALREADY_CHECKED_IN = "checkin_already_exists"
     JOINED_LATE = "joined_late"
-    # III. Wrong setup (actionable — top up / rejoin)
+    # III. Wrong setup (actionable — renew subscription / top up / rejoin)
+    # Pravki-subscription-2026-08-17: SUBSCRIPTION_EXPIRED добавлен ПЕРВЫМ
+    # в категории III — вытесняет MEMBERSHIP_PAUSED/LEFT в позиции #7/#8.
+    SUBSCRIPTION_EXPIRED = "subscription_expired"
     MEMBERSHIP_NOT_ACTIVE = "membership_not_active"  # legacy, остаётся для catch-flow
     MEMBERSHIP_PAUSED = "membership_paused"
     MEMBERSHIP_LEFT = "membership_left"

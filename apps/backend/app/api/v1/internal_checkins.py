@@ -111,6 +111,28 @@ async def enqueue_checkin(
             },
         )
         return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.MEMBERSHIP_NOT_FOUND.value)
+    # Pravki-subscription-2026-08-17 §Z-22 (canonical #6): subscription_until check
+    # ДО paused/left. "Продли подписку" лечит и подписку, и потенциальный PAUSED
+    # (через recompute_pause_status после renew). "Пополни депозит" лечит ТОЛЬКО
+    # PAUSED, а подписку не лечит → пользователь зациклится на ошибке PAUSED
+    # после topup. Поэтому SUBSCRIPTION_EXPIRED выше.
+    # Сравнение по club_date в TZ клуба (Q2): без grace period.
+    # subscription_until == club_date → ещё валиден (последний день).
+    if (
+        membership.subscription_until is not None
+        and membership.subscription_until < habit.club_date(datetime.now(tz=UTC))
+    ):
+        log.info(
+            "checkin_enqueue_subscription_expired",
+            extra={
+                "user_id": payload.user_id,
+                "habit_id": str(habit.id),
+                "chat_id": payload.chat_id,
+                "subscription_until": membership.subscription_until.isoformat(),
+                "club_today": habit.club_date(datetime.now(tz=UTC)).isoformat(),
+            },
+        )
+        return CheckinEnqueueResponse(ok=False, code=CheckinRejectCode.SUBSCRIPTION_EXPIRED.value)
     if membership.status.value == "paused":
         log.info(
             "checkin_enqueue_membership_paused",

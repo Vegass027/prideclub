@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
@@ -335,6 +335,16 @@ class HabitStateResponse(BaseModel):
     #   для выбора текста (REJECT_CAUGHT_TODAY vs REJECT_PENALTY_DAY_CLOSED).
     caught_today: bool = False
     checkin_status: str | None = None
+    # Pravki-subscription-2026-08-17 §Z-22 (canonical #6):
+    # subscription_until из membership (Date | None). Бот сравнивает с
+    # habit.club_date(now_utc) и при subscription_until < club_date
+    # отвечает REJECT_SUBSCRIPTION_EXPIRED. None = юзер без membership
+    # или LEFT, defense-in-depth в /checkins/process отвергнет.
+    subscription_until: date | None = None
+    # club_date для бота — бот НЕ дублирует tz-логику, backend считает ОДИН РАЗ
+    # через habit.club_date(). Используется ботом в prefilter для сравнения
+    # subscription_until с "сегодня в TZ клуба". None если state не подгрузился.
+    club_today: date | None = None
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -420,10 +430,20 @@ async def get_habit_state(
     is_within_checkin_window = habit.is_within_checkin_window(datetime.now(tz=UTC))
 
     # Pravki §Z-22 (Step 3, hole #3): membership_status.
-    # canonical #6 (paused) / #7 (left) в CheckinRejectCode.
+    # Pravki-subscription-2026-08-17 §Z-22: SUBSCRIPTION_EXPIRED (#6) добавлен
+    # ПЕРЕД MEMBERSHIP_PAUSED (#7). Здесь canonical не имеет значения — это
+    # populate полей для HabitStateResponse. Бот сам решает порядок в prefilter.
     membership_status_value: str | None = None
     if membership is not None:
         membership_status_value = membership.status.value
+
+    # Pravki-subscription-2026-08-17: subscription_until для бота + club_date в TZ клуба.
+    # None для subscription_until если membership отсутствует (defense-in-depth отвергнет).
+    # club_today вычисляется через habit.club_date — бот НЕ дублирует tz-логику.
+    subscription_until_value: date | None = None
+    if membership is not None:
+        subscription_until_value = membership.subscription_until
+    club_today_value = habit.club_date(datetime.now(tz=UTC))
 
     return HabitStateResponse(
         found=True,
@@ -445,5 +465,8 @@ async def get_habit_state(
         # Pravki-bug-fixes §Z-21 (Item 4): новые поля.
         caught_today=caught_today,
         checkin_status=checkin_status,
+        # Pravki-subscription-2026-08-17: subscription_until + club_today.
+        subscription_until=subscription_until_value,
+        club_today=club_today_value,
     )
 

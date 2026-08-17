@@ -18,6 +18,7 @@ from app.core.exceptions import (
     CheckinJoinedLateError,
     CheckinMembershipLeftError,
     CheckinMembershipPausedError,
+    CheckinSubscriptionExpiredError,
     CheckinWindowClosedError,
     CheckinWrongTopicError,
     MembershipNotActiveError,
@@ -43,6 +44,9 @@ def test_all_exception_codes_match_enum() -> None:
         # на paused/left. Добавляются в Шаге 3 (в Шаге 0 этих классов не было).
         (CheckinMembershipPausedError, CheckinRejectCode.MEMBERSHIP_PAUSED),
         (CheckinMembershipLeftError, CheckinRejectCode.MEMBERSHIP_LEFT),
+        # Pravki-subscription-2026-08-17 §Z-22: новый код для истёкшей подписки.
+        # canonical #6 (выше paused/left), см. CheckinRejectCode docstring.
+        (CheckinSubscriptionExpiredError, CheckinRejectCode.SUBSCRIPTION_EXPIRED),
         # Legacy для catch-flow (НЕ чек-ин). MembershipNotActiveError.code
         # остаётся "membership_not_active" — он в enum для единого SoT,
         # но в чек-ин потоке НЕ используется (Шаг 3 сплитит).
@@ -121,13 +125,18 @@ def test_proof_validator_codes_are_enum_values() -> None:
 def test_checkin_reject_code_order_matches_documented_priority() -> None:
     """Документированный в docstring enum порядок = фактический порядок
     итерации. Защита от тихого рефакторинга, который переставил ключи
-    и нарушил canonical priority v2.
+    и нарушил canonical priority.
 
     Порядок в StrEnum = порядок итерации == порядок объявления в Python.
     V2 (после ревизии Шага 1.1): state-of-day идёт ПЕРЕД time/location,
     потому что для пойманного/отметившегося/нового участника текст
     "поймали" / "уже отметился" / "ты новичок" важнее, чем
     "окно закрыто".
+
+    V3 (Pravki-subscription-2026-08-17): SUBSCRIPTION_EXPIRED добавлен в
+    категорию III ПЕРВЫМ (выше PAUSED/LEFT). Семантика: "продли подписку"
+    лечит и подписку, и (через recompute пауз) потенциальный PAUSED.
+    "Пополни депозит" лечит ТОЛЬКО PAUSED, а подписку не лечит → зацикливание.
     """
     expected_order = [
         # I. Fundamental errors
@@ -137,8 +146,9 @@ def test_checkin_reject_code_order_matches_documented_priority() -> None:
         "caught_today",
         "checkin_already_exists",
         "joined_late",
-        # III. Wrong setup (actionable)
-        "membership_not_active",
+        # III. Wrong setup (actionable) — v3: subscription_expired ПЕРВЫЙ
+        "subscription_expired",
+        "membership_not_active",  # legacy, для catch-flow
         "membership_paused",
         "membership_left",
         # IV. Wrong time/topic

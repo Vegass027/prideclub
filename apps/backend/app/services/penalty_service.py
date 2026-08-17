@@ -123,6 +123,17 @@ class PenaltyService:
         await self._session.refresh(violator)
         if violator.status != MembershipStatus.ACTIVE:
             raise MembershipNotActiveError()
+        # Pravki-subscription-2026-08-17 §Z-22 (canonical #6): если подписка
+        # жертвы истекла, ловить бессмысленно — после renew подписки через
+        # /payments/subscribe membership реактивируется (recompute_pause_status
+        # воскрешает из PAUSED), но старый catch остаётся. Защита: reject с тем
+        # же MembershipNotActiveError (UI уже умеет мапить, см. CATCH_ERROR_LABELS
+        # в MembersPage.tsx). Сравнение по club_date (Q2): без grace period.
+        if (
+            violator.subscription_until is not None
+            and violator.subscription_until < club_date
+        ):
+            raise MembershipNotActiveError()
 
         habit = await self._habit_repo.get(str(violator.habit_id))
         if habit is None:
