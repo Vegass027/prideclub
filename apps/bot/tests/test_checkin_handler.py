@@ -272,6 +272,40 @@ def test_text_for_code_unknown() -> None:
     assert _text_for_code(None) == checkin_texts.REJECT_UNKNOWN
 
 
+def test_text_for_code_subscription_expired() -> None:
+    """Pravki-subscription-2026-08-17 §Z-22: code='subscription_expired' маппится
+    в REJECT_SUBSCRIPTION_EXPIRED (НЕ REJECT_UNKNOWN).
+
+    Бот prefilter (sync, _prefilter) обрабатывает subscription_expired
+    ДО backend — там рендерится напрямую через checkin_texts. Но в
+    worker race-fallback пути (bot prefilter bypass / старая версия /
+    прямой вызов) worker возвращает code='subscription_expired', и бот
+    маппит его через _text_for_code. Без этой ветки race-fallback
+    показывает юзеру REJECT_UNKNOWN ("не удалось обработать чек-ин")
+    вместо конкретного объяснения — сбивает с толку.
+
+    Аналогично out_of_window: маппинг требует kwargs (habit_title,
+    sub_until), без них — fallback на '?'.
+    """
+    # Без kwargs — fallback на '?'
+    expected_fallback = checkin_texts.REJECT_SUBSCRIPTION_EXPIRED.format(
+        name="Test", habit_title="", sub_until="?",
+    )
+    assert _text_for_code("subscription_expired", name="Test") == expected_fallback
+
+    # С kwargs — реальное название клуба + дата.
+    expected_full = checkin_texts.REJECT_SUBSCRIPTION_EXPIRED.format(
+        name="Test", habit_title="Утренняя пробежка", sub_until="2026-08-16",
+    )
+    assert _text_for_code(
+        "subscription_expired", name="Test",
+        habit_title="Утренняя пробежка", sub_until="2026-08-16",
+    ) == expected_full
+
+    # НЕ должен быть REJECT_UNKNOWN.
+    assert _text_for_code("subscription_expired", name="Test") != checkin_texts.REJECT_UNKNOWN
+
+
 # ---------- handle_proof ---------------------------------------------------
 
 

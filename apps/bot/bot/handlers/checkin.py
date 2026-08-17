@@ -144,6 +144,16 @@ def _text_for_code(code: str | None, *, name: str = "", **kwargs) -> str:
             start=kwargs.get("window_start", "?"),
             end=kwargs.get("window_end", "?"),
         )
+    if code == "subscription_expired":
+        # Pravki-subscription-2026-08-17 §Z-22 (canonical #6): подписка истекла.
+        # В worker race-fallback (bot prefilter bypassed) шлёт этот код →
+        # должен мапиться на тот же текст что и prefilter (consistency).
+        # Без этого — REJECT_UNKNOWN, который сбивает юзера с толку.
+        return checkin_texts.REJECT_SUBSCRIPTION_EXPIRED.format(
+            name=name,
+            habit_title=kwargs.get("habit_title", ""),
+            sub_until=kwargs.get("sub_until", "?"),
+        )
     return checkin_texts.REJECT_UNKNOWN
 
 
