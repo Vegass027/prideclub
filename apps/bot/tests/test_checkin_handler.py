@@ -2052,3 +2052,165 @@ async def test_prefilter_not_forwarded_via_real_parsed_update() -> None:
     # Бот НЕ должен отклонить как forwarded — идём к backend.
     assert len(backend.calls) == 1
     assert "Принято" in bot.sent[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Pravki-subscription-2026-08-17 §Z-22 (canonical #6): subscription_expired
+# ---------------------------------------------------------------------------
+#
+# Бот prefilter отвечает REJECT_SUBSCRIPTION_EXPIRED когда
+# state.subscription_until < state.club_today (TZ клуба, без grace).
+# Ветка идёт ПЕРЕД membership_status=paused/left (#7/#8) — "продли подписку"
+# лечит и подписку, и (через recompute пауз) возможный PAUSED. "Пополни депозит"
+# лечит ТОЛЬКО PAUSED, а подписку не лечит → зацикливание.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefilter_subscription_expired_returns_REJECT_SUBSCRIPTION_EXPIRED() -> None:
+    """Pravki-subscription-2026-08-17: state.subscription_until < state.club_today
+    → REJECT_SUBSCRIPTION_EXPIRED, backend.post НЕ вызывается.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "habit_title": "Утренняя пробежка",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+            # Подписка истекла вчера (в TZ клуба).
+            "subscription_until": "2026-08-16",
+            "club_today": "2026-08-17",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    assert len(bot.sent) == 1
+    text = bot.sent[0]["text"]
+    assert "продли" in text.lower() or "мини-апп" in text.lower(), (
+        f"REJECT_SUBSCRIPTION_EXPIRED должен упоминать recovery path, got: {text!r}"
+    )
+    assert "истекла" in text.lower() or "истек" in text.lower(), (
+        f"REJECT_SUBSCRIPTION_EXPIRED должен явно говорить что подписка истекла, got: {text!r}"
+    )
+    # Текст содержит название клуба (habit_title).
+    assert "Утренняя пробежка" in text, (
+        f"REJECT_SUBSCRIPTION_EXPIRED должен содержать название клуба, got: {text!r}"
+    )
+    # Backend НЕ вызван — мы в бот prefilter.
+    assert len(backend.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_prefilter_subscription_today_last_day_proceeds_to_backend() -> None:
+    """Pravki-subscription-2026-08-17 Q2: subscription_until == club_date → ещё валиден.
+    "День-в-день, без grace period" — сегодня последний день подписки,
+    бот НЕ должен отвергать, идём дальше к backend.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "habit_title": "Утренняя пробежка",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "active",
+            "subscription_until": "2026-08-17",  # today — последний день
+            "club_today": "2026-08-17",
+        },
+        response={"ok": True, "task_id": "abc", "code": None},
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    # Бот идёт к backend — нет REJECT_SUBSCRIPTION_EXPIRED.
+    assert len(backend.calls) == 1
+    assert "Принято" in bot.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_prefilter_subscription_priority_over_window_closed() -> None:
+    """COMBO: subscription_until < club_today + is_within_checkin_window=False.
+    Subscription_expired (#6) выше WINDOW_CLOSED (#9) — для combo показываем
+    подписку (более специфичная проблема с recovery), а не "окно закрыто".
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "habit_title": "Утренняя пробежка",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": False,  # окно закрыто
+            "membership_status": "active",
+            "subscription_until": "2026-08-10",  # неделю назад
+            "club_today": "2026-08-17",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    assert "истек" in text.lower() or "истекла" in text.lower(), (
+        f"subscription_expired должен выиграть у window_closed. Got: {text!r}"
+    )
+    assert "окно" not in text.lower() or "подписк" in text.lower(), (
+        f"window_closed текст НЕ должен выиграть. Got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prefilter_subscription_priority_over_paused() -> None:
+    """COMBO: subscription_until < club_today + membership_status=paused.
+    Subscription_expired (#6) выше MEMBERSHIP_PAUSED (#7) — "продли подписку"
+    лечит и подписку, и (через recompute пауз) возможный PAUSED. "Пополни
+    депозит" лечит ТОЛЬКО PAUSED, а подписку не лечит → зацикливание.
+    """
+    msg = _make_video_note_message()
+    bot = FakeBot()
+    backend = FakeBackendClient(
+        habit_state={
+            "found": True,
+            "habit_id": "h1",
+            "habit_title": "Утренняя пробежка",
+            "proof_types": ["video_note"],
+            "checkin_topic_thread_id": 12,
+            "already_checked_in": False,
+            "checked_in_at": None,
+            "is_joined_late": False,
+            "is_within_checkin_window": True,
+            "membership_status": "paused",  # paused + sub expired
+            "subscription_until": "2026-08-10",  # неделю назад
+            "club_today": "2026-08-17",
+        },
+    )
+
+    await handle_proof(msg, bot, backend)  # type: ignore[arg-type]
+
+    text = bot.sent[0]["text"]
+    # ВАЖНО: subscription_expired выигрывает, НЕ membership_paused.
+    assert "истек" in text.lower() or "истекла" in text.lower(), (
+        f"subscription_expired должен выиграть у membership_paused. Got: {text!r}"
+    )
+    assert "пополни депозит" not in text.lower(), (
+        f"membership_paused текст НЕ должен выиграть. Got: {text!r}"
+    )

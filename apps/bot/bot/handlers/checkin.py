@@ -303,6 +303,40 @@ async def _prefilter(
             end=state.get("checkin_window_end", "?"),
         )
 
+    # Pravki-subscription-2026-08-17 §Z-22 (canonical #6): subscription_expired.
+    # Ветка идёт ПЕРЕД membership_status=paused/left (#7/#8), потому что
+    # "продли подписку" лечит и подписку, и (через recompute пауз) возможный
+    # PAUSED. "Пополни депозит" лечит ТОЛЬКО PAUSED, а подписку не лечит →
+    # пользователь зациклится на ошибке PAUSED после topup.
+    #
+    # Семантика (Q2): subscription_until < club_date → expired. == club_date
+    # → ещё валиден (последний день, можно чек-иниться).
+    #
+    # Backend в HabitStateResponse уже вернул subscription_until и club_today
+    # (TZ клуба через habit.club_date) — бот НЕ дублирует tz-логику.
+    sub_until_str = state.get("subscription_until")
+    club_today_str = state.get("club_today")
+    if (
+        sub_until_str is not None
+        and club_today_str is not None
+        and sub_until_str < club_today_str
+    ):
+        log.info(
+            "prefilter_subscription_expired",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "subscription_until": sub_until_str,
+                "club_today": club_today_str,
+            },
+        )
+        habit_title = state.get("habit_title", "")
+        return checkin_texts.REJECT_SUBSCRIPTION_EXPIRED.format(
+            name=name,
+            habit_title=habit_title,
+            sub_until=sub_until_str,
+        )
+
     # Pravki-paused-window-open-2026-08-14 + Variant B (merge conflict fix):
     # ЕДИНАЯ ветка membership_status PAUSED/LEFT — идёт ПОСЛЕ state-of-day
     # (caught_today, already_checked_in, joined_late) — для combo caught+paused

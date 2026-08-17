@@ -345,6 +345,10 @@ class HabitStateResponse(BaseModel):
     # через habit.club_date(). Используется ботом в prefilter для сравнения
     # subscription_until с "сегодня в TZ клуба". None если state не подгрузился.
     club_today: date | None = None
+    # Pravki-subscription-2026-08-17: habit.title нужен боту для текста
+    # REJECT_SUBSCRIPTION_EXPIRED. Default "" = если state не подгрузился,
+    # defense-in-depth в /checkins/process всё равно отвергнет.
+    habit_title: str = ""
 
 
 @router.get("/bot/habit_state", response_model=HabitStateResponse)
@@ -448,6 +452,7 @@ async def get_habit_state(
     return HabitStateResponse(
         found=True,
         habit_id=str(habit.id),
+        habit_title=habit.title,
         proof_types=list(habit.proof_types or []),
         checkin_topic_thread_id=habit.checkin_topic_thread_id,
         already_checked_in=already_checked_in,
