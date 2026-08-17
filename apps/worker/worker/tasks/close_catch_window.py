@@ -70,16 +70,6 @@ async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
             notifications.append(
                 (membership, int(penalty.amount))
             )
-            continue
-        penalty = await penalty_service.apply_window_expired(
-            violator_membership_id=str(membership.id),
-            club_date=club_date,
-        )
-        if penalty is not None:
-            penalized += 1
-            notifications.append(
-                (membership, int(penalty.amount))
-            )
 
     return {
         "habit_id": str(habit.id),
