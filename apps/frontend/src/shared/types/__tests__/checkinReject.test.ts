@@ -9,6 +9,8 @@ describe("CheckinRejectCode mirror", () => {
     expect(CheckinRejectCode.HABIT_NOT_FOUND).toBe("habit_not_found");
     expect(CheckinRejectCode.MEMBERSHIP_NOT_FOUND).toBe("membership_not_found");
     expect(CheckinRejectCode.MEMBERSHIP_NOT_ACTIVE).toBe("membership_not_active");
+    // Pravki-subscription-2026-08-17 §Z-22: SUBSCRIPTION_EXPIRED добавлен.
+    expect(CheckinRejectCode.SUBSCRIPTION_EXPIRED).toBe("subscription_expired");
     expect(CheckinRejectCode.MEMBERSHIP_PAUSED).toBe("membership_paused");
     expect(CheckinRejectCode.MEMBERSHIP_LEFT).toBe("membership_left");
     expect(CheckinRejectCode.WINDOW_CLOSED).toBe("checkin_window_closed");

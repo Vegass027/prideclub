@@ -19,6 +19,11 @@ export const CheckinRejectCode = {
   HABIT_NOT_FOUND: "habit_not_found",
   MEMBERSHIP_NOT_FOUND: "membership_not_found",
   MEMBERSHIP_NOT_ACTIVE: "membership_not_active",
+  // Pravki-subscription-2026-08-17 §Z-22 (canonical #6): подписка истекла.
+  // ВЫШЕ MEMBERSHIP_PAUSED — "продли подписку" лечит и подписку, и (через
+  // recompute пауз) возможный PAUSED. "Пополни депозит" лечит ТОЛЬКО PAUSED,
+  // а подписку не лечит → пользователь зациклится на ошибке PAUSED после topup.
+  SUBSCRIPTION_EXPIRED: "subscription_expired",
   MEMBERSHIP_PAUSED: "membership_paused",
   MEMBERSHIP_LEFT: "membership_left",
   WINDOW_CLOSED: "checkin_window_closed",

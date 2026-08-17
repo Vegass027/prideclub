@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useToday, useHabitSse, useWallet } from "@/shared/hooks";
 import { formatKopecks } from "@/shared/utils/format";
+import { computeSubState } from "@/shared/utils/subscriptionState";
 import { missingKopecks } from "@/shared/utils/topupPresets";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
 import { EmptyState } from "@/shared/ui/EmptyState";
 import { HabitNav } from "@/shared/ui/HabitNav";
+import { JoinPayModal } from "@/shared/ui/JoinPayModal";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { ScreenLayout } from "@/shared/ui/ScreenLayout";
 import { Skeleton } from "@/shared/ui/Skeleton";
@@ -71,6 +73,8 @@ export function TodayPage() {
   // кнопки «Сделать чек-ин» если deposit < penalty этого клуба.
   const { data: wallet } = useWallet();
   const [topupOpen, setTopupOpen] = useState(false);
+  // Pravki-subscription-2026-08-17 §Z-22: модалка продления подписки (smart renew).
+  const [renewOpen, setRenewOpen] = useState(false);
 
   // Real-time: держим ["today", habitId] в кэше актуальным через SSE
   // multiplex (Pravki Items 7+8+9). useToday даёт первый снимок при загрузке,
@@ -135,6 +139,13 @@ export function TodayPage() {
   const depositMissing = walletClub
     ? missingKopecks(walletClub.penalty_amount, wallet?.deposit_balance ?? 0)
     : 0;
+
+  // Pravki-subscription-2026-08-17: состояние подписки для бейджа/баннера.
+  // Источник — walletClub.subscription_until (если есть), иначе membership.
+  const subState = computeSubState(
+    walletClub?.subscription_until ?? membership?.subscription_until ?? null,
+    habit.timezone,
+  );
 
   return (
     <ScreenLayout>
@@ -232,6 +243,33 @@ export function TodayPage() {
           </>
         )}
 
+        {/* Pravki-subscription-2026-08-17 §Z-22: бейдж/баннер подписки.
+            Идёт ПЕРЕД депозитным баннером — это разные проблемы с разными
+            recovery-действиями ("продли подписку" vs "пополни депозит"),
+            показываем оба одновременно если оба активны. */}
+        {subState && subState.kind === "soon" && (
+          <div className="mb-3 rounded-card border border-warning/30 bg-warning/10 p-3 text-sm">
+            <strong className="block text-warning">
+              {subState.daysLeft === 1
+                ? "⚠️ Подписка закончится через 1 день"
+                : "⚠️ Подписка закончится через 2 дня"}
+            </strong>
+            <span className="mt-1 block text-xs text-muted">
+              Продли заранее в мини-аппе, чтобы не потерять доступ к чекинам.
+            </span>
+          </div>
+        )}
+        {subState && subState.kind === "expired" && (
+          <div className="mb-3 rounded-card border-2 border-danger/30 bg-danger/10 p-3 text-sm">
+            <strong className="block text-danger">
+              🚫 Подписка окончена
+            </strong>
+            <span className="mt-1 block text-xs text-muted">
+              Чек-ин невозможен до продления участия.
+            </span>
+          </div>
+        )}
+
         {/* Pravki-deposit-sse.md §Z-4.3: блокировка чек-ина при недостаточном депозите. */}
         {!canCheckin && walletClub && (
           <div className="mb-3 rounded-card border border-warning/30 bg-warning/10 p-3 text-sm">
@@ -285,6 +323,24 @@ export function TodayPage() {
               className="w-full"
             >
               💰 Пополнить депозит
+            </Button>
+          )}
+          {/* Pravki-subscription-2026-08-17 §Z-22: кнопка продления подписки.
+              Показывается когда soon/expired (а не ok). Не показывается
+              если уже висит баннер депозита (canCheckin=false) — там
+              пользователю и так хватает действий. Но НЕ зависит от canCheckin:
+              юзер может иметь полный депозит но истёкшую подписку, и ему
+              нужна кнопка продления. */}
+          {subState && (subState.kind === "soon" || subState.kind === "expired") && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                hapticImpact("medium");
+                setRenewOpen(true);
+              }}
+              className="w-full"
+            >
+              🔄 Продлить подписку
             </Button>
           )}
         </div>
@@ -455,6 +511,29 @@ export function TodayPage() {
           walletClub
             ? missingKopecks(walletClub.penalty_amount, wallet?.deposit_balance ?? 0)
             : undefined
+        }
+      />
+
+      {/* Pravki-subscription-2026-08-17: модалка продления подписки (smart renew).
+          Открывается при клике на "🔄 Продлить подписку" в баннере soon/expired.
+          Если депозит уже достаточный — mode="renew-only" (списываем только
+          price_month). Если нет — mode="full" с предзаполненным deposit_amount. */}
+      <JoinPayModal
+        open={renewOpen}
+        onClose={() => setRenewOpen(false)}
+        onSuccess={() => {
+          // После успешного продления — refetch всех зависимых данных.
+          // Wallet (canCheckin + subscription_until) и today (membership).
+          refetch();
+        }}
+        habit={{
+          id: habit.id,
+          title: habit.title,
+          penalty_amount: habit.penalty_amount,
+          price_month: habit.price_month,
+        }}
+        mode={
+          walletClub && walletClub.can_checkin ? "renew-only" : "full"
         }
       />
     </ScreenLayout>

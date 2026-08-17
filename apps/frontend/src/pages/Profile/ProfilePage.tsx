@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useBalance, useMyHabits } from "@/shared/hooks";
 import { formatDateTime, formatKopecks, formatShortDate, transactionTypeLabel } from "@/shared/utils/format";
+import { computeSubState } from "@/shared/utils/subscriptionState";
+import { SubscriptionBadge } from "@/shared/ui/SubscriptionBadge";
 import { Avatar } from "@/shared/ui/Avatar";
 import { BottomNav } from "@/shared/ui/BottomNav";
 import { Button } from "@/shared/ui/Button";
@@ -127,24 +129,45 @@ export function ProfilePage() {
                         )}
                       </div>
                       {/* Feature/paused-member-ux: paused-юзер видит иконку ⏸,
-                          чтобы понимать почему membership не активно. */}
-                      {h.membership_status === "paused" && (
-                        <span
-                          className="shrink-0 rounded-full bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning"
-                          title="Участие на паузе — нет депозита"
-                        >
-                          ⏸ пауза
-                        </span>
-                      )}
+                          чтобы понимать почему membership не активно.
+                          Pravki-subscription-2026-08-17: бейдж подписки (soon/expired)
+                          показывается рядом, отдельным SubscriptionBadge — это
+                          разные сигналы (пауза = нет депозита, бейдж = истекает
+                          подписка), пользователь должен видеть оба. */}
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        {h.membership_status === "paused" && (
+                          <span
+                            className="rounded-full bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning"
+                            title="Участие на паузе — нет депозита"
+                          >
+                            ⏸ пауза
+                          </span>
+                        )}
+                        {(() => {
+                          const subState = computeSubState(
+                            h.subscription_until,
+                            h.timezone,
+                          );
+                          return subState ? (
+                            <SubscriptionBadge state={subState} size="sm" />
+                          ) : null;
+                        })()}
+                      </div>
                     </div>
-                    {/* Feature/paused-member-ux: badge "Членство до {date}".
-                        ISO date → DD.MM.YYYY для UX. joined_at НЕ показываем
-                        (по решению UX: избыточно). */}
-                    {h.subscription_until && (
-                      <p className="mb-2 text-[11px] text-muted">
-                        Членство до {formatShortDate(h.subscription_until)}
-                      </p>
-                    )}
+                    {/* Feature/paused-member-ux + Pravki-subscription-2026-08-17:
+                        строка "Членство до {date}" показывается ТОЛЬКО в ok-состоянии
+                        (daysLeft >= 3). В soon/expired — заменена на бейдж выше. */}
+                    {(() => {
+                      const subState = computeSubState(h.subscription_until, h.timezone);
+                      if (!subState || subState.kind === "ok") {
+                        return h.subscription_until ? (
+                          <p className="mb-2 text-[11px] text-muted">
+                            Членство до {formatShortDate(h.subscription_until)}
+                          </p>
+                        ) : null;
+                      }
+                      return null;
+                    })()}
                     <div className="flex gap-2">
                       <Button
                         onClick={() => navigate(`/habits/${h.id}/today`)}

@@ -24,7 +24,7 @@ import {
  * Persistence — через БД, не через localStorage: после успеха юзер попадает
  * на /today, фронт видит ACTIVE membership через стандартный fetch.
  */
-export type JoinPayModalMode = "full" | "deposit-only";
+export type JoinPayModalMode = "full" | "deposit-only" | "renew-only";
 
 interface JoinPayModalProps {
   open: boolean;
@@ -152,18 +152,25 @@ export function JoinPayModal({
   );
   const showCustomInput = availablePresets.length === 0;
   const isFullMode = mode === "full";
+  // Pravki-subscription-2026-08-17 §Z-13.5 (commit 1, smart renew):
+  // renew-only mode — продление подписки когда deposit уже достаточный.
+  // Показываем только price_month, чекбокс подписки НЕ нужен (auto-accept),
+  // блок выбора депозита скрыт (отправляем deposit_amount_kopecks=0).
+  const isRenewOnlyMode = mode === "renew-only";
 
   // Подсчёт итогов.
-  const chosenDepositKopecks =
-    selectedPreset ??
-    (customAmount ? Math.max(0, parseInt(customAmount, 10)) * KOPECKS_PER_RUB : 0);
+  const chosenDepositKopecks = isRenewOnlyMode
+    ? 0
+    : selectedPreset ??
+      (customAmount ? Math.max(0, parseInt(customAmount, 10)) * KOPECKS_PER_RUB : 0);
   const totalKopecks = isFullMode
     ? habit.price_month + chosenDepositKopecks
     : chosenDepositKopecks;
-  const canPay =
-    chosenDepositKopecks > 0 &&
-    chosenDepositKopecks >= habit.penalty_amount &&
-    (isFullMode ? subscriptionAccepted : true);
+  const canPay = isRenewOnlyMode
+    ? true  // В renew-only всегда можно платить (subscription auto-accepted, deposit=0)
+    : chosenDepositKopecks > 0 &&
+      chosenDepositKopecks >= habit.penalty_amount &&
+      (isFullMode ? subscriptionAccepted : true);
 
   // Escape закрывает (как в TopUpModal).
   useEffect(() => {
@@ -205,7 +212,11 @@ export function JoinPayModal({
       {
         habit_id: habit.id,
         deposit_amount_kopecks: chosenDepositKopecks,
-        subscription_accepted: isFullMode && subscriptionAccepted,
+        // renew-only: subscription_accepted=true автоматически (нет чекбокса).
+        // full mode: требуем явное согласие через чекбокс.
+        // deposit-only mode: не нужно (case 3b), но отправляем false (бэкенд
+        // проверяет: только при активной подписке можно слать false).
+        subscription_accepted: isRenewOnlyMode ? true : isFullMode ? subscriptionAccepted : false,
         idempotency_key: uuid4(),
       },
       {
@@ -220,11 +231,15 @@ export function JoinPayModal({
 
   const titleText =
     subtitle ??
-    (isFullMode
+    (isRenewOnlyMode
+      ? `Продлить участие в «${habit.title}»`
+      : isFullMode
       ? `Вступить в клуб «${habit.title}»`
       : `Пополнить и открыть «${habit.title}»`);
 
-  const buttonText = isFullMode
+  const buttonText = isRenewOnlyMode
+    ? `Оплатить ${formatRub(totalKopecks)}`
+    : isFullMode
     ? `Оплатить ${formatRub(totalKopecks)}`
     : `Пополнить ${formatRub(totalKopecks)} и открыть клуб`;
 
@@ -254,8 +269,8 @@ export function JoinPayModal({
           </button>
         </div>
 
-        {/* Подписка — только в full-режиме. */}
-        {isFullMode && (
+        {/* Подписка — в full-режиме (с чекбоксом) или renew-only (auto-accept, без чекбокса). */}
+        {(isFullMode || isRenewOnlyMode) && (
           <div className="mb-4 rounded-card border border-white/10 bg-surface p-3">
             <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">
               Подписка
@@ -263,21 +278,28 @@ export function JoinPayModal({
             <div className="mb-3 text-base font-semibold text-text">
               {formatRub(habit.price_month)} / мес
             </div>
-            <label className="flex cursor-pointer items-start gap-2 text-sm text-text">
-              <input
-                type="checkbox"
-                checked={subscriptionAccepted}
-                onChange={(e) => {
-                  hapticImpact("light");
-                  setSubscriptionAccepted(e.target.checked);
-                }}
-                disabled={subscribe.isPending}
-                className="mt-0.5 h-4 w-4 rounded border-white/20 bg-surface text-primary focus:ring-primary disabled:opacity-40"
-              />
-              <span>
-                Согласен на подписку {formatRub(habit.price_month)} / мес
-              </span>
-            </label>
+            {isFullMode && (
+              <label className="flex cursor-pointer items-start gap-2 text-sm text-text">
+                <input
+                  type="checkbox"
+                  checked={subscriptionAccepted}
+                  onChange={(e) => {
+                    hapticImpact("light");
+                    setSubscriptionAccepted(e.target.checked);
+                  }}
+                  disabled={subscribe.isPending}
+                  className="mt-0.5 h-4 w-4 rounded border-white/20 bg-surface text-primary focus:ring-primary disabled:opacity-40"
+                />
+                <span>
+                  Согласен на подписку {formatRub(habit.price_month)} / мес
+                </span>
+              </label>
+            )}
+            {isRenewOnlyMode && (
+              <p className="mt-1 text-sm text-text">
+                Продление подписки на 30 дней.
+              </p>
+            )}
             <p className="mt-2 text-[11px] leading-snug text-muted">
               Это первый платёж. В следующий раз при повторном открытии клуба
               нужно будет пополнить только депозит.
@@ -285,10 +307,12 @@ export function JoinPayModal({
           </div>
         )}
 
-        {/* Блок выбора суммы депозита — общий для обоих режимов. */}
-        <div className="mb-3 text-[10px] uppercase tracking-wide text-muted">
-          Депозит
-        </div>
+        {/* Блок выбора суммы депозита — пропускаем в renew-only (депозит не трогаем). */}
+        {!isRenewOnlyMode && (
+          <>
+            <div className="mb-3 text-[10px] uppercase tracking-wide text-muted">
+              Депозит
+            </div>
         {showCustomInput ? (
           <div className="mb-4">
             <label
@@ -343,9 +367,23 @@ export function JoinPayModal({
             })}
           </div>
         )}
+          </>
+        )}
 
-        {/* Итог — общий для обоих режимов. */}
-        {isFullMode && (
+        {/* Информация о депозите в renew-only mode (не трогаем его). */}
+        {isRenewOnlyMode && (
+          <div className="mb-4 rounded-card border border-success/30 bg-success/10 p-3 text-sm">
+            <strong className="block text-success">
+              ✓ Депозит уже достаточный
+            </strong>
+            <span className="mt-1 block text-xs text-muted">
+              Списываем только стоимость подписки. Депозит не трогаем.
+            </span>
+          </div>
+        )}
+
+        {/* Итог — для full и renew-only. */}
+        {(isFullMode || isRenewOnlyMode) && (
           <div className="mb-4 flex items-baseline justify-between border-t border-white/5 pt-3">
             <span className="text-sm text-muted">Итого к оплате</span>
             <span className="text-lg font-bold text-text">
