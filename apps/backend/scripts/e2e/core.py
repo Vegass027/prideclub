@@ -98,7 +98,18 @@ def load_secrets(
             or _get("BOT_TOKEN")  # fallback — admin endpoint при отсутствии использует основной
         ),
         service_secret=_get("SERVICE_SECRET"),
-        webhook_secret=_get("WEBHOOK_SECRET"),
+        # Pravki-subscription-2026-08-17 §Z-22 E2E: WEBHOOK_SECRET optional.
+        # В backend-контейнере (habit-backend) WEBHOOK_SECRET НЕ задан
+        # (только в x-bot-env для habit-bot). Сценарии, которые не вызывают
+        # bot webhook (cleanup, scenario_canonical_order_prod), не нужны
+        # в webhook_secret — оставляем пустую строку.
+        # Сценарии, которые используют webhook_post (scenario_happy_path),
+        # должны запускаться из bot-контейнера или передавать
+        # WEBHOOK_SECRET через -e.
+        webhook_secret=(
+            os.environ.get("WEBHOOK_SECRET")
+            or env_from_files.get("WEBHOOK_SECRET", "")
+        ),
         owner_telegram_id=int(_get("OWNER_TELEGRAM_ID")),
         database_url=_get("DATABASE_URL"),
         backend_url=os.environ.get(
