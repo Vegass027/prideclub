@@ -1,10 +1,16 @@
 # 06 — Модель данных
 
-> Snapshot от 2026-07-23 (обновлено 2026-08-09 после Pravki-subscribe-and-join Z-19
-> deploy). Схема таблиц и антифрод актуальны. **Список миграций расширен до 15**
-> (000 → 015, см. §3). Финансовая идемпотентность — через уникальные индексы,
-> см. §5. Topic-scoped чек-ины и третий топик для чата клуба — см. §6.
-> **Redis SSE namespaces** (`sse:user:*`, `sse_published:*`, `sse:conn:*`) — см. §11.
+> Snapshot от 2026-07-23 (обновлено 2026-08-18 после Pravki-subscription-2026-08-17
+> deploy на HEAD `403219d`; ранее 2026-08-09 после Pravki-subscribe-and-join Z-19
+> deploy). Схема таблиц и антифрод актуальны. **Без новых миграций** —
+> `memberships.subscription_until` существовал, но НЕ проверялся; теперь
+> проверяется **на лету** через `habit.club_date(now_utc)` в `internal_checkins` /
+> `checkin_service.process_checkin` / `penalty_service.apply_catch` (TZ клуба,
+> без grace period). См. `Pravki-subscription-2026-08-17.md §Z-22`.
+> **Список миграций остался 15** (000 → 015, см. §3). Финансовая
+> идемпотентность — через уникальные индексы, см. §5. Topic-scoped чек-ины
+> и третий топик для чата клуба — см. §6. **Redis SSE namespaces**
+> (`sse:user:*`, `sse_published:*`, `sse:conn:*`) — см. §11.
 > **Pravki-subscribe-and-join:** новый endpoint `POST /api/v1/payments/subscribe`
 > + `subscribe_and_join` метод в `MembershipService` (см. `Pravki-subscribe-and-join.md`
 > §Z-13). **Pravki-bug-fixes Z-19 (joiner-late):** `CheckinStatus` enum расширен
@@ -68,7 +74,7 @@
 | habit_id | UUID | FK → habits |
 | status | ENUM | `active` / `paused` / `left` |
 | deposit_balance | BIGINT | Текущий баланс депозита |
-| subscription_until | DATE | Дата окончания оплаченного периода |
+| subscription_until | DATE | Дата окончания оплаченного периода. Проверяется **на лету** в `internal_checkins` + `checkin_service.process_checkin` + `penalty_service.apply_catch` через `habit.club_date(now_utc)` (TZ клуба, без grace period). См. `Pravki-subscription-2026-08-17.md §Z-22` для канонического порядка v3 (SUBSCRIPTION_EXPIRED выше PAUSED/LEFT). |
 | auto_renew_enabled | BOOLEAN | Автопродление подписки |
 | joined_at | TIMESTAMPTZ | |
 

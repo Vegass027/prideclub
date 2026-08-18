@@ -1,7 +1,10 @@
 # Pravki-subscription-2026-08-17 — блокировка по subscription_until + smart renew + бейдж
 
-> **Snapshot 2026-08-17.** Серия из 4 атомарных коммитов на ветке
-> `feature/qa-batch-2026-08-14`:
+> **Snapshot 2026-08-18 (обновлено после deploy real-prod E2E).** Серия из **13 коммитов**
+> на ветке `feature/qa-batch-2026-08-14` (4 feature + 1 docs + 1 bot-race-fix + 6 e2e-infra hotfix,
+> 1 real-prod e2e):
+>
+> **Feature commits (4):**
 >
 > | # | Commit | Что |
 > |---|---|---|
@@ -9,6 +12,28 @@
 > | 2 | `3240b83` | `feat(checkin): block checkin/catch on the fly when subscription_until < club_date` |
 > | 3 | `9842d4e` | `feat(bot): prefilter rejects expired-subscription check-ins` |
 > | 4 | `abde0d3` | `feat(frontend): subscription-expiry badge (3 states) + JoinPayModal renew-only mode` |
+>
+> **Docs (1):**
+>
+> | 5 | `3e0f8f0` | `docs: Pravki-subscription-2026-08-17 + row 28 в prod-readiness` |
+>
+> **Race-fallback fix (1) — найден через e2e:**
+>
+> | 6 | `69d55a5` | `fix(bot): map 'subscription_expired' code to REJECT_SUBSCRIPTION_EXPIRED in race-fallback + e2e` |
+>
+> **Real-prod E2E + hotfixes (6) — найдены после deploy через real-prod E2E:**
+>
+> | 7 | `f3c9d87` | `fix(e2e): cleanup accepts --user-ids, scenario emits RUN_TAG для scoped cleanup` |
+> | 8 | `bb7dc0c` | `fix(e2e): graceful fallback when checkin_texts.py unavailable (prod container)` |
+> | 9 | `339ceb5` | `fix(e2e): drop duplicate assignment left over from importlib refactor` |
+> | 10 | `c18ab9c` | `fix(e2e): cleanup reads DATABASE_URL directly (avoid load_secrets)` |
+> | 11 | `de18c13` | `feat(e2e): real-prod E2E scenario + WEBHOOK_SECRET optional в load_secrets` |
+> | 12 | `42474af` | `fix(e2e): remove non-existent language_code column from users INSERT` |
+> | 13 | `403219d` | `fix(e2e): include message_thread_id в payload для topic-scoped habit` |
+
+> **HEAD на проде:** `403219d`. Production функционально подтверждено через real-prod
+> E2E (4/4 проверки каноничного порядка прошли через реальный HTTP → реальный Postgres,
+> см. §Real-prod E2E ниже).
 
 ## 0. Текущее состояние на проде
 
@@ -155,16 +180,29 @@ subUntil=2026-08-18:
 
 ## Тестовая сводка
 
-| Слой | Было | Стало | Новых |
+| Слой | pre-series (`a41a0fa`) | HEAD (`403219d`) | Δ |
 |---|---|---|---|
-| Backend | 414 | 424 | +10 (smart renew 5, gates 5) |
-| Bot | 65 | 69 | +4 (prefilter branch + 3 combo) |
-| Frontend | 94 | 100 | +6 (SubscriptionBadge 6) +20 (clubDate 5 + subscriptionState 9 + checkinReject 1 = 15) |
+| Backend passed | 398 | 413 | +15 (5 smart_renew + 10 gates) |
+| Backend failed | 22 | 22 | 0 (pre-existing baseline, см. ниже) |
+| Backend total | 420 | 435 | +15 |
+| Bot passed | 65 | 70 | +5 (prefilter 4 + race-fallback 1) |
+| Bot failed | 0 | 0 | 0 |
+| Frontend passed | 74 | 100 | +26 (SubscriptionBadge 6 + clubDate 10 + subscriptionState 10) |
+| Frontend failed | 0 | 0 | 0 |
 | Worker | без изменений | без изменений | 0 |
-| **Итого** | | | **+49** |
+| **Итого новых тестов** | | | **+46** |
 
-11 фейлов в backend — pre-existing baseline (admin_habits_api + user_photo_endpoint),
-не регрессии серии.
+**22 pre-existing failed backend** — идентичны на pre-series и HEAD (verified
+через `git worktree add` для всех 3 точек — см. историю чата от 2026-08-18).
+Распределение: 12 `test_admin_habits_api.py` (требуют Redis mock) +
+2 `test_app.py` (admin auth) + 6 `test_joined_late_protection.py` (test infra) +
+2 `test_user_photo_endpoint.py` (требуют AvatarService mock).
+
+> ⚠️ Backlog (отдельный тикет): пометить 22 pre-existing failed через `@pytest.mark.xfail`/`skip` с
+> причиной, чтобы будущие baseline-сравнения не путали "мы не трогали" с "оно и так не работает".
+> Также: `conftest.py` module-level env setup (сейчас env vars только в `_env` fixture,
+> что ломает pytest collection в чистом worktree и была корневой причиной сегодняшних
+> невоспроизводимых baseline-чисел).
 
 ---
 
@@ -174,3 +212,62 @@ subUntil=2026-08-18:
 - Реальный bot-push при истечении подписки (Q3 — пользователь отверг, бейдж — достаточно).
 - `expire_subscriptions_daily` cron (отвергнут в пользу "на лету").
 - `chat_id` vs `habit_id` контракт в `internal_payments.py` (отдельная задача).
+
+---
+
+## Real-prod E2E (после deploy)
+
+После deploy `f3c9d87..403219d` на проде был написан и прогнан **real-prod E2E**
+через `E2EHttp` → реальный HTTPS → nginx → `api.prideclub.fun` → реальный FastAPI
+→ **реальный prod PostgreSQL** (не TestClient+SQLite):
+
+```
+RUN_TAG=20260818-070900
+
+=== Setup: create synthetic users 99005-99008 ===
+  ✓ 4 users present
+  ✓ habit created: id=2d64e4d2-1bb7-483a-a0b5-7bcc0963d04a
+  ✓ habit activated
+=== Setup: topup + join for each user ===
+  ✓ user 99005..99008 (memberships)
+
+=== DB verify: subscription_until сохранён в Postgres ===
+  user= 99005 status=active   subscription_until=2026-08-17   ← вчера
+  user= 99006 status=paused   subscription_until=2026-08-17   ← вчера
+  user= 99007 status=left     subscription_until=2026-08-17   ← вчера
+  user= 99008 status=active   subscription_until=2026-08-18   ← сегодня (last valid day)
+
+=== Итог ===
+  ✓ A: ACTIVE + sub expired → subscription_expired: HTTP 200
+  ✓ B: PAUSED + sub expired → subscription_expired (canonical #6 выше #7)
+  ✓ C: LEFT + sub expired → subscription_expired (canonical #6 выше #8)
+  ✓ D: ACTIVE + sub today → passes (день-в-день)
+```
+
+**Cleanup с тем же `RUN_TAG`** нашёл реальные данные (1 habit + 4 memberships + 4 transactions + 4 users
+— **non-zero counts**, не тривиальный ноль), удалил их, и повторный dry-run подтвердил
+`nothing to clean` — orphan-данных на проде не осталось.
+
+### Находка, которую TestClient+SQLite скрыл
+
+Case D первоначально упал на `code='not_checkin_topic'` вместо `ok` —
+при создании habit через `/admin/v1/habits` с `checkin_topic_link='/c/.../1'`
+сервер выставляет `habit.checkin_topic_thread_id=1`, и gate (Pravki §Z-22 hole #2)
+строго проверяет `payload.message_thread_id != 1` → WRONG_TOPIC. В TestClient+SQLite
+это не воспроизводилось бы. **Fix: commit `403219d`** — добавлен
+`message_thread_id=1` в payload.
+
+---
+
+## Процессные находки (для следующих серий)
+
+1. **`git worktree` вместо `git checkout`** для проверки baseline — `git checkout`
+   без `git clean -fd` оставлял untracked файлы (`.mypy_cache`, `.pytest_cache`),
+   что давало разные baseline-числа на одном и том же коммите в разных прогонах
+   (в этой сегодняшней сессии: 409/11 → 418/17 → 398/22 на одном `a41a0fa`).
+   Worktree + symlink .venv решает это полностью.
+
+2. **`conftest.py` module-level env setup** — отсутствует, env vars только в `_env`
+   fixture → pytest collection падает в чистом worktree (без передачи env вручную).
+   Бэклог: добавить `os.environ.setdefault(...)` для обязательных переменных на
+   module-level.

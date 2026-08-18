@@ -1,6 +1,8 @@
 # 04 — Стандарты кода и архитектурные паттерны
 
-> Snapshot от 2026-07-22 (обновлено 2026-08-07 после Step 7 — успешный деплой
+> Snapshot от 2026-07-22 (обновлено 2026-08-18 после Pravki-subscription-2026-08-17
+> на HEAD `403219d` — canonical priority v3 с SUBSCRIPTION_EXPIRED;
+> обновлено 2026-08-07 после Step 7 — успешный деплой
 > SSE+Redis Streams). Правила и паттерны актуальны; примеры кода иллюстрируют
 > **текущий** стиль (с DI через репозитории, без `commit()` в сервисах, с `send_task`
 > через Celery producer, **SSE endpoint + Guard 1/Guard 2 idempotency** — см. §13).
@@ -400,16 +402,21 @@ async def handle_domain_error(request: Request, exc: DomainError):
    window       REJECT_OUT_OF_WINDOW   ok=False, code=window_closed+    exc.code="checkin_window_closed"
    wrong_topic  REJECT_WRONG_TOPIC     ok=False, code=not_checkin_topic  exc.code="not_checkin_topic"
    forwarded    REJECT_FORWARDED       ok=False, code=forwarded          exc.code="forwarded"
+   sub_expired  REJECT_SUBSCRIPTION_   ok=False, code=                  exc.code=
+                EXPIRED                subscription_expired (v3, выше   subscription_expired
+                                       PAUSED/LEFT — "продли подписку"
+                                       лечит ОБЕ причины, не зациклит)
+```
 
    frontend mapper (apps/frontend/src/shared/texts/checkinReject.ts):
    code → REJECT_* (14 кодов покрыто, fallback REJECT_UNKNOWN)
 ```
 
 **Принципы:**
-1. **Canonical priority v2** (categories, по убыванию специфичности copy):
+1. **Canonical priority v3** (categories, по убыванию специфичности copy):
    - I. Fundamental (`habit_not_found`, `membership_not_found`)
    - II. Too late (`caught_today`, `checkin_already_exists`, `joined_late`)
-   - III. Wrong setup (`membership_paused`, `membership_left`)
+   - III. Wrong setup (`subscription_expired`, `membership_paused`, `membership_left`)
    - IV. Wrong time/topic (`window_closed`, `wrong_topic`, `forwarded`)
    - V. Proof validation (`wrong_type`, `too_short`, `stale_message`, `empty`)
 2. **Source of truth:** backend `CheckinRejectCode` enum + TS mirror + tests
@@ -417,9 +424,12 @@ async def handle_domain_error(request: Request, exc: DomainError):
 3. **Canonical order зафиксирован тестом:**
    `test_checkin_reject_code_order_matches_documented_priority` падает, если кто-то
    переставит ключи в enum без обновления docstring. Это защита от тихого
-   рефакторинга.
-4. **Combo-тесты обязательны** для пар типа `caught_today + paused` — это
-   физически возможный сценарий (после `apply_catch` → `recompute_pause_status`).
+   рефакторинга. v2 → v3 (Pravki-subscription-2026-08-17): `subscription_expired`
+   вставлен **первым** в категории III — "продли подписку" лечит и подписку,
+   и (через `recompute_pause_status`) возможный PAUSED. "Пополни депозит"
+   лечит ТОЛЬКО PAUSED, а подписку не лечит → зацикливание.
+4. **Combo-тесты обязательны** для пар типа `caught_today + paused`,
+   `subscription_expired + paused/left` — это физически возможные сценарии.
 5. **Исключение:** для `forwarded` bot prefilter ОБЯЗАТЕЛЬНЫЙ (не defense-in-depth),
    потому что `forward_date` доступен только в aiogram Message (Telegram update),
    не в HabitStateResponse.

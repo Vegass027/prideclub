@@ -15,12 +15,15 @@
 > - User Mini App: `https://app.prideclub.fun/`
 > - Admin Mini App: `https://admin.prideclub.fun/` (owner-only, через `OWNER_TELEGRAM_ID`)
 >
-> **Snapshot 2026-08-09 (Pravki-subscribe-and-join + bug-fixes Z-19 deploy):**
-> bundle `main-CmHeC1H6.js` (включает `JoinPayModal`, блок `joined_late` в
-> `TodayPage`, defensive fallback в `StatusBadge`). Compose workaround для
-> overlay-конфликта — `image: nginx:1.27-alpine` + volume mount на bundle,
-> см. `docs/10-deploy.md` §9.1. **ВНИМАНИЕ:** не возвращать `build:` в compose
-> до диагностики overlay-конфликта (см. отдельную задачу в репо).
+> **Snapshot 2026-08-18 (Pravki-subscription-2026-08-17 deploy на HEAD `403219d`; ранее 2026-08-09 Pravki-subscribe-and-join + bug-fixes Z-19):**
+> bundle `main-BY8E9p_-.js` + `index-D1YDiVX1.js` + `admin-CoTYu9ZG.js`
+> (включает `JoinPayModal` с режимом `renew-only` для smart renew,
+> 3-state `SubscriptionBadge` для бейджа подписки 1-2 дня / expired,
+> блок `joined_late` в `TodayPage`, defensive fallback в `StatusBadge`).
+> Compose workaround для overlay-конфликта — `image: nginx:1.27-alpine` +
+> volume mount на bundle, см. `docs/10-deploy.md` §9.1.
+> **ВНИМАНИЕ:** не возвращать `build:` в compose до диагностики
+> overlay-конфликта (см. отдельную задачу в репо).
 
 ---
 
