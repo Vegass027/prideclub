@@ -661,28 +661,29 @@ cap. 11 vitest unit покрывают reconnect-логику.
 
 > Реализовано в `apps/backend/app/services/penalty_service.py` (PR #1 §Z-21 +
 > коммиты `5bfeec7` + `241115f` + **`9c32d6f` (коммит A 2026-08-17)**).
+>
+> **⚠️ Snapshot 2026-08-18:** Авто-списание `apply_window_expired` и
+> `mark_waived_unable_to_pay` отключены (см. Pravki-manual-catch-2026-08-18
+> §Шаг 3, коммиты `1b1d325` + `3b81327`). Методы остались в коде как safe
+> no-op для обратной совместимости с задачами в брокере; никаких
+> финансовых движений они больше не делают. Защита от поздней ловли теперь
+> через `Habit.is_within_catch_window` в `apply_catch` (Шаг 2). Описание
+> ниже сохранено для истории и как часть архитектурного решения.
 
-**Два пути записи WAIVED-маркера:**
+**Два пути записи WAIVED-маркера (DEPRECATED, см. snapshot выше):**
 
-1. **`apply_window_expired`** при `deposit == 0` (редкий случай ACTIVE+deposit=0,
-   между списанием штрафа и `recompute_pause_status`) пишет маркер `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)`
-   вместо silent `return None`.
+1. ~~`apply_window_expired` при `deposit == 0`~~ (редкий случай ACTIVE+deposit=0)
+   пишет маркер `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)` вместо silent
+   `return None`. **Сейчас:** метод — no-op. Не пишет никаких Penalty.
 
-2. **`mark_waived_unable_to_pay`** (новый метод коммита A) для `status=PAUSED`
-   юзеров. Это ОСНОВНОЙ путь — закрывает реальную дыру, которую
-   `apply_window_expired` не мог покрыть: при `deposit < penalty` юзер
-   автоматически переходил в `PAUSED` через `recompute_pause_status`, и
-   `close_catch_window` его skip'ал (фильтр `if status != ACTIVE: continue`).
-   После topup юзер снова ACTIVE, день не помечен → можно поймать → деньги
-   списываются повторно. `mark_waived_unable_to_pay` решает это: вызывается
-   из `close_catch_window` для PAUSED юзеров, пишет WAIVED-маркер.
+2. ~~`mark_waived_unable_to_pay`~~ для `status=PAUSED` юзеров. **Сейчас:**
+   метод — no-op. Не пишет никаких Penalty.
 
 **Маркер — не финансовое событие:**
 - `Checkin` НЕ пишется (юзер не «пропустил», у него просто не было денег).
 - `Transaction` НЕ создаётся (`amount=0` не двигает баланс).
 - `recompute_pause_status` НЕ вызывается (баланс не менялся).
-- Оба метода возвращают `None` для caller'а — `close_catch_window` НЕ
-  уведомляет юзера и НЕ инкрементит `penalized` (новое: инкрементит `waived`).
+- Оба метода возвращают `None` для caller'а.
 
 **`apply_catch` idempotency** — если за `(membership_id, date)` есть **ЛЮБАЯ**
 Penalty (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_UNABLE_TO_PAY), повторный catch
@@ -695,17 +696,26 @@ Penalty (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_UNABLE_TO_PAY), повторн
 
 Каждый клуб-день независим: WAIVED за вчера НЕ блокирует catch за сегодня.
 
-**Wide vs Strict:** `mark_waived_unable_to_pay` прощает день полностью
-для ВСЕХ PAUSED независимо от точной суммы депозита (`deposit=0` или
-`deposit=24000 при penalty=25000`). Это семантика "PAUSED = не можешь
-позволить штраф = полностью прощаем" — симметрично с ACTIVE+deposit=0.
+> **Snapshot 2026-08-18:** сценарии, ради которых WAIVED-маркер был нужен
+> (deposit=0 ACTIVE, PAUSED юзер, topup → catch за прошлый день), больше
+> **не могут возникнуть**: `close_catch_window` больше не пишет ни WAIVED,
+> ни `WINDOW_CLOSED_NO_CATCH`. Штрафы создаются только через ручную поимку.
+> Защита от двойного списания теперь обеспечивается комбинацией
+> `apply_catch` idempotency-check + `Habit.is_within_catch_window`
+> (Шаг 2). Старая защита через WAIVED-маркер — defense-in-depth, больше
+> не требуется для новых сценариев.
+
+**Wide vs Strict (историческая справка):** `mark_waived_unable_to_pay` прощал день
+полностью для ВСЕХ PAUSED независимо от точной суммы депозита. Эта семантика
+больше не применяется — PAUSED-юзеров теперь просто не штрафует cron
+(см. Шаг 3).
 
 **Правило для будущих разработчиков:**
 > Если ты добавляешь новый reason в `PenaltyReason` enum — идемпотентность
 > `apply_catch` уже покрывает его автоматически (общий фильтр по любой
 > Penalty за день). Никаких изменений в `apply_catch` не нужно.
-> Маркер для нового reason (если требуется) пишется в `apply_window_expired`
-> или `mark_waived_unable_to_pay` аналогично WAIVED-ветке.
+> Авто-путь для нового reason (если когда-то потребуется) пишется в
+> `close_catch_window` напрямую (не в penalty_service).
 
 **Cron observability (коммит A):** `_close_for_habit` возвращает
 `{"penalized": N, "waived": M, ...}`. Счётчик `waived` — количество созданных

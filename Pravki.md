@@ -57,14 +57,17 @@
 
 ### 6.1 Призовой фонд — ✅ работает корректно
 
-**Цепочка:** `Penalty.amount → Habit.prize_pool (+= FOR UPDATE) → Season.prize_pool → распределение в close_season`.
+**Цепочка (только ручная поимка):** `apply_catch → Penalty.amount → Habit.prize_pool (+= FOR UPDATE) → Season.prize_pool → распределение в close_season`.
 
-| Файл | Что делает |
+> **Изменение 2026-08-18 (Pravki-manual-catch-2026-08-18 §Шаг 3):** Авто-списание отключено. `PenaltyService.apply_window_expired` и `mark_waived_unable_to_pay` теперь safe no-op (deprecated, см. commit `1b1d325`). Штрафы в `Habit.prize_pool` теперь попадают **только** через ручную поимку (`apply_catch`). Хроника за 2026-07-23 (см. ниже) описывала активный авто-путь — это устарело, цепочка стала короче.
+
+| Файл | Что делает (актуально, 2026-08-18) |
 |---|---|
-| `repositories/habit_repository.py:119-135` | `add_to_prize_pool(habit_id, amount)` — атомарный инкремент с `session.get(..., with_for_update=True)`. Защита от гонки между `apply_catch` и `apply_window_expired` (две Celery-таски могут прийти одновременно) |
+| `repositories/habit_repository.py:119-135` | `add_to_prize_pool(habit_id, amount)` — атомарный инкремент с `session.get(..., with_for_update=True)`. Вызывается **только** из `apply_catch`. |
 | `services/penalty_service.py:71-156` (`apply_catch`) | `SELECT FOR UPDATE` на violator → `amount = min(penalty, deposit)` → `deposit -= amount` + `add_to_prize_pool(habit, amount)` + `penalty.fund_share = amount` (транзакция в БД) |
-| `services/penalty_service.py:159-231` (`apply_window_expired`) | Аналогично для cron — тот же `fund_share = amount` |
+| `services/penalty_service.py:159-231` (`apply_window_expired`) | **DEPRECATED**: safe no-op (`logger.warning("deprecated_auto_penalty_skipped")` + `return None`). Никаких финансовых движений. Вызывается только старыми Celery-сообщениями в брокере. |
 | `services/season_service.py:60-122` (`close_season`) | `SELECT FOR UPDATE` на Season → проверка status==ACTIVE → `validate_prize_rules` → цикл по rules → **basis points арифметика** (`prize_pool * percentage_bp // 10_000`, никакого float/Decimal) → запись `Transaction(type=PRIZE)` для каждого победителя → status=CLOSED |
+| `apps/worker/worker/tasks/close_catch_window.py` (`_process`) | **Housekeeping** (не штраф): для каждого не-LEFT члена без чек-ина за «вчера» в TZ клуба → `Checkin(status='missed')` + `MembershipService.recompute_pause_status(user_id)` под `lock_for_update(user)`. Никаких `Penalty`, `Transaction` или списания депозита. |
 
 **Инварианты (все соблюдены):**
 - Деньги — `int` копейки везде (`% 1 == 0` благодаря basis points)

@@ -109,15 +109,21 @@
 по каждой причине.
 
 **Значения `reason`** (Pravki-no-deposit-waived-marker, разведка 2026-08-16):
-- `caught` — юзер пойман кэтчером в течение окна; apply_catch.
-- `window_closed_no_catch` — окно закрылось без поимки; apply_window_expired при `deposit > 0`.
-- `waived_unable_to_pay` — день закрылся, юзер не мог заплатить (`status=PAUSED`,
-  т.е. `deposit < penalty_amount`). Штраф списать нечего → записывается маркерная
-  запись `amount=0`. Покрывает и deposit=0, и частичный deposit < penalty
-  (Wide-семантика, см. `Pravki-no-deposit-waived-marker.md`). Подробности — `Pravki-no-deposit-waived-marker.md`.
-  записана маркерная запись `amount=0`. Маркер нужен для идемпотентности
-  `apply_catch` (любой Penalty за день = catch отвергается). Подробности —
-  `Pravki-no-deposit-waived-marker.md`.
+- `caught` — юзер пойман кэтчером в течение catch window; `PenaltyService.apply_catch`
+  (вызывается из `worker.tasks.process_penalty._process` после ручного лова).
+- `window_closed_no_catch` — **(DEPRECATED 2026-08-18, см. Pravki-manual-catch-2026-08-18 §Шаг 3)**.
+  Ранее авто-списание от `apply_window_expired` при `deposit > 0`. Сейчас метод
+  — safe no-op; новые строки этого reason **не создаются**. Существующие строки
+  в БД (на проде 0) остаются для истории. Защита от поздней ловли теперь
+  через `Habit.is_within_catch_window` в `apply_catch` (Шаг 2) — сервер
+  отвергает с `CatchWindowClosedError` после границы catch window.
+- `waived_unable_to_pay` — **(DEPRECATED 2026-08-18)**. Ранее авто-маркер для
+  PAUSED-юзеров (см. `Pravki-no-deposit-waived-marker.md`). Сейчас
+  `mark_waived_unable_to_pay` — safe no-op. **Защита от двойного списания
+  больше не нужна** для нового флоу: `close_catch_window` не пишет
+  `WINDOW_CLOSED_NO_CATCH`, а WAIVED не пишется никогда. Старая защита
+  (комбинация `apply_catch` idempotency + WAIVED-маркер) остаётся в коде
+  для исторических строк, но новых путей записи нет.
 
 ### transactions
 | Поле | Тип | Описание |
@@ -510,7 +516,9 @@ None для General). Бот прокидывает поле в `/internal/check
 
 Вызывается:
 - в `worker/tasks/process_penalty.py` после успешного `apply_catch` и `commit()`;
-- в `worker/tasks/close_catch_window.py` после `apply_window_expired`.
+- ~~в `worker/tasks/close_catch_window.py` после `apply_window_expired`~~ —
+  **(DEPRECATED 2026-08-18)** Удалено вместе с авто-списанием. Cron больше
+  не публикует уведомлений о списании.
 
 ### 6.5. UX в Mini App
 

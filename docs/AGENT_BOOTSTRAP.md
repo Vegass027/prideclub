@@ -783,10 +783,16 @@ VPS 4 (Германия, не РФ), nginx на хосте как reverse proxy.
    для members/today/wallet/balance, haptic medium (catch) + haptic warning
    (you_were_caught).
 
-4. **Cron `close_catch_window`** → `penalty_service.apply_window_expired`
-   пишет `Penalty(reason=WINDOW_CLOSED_NO_CATCH)` + `Checkin(status='missed')`.
-   UI пропустивших обновляется только при следующем mount через `staleTime`
-   / `refetch` (**НЕ через realtime SSE — осознанное ограничение Item 8**).
+4. **Cron `close_catch_window`** (Pravki-manual-catch-2026-08-18 §Шаг 3, commit `3b81327`)
+    → **housekeeping**, не штраф: для каждого не-LEFT члена без чек-ина за
+    «вчера» в TZ клуба (catch window для вчерашнего club_date должна быть
+    уже закрыта — гейт `now_utc > catch_window_end(yesterday_in_club_tz)`) пишет
+    `Checkin(status='missed')` + вызывает `MembershipService.recompute_pause_status(user_id)`
+    под `lock_for_update(user)`. **Никаких** `Penalty`, `Transaction`,
+    списания депозита. `apply_window_expired` и `mark_waived_unable_to_pay`
+    deprecated (Commit `1b1d325`) — safe no-op. UI пропустивших обновляется
+    только при следующем mount через `staleTime` / `refetch` (**НЕ через
+    realtime SSE — осознанное ограничение Item 8**).
    В cron-сценарии нет `catcher_user_id`/`catcher_first_name` для payload —
    если broadcast нужен, потребуется отдельный Item 10.
 

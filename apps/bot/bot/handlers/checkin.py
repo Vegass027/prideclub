@@ -255,9 +255,13 @@ async def _prefilter(
     #   с текстом «уже отметился», что НЕВЕРНО (юзер НЕ отмечался, его поймали).
     # - Поэтому caught_today идёт РАНЬШЕ, и для status='caught' возвращается
     #   REJECT_CAUGHT_TODAY с правильным текстом «поймали».
-    # - Для status='missed' (cron apply_window_expired, без кэтчера) тоже
-    #   caught_today=True (Penalty есть) — но мы тогда возвращаем
-    #   REJECT_PENALTY_DAY_CLOSED с нейтральным тоном, без «поймали».
+    # - **⚠️ Устарело с 2026-08-18 (Pravki-manual-catch-2026-08-18 §Шаг 3):**
+    #   ранее тут описывался сценарий «status='missed' от cron apply_window_expired».
+    #   Сейчас `apply_window_expired` deprecated (safe no-op); cron НЕ создаёт
+    #   Penalty с reason=WINDOW_CLOSED_NO_CATCH и НЕ шлёт caught_today через SSE.
+    #   `caught_today=True` теперь означает ТОЛЬКО ручную поимку через apply_catch.
+    #   Ветка `REJECT_PENALTY_DAY_CLOSED` оставлена как defense-in-depth на случай
+    #   исторических данных, но для нового флоу не срабатывает.
     # - Для status='done' — caught_today=False, branch skipped → уходим в
     #   already_checked_in ниже.
     #

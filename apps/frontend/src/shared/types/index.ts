@@ -85,11 +85,16 @@ export interface CheckinStatusOut {
    * Pravki-paused-window-open-2026-08-14: сумма штрафа за сегодня (в копейках).
    * 0 если штрафа сегодня не было. Используется в TodayPage для условного
    * рендера: при status="missed" текст «Штраф списан в фонд» показывается
-   * ТОЛЬКО если penalty_for_today_kopecks > 0. Без этого поля UI показывал
-   * "Штраф уже списан" для ЛЮБОГО missed (включая случай deposit=0 когда
-   * apply_window_expired возвращает None без создания Penalty).
-   */
-  penalty_for_today_kopecks: number;
+* ТОЛЬКО если penalty_for_today_kopecks > 0.
+    *
+    * **⚠️ С 2026-08-18 (Pravki-manual-catch-2026-08-18 §Шаг 3):**
+    * `apply_window_expired` deprecated (safe no-op). В новом флоу
+    * `penalty_for_today_kopecks > 0` означает только ручную поимку
+    * (`apply_catch`), не авто-списание от cron. Логика отображения
+    * сохранена: penalty_for_today_kopecks = 0 → UI НЕ показывает «штраф списан»
+    * (а показывает «пропуск без штрафа»).
+    */
+   penalty_for_today_kopecks: number;
   deadline_at: string | null;
 }
 
