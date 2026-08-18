@@ -81,6 +81,9 @@ async def setup_users(db: E2EDatabase) -> None:
     Нет API для создания users — только прямой SQL.
     deposit_balance=200₽ достаточно для штрафа (penalty=100₽) и
     проверки recompute_pause_status при смене баланса.
+
+    Минимальный INSERT — только NOT NULL колонки без server_default:
+    id (PK), first_name. timezone имеет default, остальные nullable.
     """
     print("=== Setup: create synthetic users 99005-99008 ===")
     async with db.session() as conn:
@@ -89,14 +92,13 @@ async def setup_users(db: E2EDatabase) -> None:
             # повторный прогон не падает.
             await conn.execute(
                 "INSERT INTO users "
-                "(id, first_name, username, deposit_balance, language_code, timezone) "
-                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "(id, first_name, username, deposit_balance, timezone) "
+                "VALUES ($1, $2, $3, $4, $5) "
                 "ON CONFLICT (id) DO NOTHING",
                 uid,
                 f"E2E-{uid}",
                 f"e2e_{uid}",
                 200_00,  # 200₽ — выше penalty (100₽), чтобы не flip'нуть в PAUSED
-                "ru",
                 "Europe/Moscow",
             )
         # Подтверждаем что 4 users созданы (или уже были).
