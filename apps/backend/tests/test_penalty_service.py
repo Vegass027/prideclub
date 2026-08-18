@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import (
     CannotCatchSelfError,
+    CatchWindowClosedError,
     PenaltyAlreadyProcessedError,
 )
 from app.models.penalty import Penalty
@@ -111,6 +113,7 @@ async def test_apply_catch_happy_path() -> None:
         violator_membership_id=str(violator.id),
         club_date=date(2026, 1, 1),
         catcher_membership_id=str(uuid4()),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
     )
     assert penalty.amount == habit.penalty_amount
     violator_user = await user_repo.get(1)
@@ -183,6 +186,7 @@ async def test_apply_catch_deposit_exhausted_raises_without_mutation() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
     assert exc_info.value.code == "deposit_exhausted"
 
@@ -535,6 +539,7 @@ async def test_apply_catch_rejected_when_waived_marker_exists() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
 
     # Код ошибки — единый для всех reason'ов (см. Q2 в Pravki-no-deposit-waived-marker.md).
@@ -605,6 +610,7 @@ async def test_apply_catch_rejected_when_window_closed_penalty_exists() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
 
     assert exc_info.value.code == "penalty_already_processed"
@@ -667,6 +673,7 @@ async def test_apply_catch_rejected_when_existing_caught_penalty() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
 
     # Никаких новых Penalty, баланс не тронут.
@@ -724,6 +731,7 @@ async def test_apply_catch_succeeds_for_other_date_when_waived_marker_for_previo
         violator_membership_id=str(violator.id),
         club_date=date(2026, 1, 2),  # сегодня
         catcher_membership_id=str(uuid4()),
+        now_utc=datetime(2026, 1, 2, 22, 0, tzinfo=ZoneInfo("UTC")),
     )
 
     assert penalty.reason == PenaltyReason.CAUGHT
@@ -1069,6 +1077,7 @@ async def test_apply_catch_rereads_violator_status_after_user_lock() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
 
     # Belt-and-suspenders: убеждаемся, что НИЧЕГО не было создано в БД
@@ -1121,6 +1130,7 @@ async def test_apply_catch_rejects_violator_with_expired_subscription() -> None:
             violator_membership_id=str(violator.id),
             club_date=date(2026, 1, 1),  # через 5 дней ПОСЛЕ subscription_until
             catcher_membership_id=str(uuid4()),
+            now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
         )
 
     # Belt-and-suspenders: НИЧЕГО не создано.
@@ -1167,6 +1177,7 @@ async def test_apply_catch_subscription_today_last_day_succeeds() -> None:
         violator_membership_id=str(violator.id),
         club_date=club_day,
         catcher_membership_id=str(uuid4()),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
     )
     assert penalty is not None
     assert penalty.reason == PenaltyReason.CAUGHT
@@ -1182,4 +1193,289 @@ def _make_user(*, id: int, deposit_balance: int) -> Any:
         id=id,
         first_name=f"u{id}",
         deposit_balance=deposit_balance,
+    )
+
+
+# ---------------------------------------------------------------------------
+# # Pravki-manual-catch-2026-08-18 §Шаг 2: серверная проверка catch window
+# ---------------------------------------------------------------------------
+
+
+def _make_habit_with_window(
+    *,
+    start: time,
+    end: time,
+    tz: str = "Europe/Moscow",
+    penalty_amount: int = 100,
+) -> Any:
+    """Habit с явными окнами (по умолчанию в fakes — 00:00-23:59)."""
+    from tests.fakes import make_habit as _make_default_habit
+
+    habit = _make_default_habit()
+    habit.checkin_window_start = start
+    habit.checkin_window_end = end
+    habit.timezone = tz
+    habit.penalty_amount = penalty_amount
+    return habit
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejects_when_now_before_checkin_window_end() -> None:
+    """Pravki-manual-catch-2026-08-18 §Шаг 2: критический кейс — нельзя
+    ловить человека, пока он ещё вправе прислать чек-ин.
+
+    Окно 09:00-21:00 MSK, club_date=2026-08-18. checkin_end_utc = 18:00 UTC 18 aug.
+    now = 17:00 UTC 18 aug (= 20:00 MSK) — check-in ещё открыт.
+    apply_catch обязан отвергнуть с CatchWindowClosedError, даже если
+    violator.status == ACTIVE, и нет existing Penalty.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _make_habit_with_window(
+        start=time(9, 0), end=time(21, 0), penalty_amount=100
+    )
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _NoStreakSession()
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    # now = 17:00 UTC 18 aug = 20:00 MSK 18 aug — check-in ещё открыт.
+    now_utc = datetime(2026, 8, 18, 17, 0, tzinfo=ZoneInfo("UTC"))
+    with pytest.raises(CatchWindowClosedError):
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 8, 18),
+            catcher_membership_id=str(uuid4()),
+            now_utc=now_utc,
+        )
+
+    # Финансовых движений быть не должно.
+    assert session.transactions == []
+    assert session.penalties == []
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == 500
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejects_after_catch_window_end() -> None:
+    """Catch window закрылся — apply_catch отвергает.
+
+    Окно 09:00-21:00 MSK, club_date=2026-08-18. catch_end_utc = 04:00 UTC 19 aug.
+    now = 04:00:01 UTC 19 aug — на 1 секунду позже.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _make_habit_with_window(
+        start=time(9, 0), end=time(21, 0), penalty_amount=100
+    )
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _NoStreakSession()
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    catch_end_utc = habit.catch_window_end(date(2026, 8, 18))
+    now_utc = catch_end_utc + timedelta(seconds=1)
+    with pytest.raises(CatchWindowClosedError):
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 8, 18),
+            catcher_membership_id=str(uuid4()),
+            now_utc=now_utc,
+        )
+    assert session.transactions == []
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_succeeds_in_catch_window() -> None:
+    """Catch window открыт — happy path с явной now_utc.
+
+    Окно 09:00-21:00 MSK, club_date=2026-08-18.
+    now = 22:00 MSK 18 aug = 19:00 UTC 18 aug — внутри catch window.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _make_habit_with_window(
+        start=time(9, 0), end=time(21, 0), penalty_amount=100
+    )
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+
+    session = _NoStreakSession()
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    now_utc = datetime(2026, 8, 18, 19, 0, tzinfo=ZoneInfo("UTC"))
+    penalty = await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 8, 18),
+        catcher_membership_id=str(uuid4()),
+        now_utc=now_utc,
+    )
+    assert penalty.amount == 100
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejects_after_topup_late_catch() -> None:
+    """После закрытия catch window топ депозита НЕ открывает ловлю заново.
+
+    Сценарий: catch window для club_date=18 закрылся в 04:00 UTC 19 aug.
+    В 05:00 UTC 19 aug юзер топит депозит. В 05:30 UTC 19 aug кто-то пытается
+    поймать. CatchWindowClosedError, НЕ списание.
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _make_habit_with_window(
+        start=time(9, 0), end=time(21, 0), penalty_amount=100
+    )
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))  # уже пополнил
+
+    session = _NoStreakSession()
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    now_utc = datetime(2026, 8, 19, 5, 30, tzinfo=ZoneInfo("UTC"))
+    with pytest.raises(CatchWindowClosedError):
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 8, 18),  # вчера
+            catcher_membership_id=str(uuid4()),
+            now_utc=now_utc,
+        )
+    assert session.penalties == []
+    assert session.transactions == []
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_rejects_when_time_crosses_boundary_after_lock() -> None:
+    """Pravki-manual-catch-2026-08-18 §Шаг 2 v2: race-free резолюция now_utc.
+
+    Моделирует пограничную гонку:
+    1. Ловец нажал «Поймать» в момент T0, который ВНУТРИ catch window.
+    2. Запрос вошёл в apply_catch, начал ждать user-lock (параллельно
+       идёт topup жертвы).
+    3. Lock получен в момент T1, где T1 > catch_window_end (окно закрылось).
+    4. Старая логика резолвила now_utc на входе в функцию (T0) и
+       проверка проходила — штраф списывался после границы.
+    5. Новая логика (now_utc резолвится ПОД lock'ом, после всех
+       defense-in-depth проверок) использует now_utc=T1 и отвергает.
+
+    Тест моделирует (1) передачей now_utc, который на 1 секунду позже
+    catch_window_end — эквивалент ситуации "lock был задержан".
+    Контракт: даже если catcher's request был валиден в момент старта,
+    если момент после lock-acquisition пересёк границу, apply_catch
+    возвращает CatchWindowClosedError без побочных эффектов:
+    - нет Penalty в БД (session.penalties)
+    - нет Transaction (session.transactions)
+    - deposit_balance не изменён
+    """
+    habit_repo = FakeHabitRepo()
+    habit = _make_habit_with_window(
+        start=time(9, 0), end=time(21, 0), penalty_amount=100
+    )
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    initial_deposit = 500
+    user_repo.add(_make_user(id=1, deposit_balance=initial_deposit))
+
+    session = _NoStreakSession()
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=FakeCheckinRepo(),
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=_NoopLimiter(),
+    )
+
+    # now_utc на 1 секунду ПОЗЖЕ catch_window_end. Эмулирует ситуацию
+    # "ловцу пришлось ждать lock 1 секунду, и catch window закрылся".
+    catch_end_utc = habit.catch_window_end(date(2026, 8, 18))
+    now_utc_after_lock = catch_end_utc + timedelta(seconds=1)
+    assert now_utc_after_lock > catch_end_utc, "precondition"
+
+    # Ловим CatchWindowClosedError.
+    with pytest.raises(CatchWindowClosedError):
+        await service.apply_catch(
+            catcher_user_id=2,
+            violator_membership_id=str(violator.id),
+            club_date=date(2026, 8, 18),
+            catcher_membership_id=str(uuid4()),
+            now_utc=now_utc_after_lock,
+        )
+
+    # КРИТИЧЕСКИЕ инварианты: ничего финансового не произошло.
+    assert session.penalties == [], "Penalty не должен быть создан"
+    assert session.transactions == [], "Transaction не должна быть создана"
+
+    # Deposit не изменён.
+    violator_user = await user_repo.get(1)
+    assert violator_user is not None
+    assert violator_user.deposit_balance == initial_deposit, (
+        f"Deposit должен остаться {initial_deposit}, "
+        f"не {violator_user.deposit_balance}"
+    )
+
+    # Lock_for_update был вызван (race-fix semantic: lock acquired перед
+    # time check).
+    assert user_repo._lock_calls == [1], (
+        "lock_for_update(user_id=1) должен быть вызван до time check"
     )

@@ -142,6 +142,17 @@ class CheckinInvalidProofError(DomainError):
     code = "checkin_invalid_proof"
 
 
+# Pravki-manual-catch-2026-08-18 §Шаг 2: ловля за club_date после закрытия
+# catch window. 422: запрос синтаксически валидный, но состояние ресурса
+# (время) не позволяет выполнить операцию. Семантически точнее чем 409.
+#
+# Логика окна — в Habit.is_within_catch_window(now_utc, club_date):
+# (checkin_window_end, catch_window_end] в UTC.
+class CatchWindowClosedError(DomainError):
+    status_code = 422
+    code = "catch_window_closed"
+
+
 class PenaltyAlreadyProcessedError(DomainError):
     status_code = 409
     code = "penalty_already_processed"
@@ -150,11 +161,6 @@ class PenaltyAlreadyProcessedError(DomainError):
 class CannotCatchSelfError(DomainError):
     status_code = 400
     code = "cannot_catch_self"
-
-
-class CatchWindowClosedError(DomainError):
-    status_code = 400
-    code = "catch_window_closed"
 
 
 class TooManyCatchAttemptsError(DomainError):

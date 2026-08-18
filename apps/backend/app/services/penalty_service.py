@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Protocol
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import (
     CannotCatchSelfError,
+    CatchWindowClosedError,
     HabitNotFoundError,
     MembershipNotActiveError,
     PenaltyAlreadyProcessedError,
@@ -80,6 +82,7 @@ class PenaltyService:
         violator_membership_id: str,
         club_date,
         catcher_membership_id: str | None,
+        now_utc: datetime | None = None,
     ) -> Penalty:
         if self._redis is not None:
             count = await self._redis.incr_catch(catcher_user_id)
@@ -138,6 +141,29 @@ class PenaltyService:
         habit = await self._habit_repo.get(str(violator.habit_id))
         if habit is None:
             raise HabitNotFoundError()
+
+        # Pravki-manual-catch-2026-08-18 §Шаг 2 v2: race-free resolution.
+        #
+        # now_utc резолвится ПОД lock'ом, прямо перед проверкой. Если
+        # now_utc не передан (прод-обёртка worker'а) — берём datetime.now(UTC)
+        # здесь. Параметр остаётся только для тестов с замороженным временем.
+        #
+        # Race без этого фикса: ловец нажал «Поймать» в последнюю допустимую
+        # секунду окна → time-check прошёл (now=T0) → ждёт user-lock пока
+        # другая транзакция (например, topup) завершится → catch window
+        # уже закрылся → lock освободился → старый код всё ещё создавал
+        # Penalty после границы. Теперь now_utc capture = момент после
+        # lock'а, штраф после границы невозможен.
+        if now_utc is None:
+            now_utc = datetime.now(tz=timezone.utc)
+
+        # Catch window — единая серверная проверка. Ловить можно ТОЛЬКО
+        # после закрытия check-in окна и ДО закрытия catch window. UI
+        # скрывает кнопку по `is_within_catch_window` в /members, но эта
+        # проверка здесь — единственный авторитет (защита от прямого
+        # API-вызова в обход UI, гонок, устаревших клиентов).
+        if not habit.is_within_catch_window(now_utc, club_date):
+            raise CatchWindowClosedError()
 
         # Идемпотентность: если за день есть ЛЮБАЯ Penalty
         # (CAUGHT / WINDOW_CLOSED_NO_CATCH / WAIVED_UNABLE_TO_PAY) —

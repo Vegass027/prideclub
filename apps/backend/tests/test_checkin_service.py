@@ -494,13 +494,13 @@ async def test_get_today_status_streak_zero_when_no_checkins() -> None:
     _habit, _m, stats = await service.get_today_status(
         user_id=1,
         habit_id=str(habit.id),
-        now_utc=datetime(2026, 1, 9, 21, 0, tzinfo=UTC),
+        now_utc=datetime(2026, 1, 9, 15, 0, tzinfo=UTC),
     )
     assert stats.streak_days == 0
     assert stats.checkin_count == 0
     assert stats.penalties_count == 0
     assert stats.penalties_total == 0
-    # окно чек-ина [00:00, 23:59] в make_habit — открыто в 00:00 МСК
+    # окно чек-ина [09:00-21:00] MSK в make_habit — открыто в 15:00 МСК = 12:00 UTC
     assert stats.status == "pending"
 
 

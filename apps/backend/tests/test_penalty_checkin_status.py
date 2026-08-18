@@ -12,9 +12,10 @@ Item 1 (can_catch fix) + Item 2 (Checkin.status при penalty):
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -144,6 +145,7 @@ async def test_apply_catch_writes_checkin_status_caught() -> None:
         violator_membership_id=str(violator.id),
         club_date=date(2026, 1, 1),
         catcher_membership_id=str(uuid4()),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
     )
 
     # Checkin должен быть записан со статусом 'caught'.
@@ -219,6 +221,7 @@ async def test_checkin_status_transition_pending_to_caught_via_upsert() -> None:
         violator_membership_id=str(violator.id),
         club_date=date(2026, 1, 1),
         catcher_membership_id=str(uuid4()),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
     )
 
     # Статус должен быть 'caught' (перезаписан, не остался 'missed').

@@ -220,8 +220,12 @@ def make_habit(
         id=id or str(uuid4()),
         title="Test Habit",
         chat_id=chat_id,
-        checkin_window_start=time(0, 0),
-        checkin_window_end=time(23, 59),
+        # Pravki-manual-catch-2026-08-18 §Шаг 2: окно 09:00-21:00 MSK
+        # имеет реальный catch window (21:00 → 09:00 next day - 2h = 04:00 UTC
+        # next day). Старое 00:00-23:59 давало пустой catch window (1 минута
+        # между окнами, минус 2h buffer).
+        checkin_window_start=time(9, 0),
+        checkin_window_end=time(21, 0),
         timezone="Europe/Moscow",
         penalty_amount=100,
         price_month=1000,

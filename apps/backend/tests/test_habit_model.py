@@ -14,6 +14,8 @@ from datetime import date, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from app.models.habit import Habit
 
 
@@ -224,3 +226,232 @@ class TestCatchWindowEndBoundary:
         catch_end = h.catch_window_end(date(2026, 8, 18))
         # checkin_end (18:00 UTC 18 aug) < catch_end (04:00 UTC 19 aug).
         assert checkin_end_local.astimezone(ZoneInfo("UTC")) < catch_end
+
+
+# ---------------------------------------------------------------------------
+# # checkin_window_end_for
+# ---------------------------------------------------------------------------
+
+
+class TestCheckinWindowEndFor:
+    """Нижняя граница catch window: момент закрытия check-in окна в UTC."""
+
+    def test_normal_window(self) -> None:
+        """Окно 09:00-21:00 MSK → check-in закрывается в 21:00 local club_date."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        result = h.checkin_window_end_for(date(2026, 8, 18))
+        assert result == datetime(2026, 8, 18, 18, 0, tzinfo=ZoneInfo("UTC"))
+
+    def test_midnight_window_end_next_morning(self) -> None:
+        """Окно 22:00-06:00 MSK → club_date=18 = дата открытия,
+        окно закрывается на следующий день (19 aug) в 06:00 local.
+        """
+        h = _make_habit(start=time(22, 0), end=time(6, 0))
+        result = h.checkin_window_end_for(date(2026, 8, 18))
+        assert result == datetime(2026, 8, 19, 3, 0, tzinfo=ZoneInfo("UTC"))
+
+    def test_normal_window_asia_tokyo(self) -> None:
+        """Окно 09:00-21:00 JST → check-in закрывается в 21:00 JST = 12:00 UTC."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0), tz="Asia/Tokyo")
+        result = h.checkin_window_end_for(date(2026, 8, 18))
+        assert result == datetime(2026, 8, 18, 12, 0, tzinfo=ZoneInfo("UTC"))
+
+
+# ---------------------------------------------------------------------------
+# # is_within_catch_window — ЕДИНЫЙ АВТОРИТЕТ для apply_catch + UI
+# ---------------------------------------------------------------------------
+
+
+class TestIsWithinCatchWindow:
+    """Catch window = (checkin_window_end, catch_window_end] в UTC.
+
+    Доказательство отсутствия хардкода: проверяем несколько разных
+    диапазонов окон (08-22, 05-10, 12-23) + ночное (22-06) + Asia/Tokyo.
+    Логика одна и та же, потому что все параметры — из habit.
+    """
+
+    # --- окно 09:00-21:00 Europe/Moscow (reference case, как в примерах) ---
+
+    def test_normal_window_09_21_mid_catch(self) -> None:
+        """22:30 MSK (=19:30 UTC 18 aug) → внутри catch window."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        # checkin_end = 18:00 UTC 18 aug, catch_end = 04:00 UTC 19 aug.
+        now = datetime(2026, 8, 18, 19, 30, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_normal_window_inside_checkin_rejected(self) -> None:
+        """20:00 MSK (=17:00 UTC 18 aug) → check-in ещё открыт, ловить НЕЛЬЗЯ.
+
+        Это критический кейс из обсуждения с владельцем продукта:
+        без проверки нижней границы можно ловить человека пока он
+        ещё вправе прислать чек-ин.
+        """
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        now = datetime(2026, 8, 18, 17, 0, tzinfo=ZoneInfo("UTC"))
+        assert not h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_normal_window_exactly_on_checkin_end_rejected(self) -> None:
+        """now == checkin_window_end_utc → строгое <, ловить НЕЛЬЗЯ."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        checkin_end = h.checkin_window_end_for(date(2026, 8, 18))
+        assert not h.is_within_catch_window(checkin_end, date(2026, 8, 18))
+
+    def test_normal_window_one_second_after_checkin_end_accepted(self) -> None:
+        """now == checkin_window_end_utc + 1s → ловить можно."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        checkin_end = h.checkin_window_end_for(date(2026, 8, 18))
+        now = checkin_end + timedelta(seconds=1)
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_normal_window_exactly_on_catch_end_accepted(self) -> None:
+        """now == catch_window_end_utc → нестрогое <=, ловить можно."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        catch_end = h.catch_window_end(date(2026, 8, 18))
+        assert h.is_within_catch_window(catch_end, date(2026, 8, 18))
+
+    def test_normal_window_one_second_after_catch_end_rejected(self) -> None:
+        """now == catch_window_end_utc + 1s → CatchWindowClosedError."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        catch_end = h.catch_window_end(date(2026, 8, 18))
+        now = catch_end + timedelta(seconds=1)
+        assert not h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- окно 08:00-22:00 Europe/Moscow (другаяе верхняя граница) ---
+
+    def test_window_08_22_checkin_end(self) -> None:
+        """Окно 08-22 MSK → checkin_end = 19:00 UTC, catch_end = 03:00 UTC next day.
+
+        next_window_start_local = 2026-08-19 08:00 MSK
+        catch_window_end_local = 08:00 - 2h = 06:00 MSK = 03:00 UTC
+        """
+        h = _make_habit(start=time(8, 0), end=time(22, 0))
+        assert h.checkin_window_end_for(date(2026, 8, 18)) == datetime(
+            2026, 8, 18, 19, 0, tzinfo=ZoneInfo("UTC")
+        )
+        assert h.catch_window_end(date(2026, 8, 18)) == datetime(
+            2026, 8, 19, 3, 0, tzinfo=ZoneInfo("UTC")
+        )
+
+    def test_window_08_22_in_catch(self) -> None:
+        """23:00 MSK = 20:00 UTC → внутри catch window (19:00, 03:00 next day)."""
+        h = _make_habit(start=time(8, 0), end=time(22, 0))
+        now = datetime(2026, 8, 18, 20, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- окно 05:00-10:00 Europe/Moscow (короткое утреннее) ---
+
+    def test_window_05_10_short_catch(self) -> None:
+        """Окно 05-10 MSK → checkin_end = 07:00 UTC, catch_end = 00:00 UTC next day.
+
+        Короткое окно: catch window длится с 07:00 UTC до 00:00 UTC next day
+        = 17 часов. Демка для админов, которые любят узкие окна.
+        next_window_start_local = 2026-08-19 05:00 MSK
+        catch_window_end_local = 05:00 - 2h = 03:00 MSK = 00:00 UTC
+        """
+        h = _make_habit(start=time(5, 0), end=time(10, 0))
+        assert h.checkin_window_end_for(date(2026, 8, 18)) == datetime(
+            2026, 8, 18, 7, 0, tzinfo=ZoneInfo("UTC")
+        )
+        assert h.catch_window_end(date(2026, 8, 18)) == datetime(
+            2026, 8, 19, 0, 0, tzinfo=ZoneInfo("UTC")
+        )
+        # 15:00 MSK = 12:00 UTC — внутри catch window.
+        now = datetime(2026, 8, 18, 12, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- окно 12:00-23:00 Europe/Moscow (дневное широкое) ---
+
+    def test_window_12_23_evening(self) -> None:
+        """Окно 12-23 MSK → checkin_end = 20:00 UTC, catch_end = 07:00 UTC next day.
+
+        next_window_start_local = 2026-08-19 12:00 MSK
+        catch_window_end_local = 12:00 - 2h = 10:00 MSK = 07:00 UTC
+        Catch window: (20:00 UTC 18 aug, 07:00 UTC 19 aug] = 11 часов.
+        """
+        h = _make_habit(start=time(12, 0), end=time(23, 0))
+        assert h.checkin_window_end_for(date(2026, 8, 18)) == datetime(
+            2026, 8, 18, 20, 0, tzinfo=ZoneInfo("UTC")
+        )
+        assert h.catch_window_end(date(2026, 8, 18)) == datetime(
+            2026, 8, 19, 7, 0, tzinfo=ZoneInfo("UTC")
+        )
+        # 02:00 MSK 19 aug = 23:00 UTC 18 aug — внутри catch window.
+        now = datetime(2026, 8, 18, 23, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- окно через полночь 22:00-06:00 Europe/Moscow ---
+
+    def test_midnight_window_catch_window_opens_after_window_closes(self) -> None:
+        """Окно 22:00-06:00 MSK. club_date=18 — дата открытия окна.
+
+        Catch window: 2026-08-19 03:00 UTC (06:00 MSK 19 aug, конец check-in)
+        → 2026-08-19 17:00 UTC (20:00 MSK 19 aug, конец catch).
+        """
+        h = _make_habit(start=time(22, 0), end=time(6, 0))
+        # 12:00 MSK 19 aug = 09:00 UTC 19 aug — внутри catch window.
+        now = datetime(2026, 8, 19, 9, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_midnight_window_during_checkin_rejected(self) -> None:
+        """23:00 MSK 18 aug (=20:00 UTC 18 aug) — внутри check-in окна,
+        ловить НЕЛЬЗЯ (club_date=18 — открытие окна в тот же день).
+        """
+        h = _make_habit(start=time(22, 0), end=time(6, 0))
+        now = datetime(2026, 8, 18, 20, 0, tzinfo=ZoneInfo("UTC"))
+        assert not h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_midnight_window_one_second_after_checkin_end_accepted(self) -> None:
+        """Окно 22:00-06:00 MSK, club_date=18. checkin_end_utc = 2026-08-19 03:00 UTC.
+        now = checkin_end_utc + 1s → можно ловить.
+        """
+        h = _make_habit(start=time(22, 0), end=time(6, 0))
+        checkin_end = h.checkin_window_end_for(date(2026, 8, 18))
+        now = checkin_end + timedelta(seconds=1)
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- разные TZ (доказательство, что всё в TZ клуба) ---
+
+    def test_normal_window_asia_tokyo_in_catch(self) -> None:
+        """Окно 09:00-21:00 JST → catch window для в JST, не UTC.
+
+        next_window_start_local = 2026-08-19 09:00 JST
+        catch_window_end_local = 09:00 - 2h = 07:00 JST = 22:00 UTC prev day
+        = 2026-08-18 22:00 UTC.
+        checkin_end_local = 2026-08-18 21:00 JST = 12:00 UTC.
+        Catch window: (12:00 UTC 18 aug, 22:00 UTC 18 aug].
+        18:00 UTC 18 aug = 03:00 JST 19 aug — внутри catch window.
+        """
+        h = _make_habit(start=time(9, 0), end=time(21, 0), tz="Asia/Tokyo")
+        now = datetime(2026, 8, 18, 18, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_normal_window_asia_tokyo_in_checkin_rejected(self) -> None:
+        """Окно 09-21 JST. now = 10:00 JST = 01:00 UTC — внутри check-in, ловить нельзя."""
+        h = _make_habit(start=time(9, 0), end=time(21, 0), tz="Asia/Tokyo")
+        now = datetime(2026, 8, 18, 1, 0, tzinfo=ZoneInfo("UTC"))
+        assert not h.is_within_catch_window(now, date(2026, 8, 18))
+
+    def test_midnight_window_america_new_york(self) -> None:
+        """Окно через полночь в America/New_York (EDT, UTC-4 летом)."""
+        h = _make_habit(
+            start=time(23, 0), end=time(7, 0), tz="America/New_York"
+        )
+        # checkin_end для club_date=18 = 19 aug 07:00 EDT = 19 aug 11:00 UTC.
+        # catch_end = 19 aug 23:00 EDT = 20 aug 03:00 UTC.
+        # 19 aug 15:00 EDT = 19 aug 19:00 UTC — внутри catch window.
+        now = datetime(2026, 8, 19, 19, 0, tzinfo=ZoneInfo("UTC"))
+        assert h.is_within_catch_window(now, date(2026, 8, 18))
+
+    # --- контракты ---
+
+    def test_naive_datetime_raises_value_error(self) -> None:
+        """Pravki-manual-catch-2026-08-18 §Шаг 2: defensive.
+
+        Тихое «treat as UTC» скрывает баги — если бот по ошибке пришлёт
+        naive datetime, спишем деньги «не с того времени». Лучше упасть
+        в тестах, чем потерять деньги пользователя.
+        """
+        h = _make_habit(start=time(9, 0), end=time(21, 0))
+        naive_now = datetime(2026, 8, 18, 19, 0)  # no tzinfo
+        with pytest.raises(ValueError, match="tz-aware datetime in UTC"):
+            h.is_within_catch_window(naive_now, date(2026, 8, 18))

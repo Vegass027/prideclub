@@ -187,6 +187,84 @@ class Habit(Base):
         catch_window_end_local = next_window_start_local - timedelta(hours=buffer_hours)
         return catch_window_end_local.astimezone(ZoneInfo("UTC"))
 
+    def checkin_window_end_for(self, club_date: date) -> datetime:
+        """Момент закрытия check-in окна в UTC для данного club_date.
+
+        Pravki-manual-catch-2026-08-18 §Шаг 2: единая точка вычисления
+        нижней границы catch window. Используется в `is_within_catch_window`
+        и в UI для отображения «ловля открывается в HH:MM».
+
+        Семантика `club_date` для разных типов окон:
+        1. Нормальное окно (start <= end): club_date = дата в TZ клуба,
+           когда окно открыто. Окно закрывается в `club_date HH:MM_end`.
+           Пример: окно 09:00-21:00, club_date=2026-08-18
+           → checkin_window_end = 2026-08-18 21:00 local.
+        2. Окно через полночь (start > end): club_date = дата ОТКРЫТИЯ
+           окна (вечер). Окно закрывается в `club_date+1 день HH:MM_end`.
+           Пример: окно 22:00-06:00, club_date=2026-08-18
+           → checkin_window_end = 2026-08-19 06:00 local (= 14ч окно).
+
+        Это совпадает с `catch_window_end` (там тоже club_date+1 день),
+        и оба они согласованы: catch window длится от
+        `checkin_window_end_for(club_date)` до `catch_window_end(club_date)`.
+
+        Returns:
+            datetime в UTC: момент закрытия check-in окна.
+        """
+        club_tz = self.tzinfo
+        if self.checkin_window_start <= self.checkin_window_end:
+            # Нормальное окно: club_date = дата окна.
+            local_end = datetime.combine(
+                club_date, self.checkin_window_end, tzinfo=club_tz
+            )
+        else:
+            # Окно через полночь: club_date = дата открытия (вечер),
+            # окно закрывается на следующий день утром.
+            local_end = datetime.combine(
+                club_date + timedelta(days=1),
+                self.checkin_window_end,
+                tzinfo=club_tz,
+            )
+        return local_end.astimezone(ZoneInfo("UTC"))
+
+    def is_within_catch_window(self, now_utc: datetime, club_date: date) -> bool:
+        """Единый авторитет: True если now_utc попадает в catch window для club_date.
+
+        Pravki-manual-catch-2026-08-18 §Шаг 2:
+        catch window = (checkin_window_end_for(club_date),
+                        catch_window_end(club_date)] в UTC.
+
+        - Строгое `<` слева: во время открытого check-in окна ловить НЕЛЬЗЯ
+          (юзер вправе прислать чек-ин). Пример: окно 09:00-21:00 MSK,
+          club_date=2026-08-18, now=20:00 MSK = 17:00 UTC → False.
+        - Нестрогое `<=` справа: последняя секунда окна ещё доступна.
+          После этой секунды — CatchWindowClosedError.
+        - Возвращает bool, а не бросает исключение: используется и в UI
+          (флаг для скрытия кнопки), и в backend (apply_catch как
+          единственная проверка).
+
+        Контракт по now_utc: обязательно tz-aware datetime в UTC.
+        Naive datetime — ProgrammingError: тихая трактовка naive как UTC
+        скрывает баги (например, когда бот шлёт wall-clock без tz).
+        Лучше упасть сразу в тестах/проде, чем списывать деньги «не с того
+        времени».
+
+        Используется:
+        - В `PenaltyService.apply_catch` для защиты от ловли после закрытия
+          catch window.
+        - В `MembersApi.list_members` для `MemberRowOut.catch_window_closed`.
+        - В `HabitStateResponse` (если потребуется боту).
+        """
+        if now_utc.tzinfo is None:
+            raise ValueError(
+                "is_within_catch_window requires tz-aware datetime in UTC; "
+                "got naive datetime. "
+                "Use datetime.now(tz=ZoneInfo('UTC')) or .replace(tzinfo=...)."
+            )
+        checkin_end_utc = self.checkin_window_end_for(club_date)
+        catch_end_utc = self.catch_window_end(club_date)
+        return checkin_end_utc < now_utc <= catch_end_utc
+
     def was_joined_after_window(self, joined_at_utc: datetime) -> bool:
         """True если joined_at_utc в TZ клуба — после закрытия checkin_window.
 
