@@ -47,18 +47,44 @@ ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "packages"))
 sys.path.insert(0, str(ROOT / "packages" / "shared"))
 sys.path.insert(0, str(ROOT / "apps" / "backend"))
-# Pravki-subscription-2026-08-17 §CanonicalOrder E2E: для проверки бота-текста
+# Pravki-subscription-2026-08-17 §Z-22 E2E: для проверки бота-текста
 # загружаем модуль checkin_texts напрямую через importlib (минуя __init__.py
 # который тянет aiogram).
+#
+# ВНИМАНИЕ: на проде (habit-backend container) apps/bot НЕ доступен
+# (это отдельный image). Если importlib не найдёт файл → fallback на
+# hardcoded текст, который должен МАТЧИТЬ apps/bot/bot/handlers/checkin_texts.py
+# (обновляется вручную при изменении бота).
 import importlib.util as _importlib_util  # noqa: E402
+import warnings as _warnings  # noqa: E402
 
-_CHECKIN_TEXTS_PATH = ROOT / "apps" / "bot" / "bot" / "handlers" / "checkin_texts.py"
-_spec = _importlib_util.spec_from_file_location(
-    "_checkin_texts_module_e2e", _CHECKIN_TEXTS_PATH
+# Hardcoded fallback — копия из apps/bot/bot/handlers/checkin_texts.py.
+# При обновлении текста в боте — обновить здесь ИЛИ вынести тексты в
+# shared пакет (доступный обоим контейнерам).
+REJECT_SUBSCRIPTION_EXPIRED_FALLBACK: str = (
+    "↩ \U0001f6ab {name}, подписка на клуб «{habit_title}» истекла "
+    "({sub_until}). "
+    "Продли участие в мини-аппе, и снова сможешь отмечаться."
 )
-_checkin_texts_module = _importlib_util.module_from_spec(_spec)
-_spec.loader.exec_module(_checkin_texts_module)
-REJECT_SUBSCRIPTION_EXPIRED = _checkin_texts_module.REJECT_SUBSCRIPTION_EXPIRED
+
+try:
+    _CHECKIN_TEXTS_PATH = ROOT / "apps" / "bot" / "bot" / "handlers" / "checkin_texts.py"
+    _spec = _importlib_util.spec_from_file_location(
+        "_checkin_texts_module_e2e", _CHECKIN_TEXTS_PATH
+    )
+    _checkin_texts_module = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(_checkin_texts_module)
+    REJECT_SUBSCRIPTION_EXPIRED = _checkin_texts_module.REJECT_SUBSCRIPTION_EXPIRED
+except (FileNotFoundError, OSError) as _exc:
+    # На проде (habit-backend container) файла нет → используем fallback.
+    # ВНИМАНИЕ: если бот-текст реально изменился а fallback нет — этот
+    # check покажет false-positive. Сверять при изменениях checkin_texts.py.
+    _warnings.warn(
+        f"checkin_texts.py не найден ({_exc}), используется hardcoded fallback. "
+        f"Сверь с apps/bot/bot/handlers/checkin_texts.py:REJECT_SUBSCRIPTION_EXPIRED.",
+        RuntimeWarning,
+    )
+    REJECT_SUBSCRIPTION_EXPIRED = REJECT_SUBSCRIPTION_EXPIRED_FALLBACK
 
 import re  # noqa: E402
 import uuid as _uuid  # noqa: E402
