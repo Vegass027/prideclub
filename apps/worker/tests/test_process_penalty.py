@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,18 @@ from app.core.constants import MembershipStatus, PenaltyReason, TransactionType
 # rate-limit отключён.
 
 
+def _inside_catch_window_now() -> datetime:
+    """Mock-время: внутри catch window для club_date=date.today().
+
+    Тесты используют окно 09:00-21:00 MSK (после правки Шага 2). Catch window
+    для «сегодня»: checkin_end=18:00 UTC, catch_end=04:00 UTC next day.
+    Возвращаем 22:00 UTC сегодня: после checkin_end (18:00 UTC) и за 6 часов
+    до catch_end (04:00 UTC next day).
+    """
+    today = date.today()
+    return datetime(today.year, today.month, today.day, 22, 0, tzinfo=timezone.utc)
+
+
 @pytest.mark.asyncio
 async def test_process_penalty_happy_path(worker_db) -> None:
     from worker.tasks.process_penalty import _process
@@ -21,12 +34,14 @@ async def test_process_penalty_happy_path(worker_db) -> None:
 
     async with worker_db.session_factory() as session:
         violator_user = await worker_db.add_user(session, id=2001)
+        violator_user.deposit_balance = 500
+        await session.flush()
         catcher_user = await worker_db.add_user(session, id=2002)
         habit = await worker_db.add_habit(
             session,
             penalty_amount=150,
-            checkin_window_start_hour=0,
-            checkin_window_end_hour=23,
+            checkin_window_start_hour=9,
+            checkin_window_end_hour=21,
         )
         violator = await worker_db.add_membership(
             session, user_id=violator_user.id, habit_id=habit.id, deposit_balance=500
@@ -42,23 +57,28 @@ async def test_process_penalty_happy_path(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload, session_factory=worker_db.session_factory)
+    with patch("app.services.penalty_service.datetime") as mock_dt:
+
+        mock_dt.now.return_value = _inside_catch_window_now()
+
+        result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert "penalty_id" in result
 
     async with worker_db.session_factory() as session:
         from sqlalchemy import select
 
-        from app.models.membership import Membership
         from app.models.penalty import Penalty
         from app.models.transaction import Transaction
 
-        v = (
+        from app.models.user import User
+
+        u = (
             await session.execute(
-                select(Membership).where(Membership.id == violator.id)
+                select(User).where(User.id == violator_user.id)
             )
         ).scalar_one()
-        assert v.deposit_balance == 350  # 500 - 150
+        assert u.deposit_balance == 350  # 500 - 150
 
         p = (
             await session.execute(
@@ -86,12 +106,14 @@ async def test_process_penalty_duplicate_idempotent(worker_db) -> None:
 
     async with worker_db.session_factory() as session:
         violator_user = await worker_db.add_user(session, id=2011)
+        violator_user.deposit_balance = 500
+        await session.flush()
         catcher_user = await worker_db.add_user(session, id=2012)
         habit = await worker_db.add_habit(
             session,
             penalty_amount=200,
-            checkin_window_start_hour=0,
-            checkin_window_end_hour=23,
+            checkin_window_start_hour=9,
+            checkin_window_end_hour=21,
         )
         violator = await worker_db.add_membership(
             session, user_id=violator_user.id, habit_id=habit.id, deposit_balance=500
@@ -116,7 +138,11 @@ async def test_process_penalty_duplicate_idempotent(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload, session_factory=worker_db.session_factory)
+    with patch("app.services.penalty_service.datetime") as mock_dt:
+
+        mock_dt.now.return_value = _inside_catch_window_now()
+
+        result = await _process(payload, session_factory=worker_db.session_factory)
     assert result["ok"] is True
     assert result.get("duplicate") is True
 
@@ -141,12 +167,14 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
 
     async with worker_db.session_factory() as session:
         violator_user = await worker_db.add_user(session, id=2021)
+        violator_user.deposit_balance = 0
+        await session.flush()
         catcher_user = await worker_db.add_user(session, id=2022)
         habit = await worker_db.add_habit(
             session,
             penalty_amount=500,
-            checkin_window_start_hour=0,
-            checkin_window_end_hour=23,
+            checkin_window_start_hour=9,
+            checkin_window_end_hour=21,
         )
         violator = await worker_db.add_membership(
             session, user_id=violator_user.id, habit_id=habit.id, deposit_balance=0
@@ -162,7 +190,11 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload, session_factory=worker_db.session_factory)
+    with patch("app.services.penalty_service.datetime") as mock_dt:
+
+        mock_dt.now.return_value = _inside_catch_window_now()
+
+        result = await _process(payload, session_factory=worker_db.session_factory)
     # Депозит исчерпан — PenaltyService кидает PenaltyAlreadyProcessedError("deposit_exhausted")
     assert result["ok"] is True
     assert result.get("duplicate") is True
@@ -179,7 +211,6 @@ async def test_process_penalty_pauses_on_zero_deposit(worker_db) -> None:
             )
         ).scalar_one()
         assert v.status == MembershipStatus.PAUSED
-        assert v.deposit_balance == 0
 
 
 @pytest.mark.asyncio
@@ -191,8 +222,8 @@ async def test_process_penalty_violator_inactive(worker_db) -> None:
         catcher_user = await worker_db.add_user(session, id=2032)
         habit = await worker_db.add_habit(
             session,
-            checkin_window_start_hour=0,
-            checkin_window_end_hour=23,
+            checkin_window_start_hour=9,
+            checkin_window_end_hour=21,
         )
         violator = await worker_db.add_membership(
             session,
@@ -211,7 +242,11 @@ async def test_process_penalty_violator_inactive(worker_db) -> None:
         "violator_membership_id": violator.id,
         "club_date": date.today().isoformat(),
     }
-    result = await _process(payload, session_factory=worker_db.session_factory)
+    with patch("app.services.penalty_service.datetime") as mock_dt:
+
+        mock_dt.now.return_value = _inside_catch_window_now()
+
+        result = await _process(payload, session_factory=worker_db.session_factory)
     # Неактивный membership → MembershipNotActiveError → ok=False
     assert result["ok"] is False
 

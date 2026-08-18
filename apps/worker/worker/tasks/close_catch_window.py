@@ -1,123 +1,141 @@
+"""Worker-таска `close_catch_window` — housekeeping после закрытия catch window.
+
+Pravki-manual-catch-2026-08-18 §Шаг 3 (Commit 2): переписана. Авто-списание
+отключено. Штраф возможен ТОЛЬКО через ручную поимку (`apply_catch`).
+
+Что делает cron (housekeeping после закрытия catch window «вчера»):
+1. **Gate на now_utc:** пропускаем если check-in window клуба ещё открыт.
+2. **Gate на catch_window_end:** для `housekeeping_club_date = yesterday_in_club_tz`
+   проверяем `now_utc > catch_window_end(housekeeping_club_date)`. Если не —
+   skip («вчерашний» catch window ещё не закрылся).
+3. После gate для каждого не-LEFT члена без чек-ина за `housekeeping_club_date`:
+   - `upsert Checkin(status='missed')` — для истории/UI (не для финансов).
+   - Под `lock_for_update(user)` вызов `recompute_pause_status` — sync
+     статуса с депозитом. Без денежных движений; если
+     `deposit < penalty` → `PAUSED`.
+
+**Почему «вчера», а не «сегодня»:** `habit.club_date(now_utc)` возвращает
+дату «сейчас» в TZ клуба. Catch window для club_date D заканчивается в
+D+1 (например, для 09:00-21:00 MSK catch window 18 aug кончается в
+04:00 UTC 19 aug). Когда мы в 04:05 UTC 19 aug, club_date в MSK = 19 aug,
+но catch window, который только что закрылся — для 18 aug. Поэтому
+housekeeping работает с `club_date = club_date(now_utc - 1 day)`.
+
+Что НЕ делает (Commit 2):
+- Не списывает деньги, не создаёт `Penalty` / `Transaction`.
+- Не отправляет уведомления о списании (текст был ложным после отключения
+  авто-списания; удалено целиком `_publish_window_closed_notifications`).
+
+Идемпотентность: повторный запуск → `upsert_status` перезаписывает
+MISSED → MISSED (no-op), `recompute_pause_status` вычисляет одинаковый
+статус (no-op). Никаких side-effects.
+"""
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from app.core.constants import MembershipStatus
+from app.core.constants import CheckinStatus, MembershipStatus
 from app.core.logging import get_logger
 from app.models.habit import Habit
-from app.models.membership import Membership
-from app.models.user import User
+from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
-from app.services.penalty_service import PenaltyService
+from app.repositories.user_repository import UserRepository
+from app.services.membership_service import MembershipService
 
 
 async def _close_for_habit(session, habit: Habit, now_utc: datetime) -> dict:
-    """Штрафует участников без чек-ина за club_date(now).
+    """Housekeeping для одного клуба. Возвращает summary-запись.
 
-    Защита от раннего срабатывания: если окно чек-ина в TZ клуба ещё не закрылось,
-    пропускаем (сегодня ещё не пропущено — рано штрафовать).
+    Args:
+        session: async-сессия (worker transaction; caller делает commit).
+        habit: клуб для обработки.
+        now_utc: момент запуска (tz-aware UTC datetime).
 
-    Стриминг: memberships подгружаются через `iter_for_habit` (server-side
-    cursor, asyncpg). Память O(1) на итерацию, штрафы применяются к каждому
-    member'у по мере получения. Идемпотентность — на стороне PenaltyService
-    (INSERT ON CONFLICT DO NOTHING по (membership_id, date)).
+    Returns:
+        dict для summary: {habit_id, skipped?, marked_missed, club_date}.
     """
-    if habit.is_within_checkin_window(now_utc):
+    if not now_utc.tzinfo:
+        raise ValueError(
+            "_close_for_habit requires tz-aware UTC datetime; "
+            "worker captures captures_now_utc via datetime.now(tz=timezone.utc)."
+        )
+
+    # Housekeeping работает за «вчера» в TZ клуба: catch window вчерашнего
+    # club_date только что закрылся. club_date(now - 1 day) даёт
+    # корректную дату с учётом TZ (для constant-offset TZ типа MSK/JST
+    # это эквивалентно «сегодня минус 1 день в TZ клуба»).
+    housekeeping_club_date = habit.club_date(now_utc - timedelta(days=1))
+
+    # Gate: catch window для housekeeping_club_date ещё не закрылся → skip.
+    # Строгое `>` против catch_window_end: на границе (последняя секунда)
+    # ещё НЕ housekeeping. is_within_catch_window inclusive с обеих сторон,
+    # gate — нет, чтобы исключить race на границе.
+    catch_end_utc = habit.catch_window_end(housekeeping_club_date)
+    if not now_utc > catch_end_utc:
         return {
             "habit_id": str(habit.id),
-            "skipped": "window_open",
-            "penalized": 0,
+            "skipped": "catch_window_open",
+            "marked_missed": 0,
+            "club_date": str(housekeeping_club_date),
         }
 
-    club_date = habit.club_date(now_utc)
+    # Housekeeping: для каждого не-LEFT члена без чек-ина за
+    # housekeeping_club_date.
     membership_repo = MembershipRepository(session)
     habit_repo = HabitRepository(session)
-    checkin_repo = __import__(
-        "app.repositories.checkin_repository", fromlist=["CheckinRepository"]
-    ).CheckinRepository(session)
-    from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
-
-    penalty_service = PenaltyService(
+    checkin_repo = CheckinRepository(session)
+    user_repo = UserRepository(session)
+    membership_service = MembershipService(
         session=session,
         habit_repo=habit_repo,
         membership_repo=membership_repo,
-        checkin_repo=checkin_repo,
-        suspicious_repo=SuspiciousPairsRepository(session),
+        user_repo=user_repo,
     )
 
-    penalized = 0
-    waived_count = 0
-    notifications: list[tuple[Membership, int]] = []
+    marked_missed = 0
     async for membership in membership_repo.iter_for_habit(str(habit.id)):
-        # Общие фильтры (одинаковы для ACTIVE и PAUSED).
-        existing = await checkin_repo.get_for_date(str(membership.id), club_date)
+        existing = await checkin_repo.get_for_date(
+            str(membership.id), housekeeping_club_date
+        )
         if existing is not None:
+            # Уже есть Checkin (юзер отметился, был пойман ранее, или
+            # cron уже отработал). Idempotency: пропускаем.
             continue
-        # 7.3: новый участник, вступивший в club_date, не считается
-        # пропавшим — пропуск начинается со следующего клуб-дня.
-        # joined_at NOT NULL в schema, default = now() — значит
-        # None здесь невозможен в проде; defensive check избыточен.
-        if membership.joined_at.date() >= club_date:
+        # PR §7.3: новичок сегодня (joined_at >= housekeeping_club_date) →
+        # пропускаем. For housekeeping_club_date=2026-08-18: новичок 18 aug
+        # не считается пропавшим (joined_at.date()=2026-08-18 >= club_date).
+        if membership.joined_at.date() >= housekeeping_club_date:
             continue
-        # Ветвление по статусу.
-        # Pravki-no-deposit-waived-marker (коммит A 2026-08-17):
-        # PAUSED юзер (deposit < penalty через recompute_pause_status) не может
-        # платить — помечаем день как «уже разрешённый» через WAIVED-маркер,
-        # чтобы apply_catch после topup не списал деньги повторно за тот день.
-        # ACTIVE идёт через apply_window_expired (списание штрафа или редкий
-        # ACTIVE+deposit=0 → WAIVED). LEFT skip'ается явно.
-        if membership.status == MembershipStatus.ACTIVE:
-            penalty = await penalty_service.apply_window_expired(
-                violator_membership_id=str(membership.id),
-                club_date=club_date,
-            )
-            if penalty is not None:
-                penalized += 1
-                notifications.append(
-                    (membership, int(penalty.amount))
-                )
-        elif membership.status == MembershipStatus.PAUSED:
-            marker = await penalty_service.mark_waived_unable_to_pay(
-                violator_membership_id=str(membership.id),
-                club_date=club_date,
-            )
-            if marker is not None:
-                waived_count += 1
+        if membership.status == MembershipStatus.LEFT:
+            # Не трогаем LEFT: явное действие юзера, не автопауза.
+            continue
+
+        # user-lock обязателен для recompute_pause_status (Pravki Z-2.4):
+        # sync статуса без lock'а может записать устаревший статус поверх
+        # параллельного top-up / smart renew / catch (которые тоже лочат user).
+        await user_repo.lock_for_update(membership.user_id)
+
+        # 1. История/UI — Checkin.missed. Без финансовых последствий.
+        #    ON CONFLICT DO UPDATE: idempotency.
+        await checkin_repo.upsert_status(
+            membership_id=str(membership.id),
+            on_date=housekeeping_club_date,
+            status=CheckinStatus.MISSED,
+        )
+
+        # 2. Sync статуса с депозитом: deposit<penalty → PAUSED.
+        #    Никаких денежных движений; функция уже реализована для
+        #    других triggers (apply_catch, top-up, subscribe_and_join).
+        await membership_service.recompute_pause_status(membership.user_id)
+
+        marked_missed += 1
 
     return {
         "habit_id": str(habit.id),
-        "penalized": penalized,
-        "waived": waived_count,
-        "notifications": notifications,
+        "marked_missed": marked_missed,
+        "club_date": str(housekeeping_club_date),
     }
-
-
-async def _publish_window_closed_notifications(
-    *,
-    habit: Habit,
-    notifications: list[tuple[Membership, int]],
-    bot_token: str,
-) -> None:
-    if not bot_token or habit.chat_id == 0 or not notifications:
-        return
-    from app.services.notification_service import NotificationService
-
-    from db.session import async_session_factory  # type: ignore[import-not-found]
-
-    async with async_session_factory() as session:  # type: ignore[name-defined]
-        for violator_membership, amount in notifications:
-            violator_user = await session.get(
-                User, int(violator_membership.user_id)
-            )
-            service = NotificationService(bot_token=bot_token)
-            await service.notify_window_closed(
-                habit=habit,
-                violator_membership=violator_membership,
-                violator_user=violator_user,
-                penalty_amount_kopecks=amount,
-            )
 
 
 async def _process() -> dict:
@@ -125,37 +143,16 @@ async def _process() -> dict:
     from db.session import async_session_factory  # type: ignore[import-not-found]
 
     summary: list[dict] = []
-    habits_for_notification: list[tuple[Habit, list[tuple[Membership, int]]]] = []
     async with async_session_factory() as session:  # type: ignore[name-defined]
         habit_repo = HabitRepository(session)
+        # tz-aware UTC: catch_window_end и recompute_pause_status требуют aware.
         now_utc = datetime.now(tz=timezone.utc)
         # Стриминг клубов через `iter_active` — ORM тащит строки по мере
         # обработки, не загружая 100+ клубов целиком в память.
         async for habit in habit_repo.iter_active():
             result = await _close_for_habit(session, habit, now_utc)
-            notif_list = result.pop("notifications", [])
             summary.append(result)
-            if notif_list:
-                habits_for_notification.append((habit, notif_list))
         await session.commit()
-
-    bot_token = os.getenv("BOT_TOKEN", "")
-    if bot_token:
-        for habit, notifications in habits_for_notification:
-            try:
-                await _publish_window_closed_notifications(
-                    habit=habit,
-                    notifications=notifications,
-                    bot_token=bot_token,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "close_catch_window.notification_failed",
-                    extra={
-                        "habit_id": str(habit.id),
-                        "err": str(exc),
-                    },
-                )
 
     log.info("close_catch_window_done", extra={"summary": summary})
     return {"summary": summary}
