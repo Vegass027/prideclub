@@ -146,13 +146,8 @@ from app.models.user import User  # noqa: E402
 from app.core.constants import ProofType, MembershipStatus  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-# Bot prefilter text (через прямую ссылку на текстовый модуль, не на aiogram).
-# Загружаем checkin_texts.py напрямую через importlib — обходим __init__.py,
-# который импортирует aiogram (не установлен в backend venv).
 # _text_for_code проверяем опционально (он импортируется из bot/handlers/checkin.py,
 # который тянет aiogram — если не получится, фоллбэк на ручной маппинг).
-REJECT_SUBSCRIPTION_EXPIRED = _checkin_texts_module.REJECT_SUBSCRIPTION_EXPIRED  # noqa: F821
-
 try:
     _CHECKIN_HANDLER_PATH = ROOT / "apps" / "bot" / "bot" / "handlers" / "checkin.py"
     _spec2 = _importlib_util.spec_from_file_location(
