@@ -218,11 +218,16 @@ async def call_checkin_process(
     # Минимальный payload — реальный бот шлёт больше полей (proof_type,
     # message_id, message_sent_at), но для gate'а нужны только user_id и
     # chat_id (chat_id используется для поиска habit через chat_id → habit).
+    # Pravki §Z-22 (hole #2): если habit.checkin_topic_thread_id IS NOT NULL
+    # (topic-scoped клубы — был создан с checkin_topic_link), нужно передавать
+    # message_thread_id. Наш habit создан с checkin_topic_link="/c/.../1" →
+    # checkin_topic_thread_id=1. Без этого → WRONG_TOPIC (canonical #9).
     payload = {
         "user_id": user_id,
         "chat_id": chat_id,
         "proof_type": "video_note",
         "message_id": 1,
+        "message_thread_id": 1,  # checkin_topic_thread_id
         "message_sent_at": datetime.now().isoformat(),
     }
     status, body = await http.internal_post(
