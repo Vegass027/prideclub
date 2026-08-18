@@ -41,7 +41,7 @@ import os
 import sys
 
 from scripts.e2e.auth import FakeUser
-from scripts.e2e.core import E2EDatabase, Secrets, load_secrets
+from scripts.e2e.core import E2EDatabase
 
 
 # Синтетические user_id, которые сценарий создаёт / использует.
@@ -232,7 +232,6 @@ async def _delete_targets(
 
 async def _cleanup_redis(
     db: E2EDatabase,
-    secrets: Secrets,
     *,
     run_tag: str | None,
     user_ids: list[int] | None = None,
@@ -369,8 +368,18 @@ async def amain() -> int:
     if args.user_ids:
         user_ids_arg = [int(s.strip()) for s in args.user_ids.split(",") if s.strip()]
 
-    secrets = load_secrets()
-    db = E2EDatabase(secrets.database_url)
+    # Pravki-subscription-2026-08-17 §Z-22 E2E: cleanup читает только
+    # DATABASE_URL. На проде он задан через x-backend-env в
+    # docker-compose.yml; локально — через os.environ. Не используем
+    # load_secrets() потому что тот требует BOT_TOKEN/WEBHOOK_SECRET/
+    # SERVICE_SECRET, которые НЕ доступны в backend-контейнере
+    # (WEBHOOK_SECRET — только в x-bot-env для бота).
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL not set (set via os.environ or /app/.env)"
+        )
+    db = E2EDatabase(database_url)
 
     summary = await _collect_targets(db, run_tag=args.run_tag, user_ids=user_ids_arg)
     _print_plan(summary)
@@ -392,7 +401,7 @@ async def amain() -> int:
 
     if not args.no_redis:
         redis_counts = await _cleanup_redis(
-            db, secrets, run_tag=args.run_tag, user_ids=user_ids_arg,
+            db, run_tag=args.run_tag, user_ids=user_ids_arg,
         )
         print(f"redis cleanup applied: {redis_counts}")
 
