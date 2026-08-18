@@ -185,7 +185,20 @@ class PenaltyConfig:
     RATE_LIMIT_CATCH = "10/10s"
 
     # Окно спаливания = окно чек-ина + N часов.
+    # DEPRECATED 2026-08-18: старая формула "окно чек-ина + 1 час" не покрывает
+    # случай длинных клубных окон (например 09:00-21:00 → catch только до 22:00).
+    # Новая формула использует CATCH_WINDOW_BUFFER_HOURS: catch window
+    # заканчивается за N часов ДО начала СЛЕДУЮЩЕГО окна чек-ина.
+    # См. Pravki-manual-catch-2026-08-18 §Шаг 1.
     CATCH_WINDOW_EXTRA_HOURS = 1
+
+    # Буфер между концом catch window и началом следующего окна чек-ина.
+    # Catch window заканчивается за CATCH_WINDOW_BUFFER_HOURS часов до
+    # `next_checkin_window_start` в TZ клуба.
+    # Пример: окно 09:00-21:00 Europe/Moscow → catch до next day 07:00 MSK (10ч).
+    # Пример: окно 22:00-06:00 Europe/Moscow → catch до next day 20:00 MSK (14ч).
+    # Pravki-manual-catch-2026-08-18.
+    CATCH_WINDOW_BUFFER_HOURS = 2
 
     # Сгорание бонусных поинтов.
     BONUS_POINTS_EXPIRY_DAYS = 90

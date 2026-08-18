@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from functools import cached_property
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -9,7 +9,7 @@ from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, String, Tex
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.constants import ProofType
+from app.core.constants import PenaltyConfig, ProofType
 from app.db.session import Base
 
 if TYPE_CHECKING:
@@ -111,20 +111,81 @@ class Habit(Base):
         return ZoneInfo(self.timezone)
 
     def is_within_checkin_window(self, moment_utc: datetime) -> bool:
-        """Дедлайн чек-ина считается в TZ клуба, не пользователя.
+        """True если момент попадает в окно чек-ина клуба (TZ клуба).
 
-        TODO/FIXME: НЕ поддерживает окна через полночь (start > end).
-        Сценарий: ночной клуб с checkin_window_start=22:00, end=06:00.
-        local.time()=03:00 (внутри окна) вернёт False, потому что
-        22:00 <= 03:00 = False. Текущая логика корректна ТОЛЬКО для
-        нормальных окон (start <= end). Известный edge-case, обнаружен
-        при работе над Pravki-bug-fixes §Z-19 (joiner-late protection).
-        Новый helper `was_joined_after_window` корректно обрабатывает
-        оба случая. Для фикса `is_within_checkin_window` нужен отдельный
-        PR — задача выходит за скоуп Z-19 (см. план).
+        Корректно для обоих случаев:
+        1. Нормальное окно (start <= end): moment в [start, end].
+           Пример: окно 09:00-21:00, now=15:00 → True.
+        2. Окно через полночь (start > end): окно = [start..23:59] ∪
+           [00:00..end]. Moment попадает если time >= start ИЛИ time <= end.
+           Пример: окно 22:00-06:00, now=03:00 → True.
+                   окно 22:00-06:00, now=12:00 → False.
+                   окно 22:00-06:00, now=22:00 → True.
+                   окно 22:00-06:00, now=06:00 → True (конец включительно).
+                   окно 22:00-06:00, now=21:59 → False.
+
+        Pravki-manual-catch-2026-08-18 §Шаг 1: починен FIXME из
+        Pravki-business-logic-recon-2026-08-18.md #13 — раньше возвращал
+        False для всех ночных клубов.
         """
         local = moment_utc.astimezone(self.tzinfo)
-        return self.checkin_window_start <= local.time() <= self.checkin_window_end
+        local_time = local.time()
+        if self.checkin_window_start <= self.checkin_window_end:
+            # Нормальное окно.
+            return self.checkin_window_start <= local_time <= self.checkin_window_end
+        # Окно через полночь: [start..23:59] ∪ [00:00..end].
+        return local_time >= self.checkin_window_start or local_time <= self.checkin_window_end
+
+    def catch_window_end(self, club_date: date) -> datetime:
+        """Граница catch window в UTC: `next_checkin_window_start − CATCH_WINDOW_BUFFER_HOURS`.
+
+        Pravki-manual-catch-2026-08-18: catch window длится от конца окна
+        чек-ина до `next_checkin_window_start − CATCH_WINDOW_BUFFER_HOURS`
+        в TZ клуба. После этой границы ловить нельзя — backend отвергает
+        с `CatchWindowClosedError`, UI скрывает кнопку «Поймать».
+
+        Args:
+            club_date: дата клуба для которой считается окно. Это день,
+                когда юзер должен был чек-иниться. Catch window для этого
+                дня может простираться в следующий клуб-день (если окно
+                заканчивается поздно вечером или через полночь).
+
+        Returns:
+            datetime в UTC: `next_checkin_window_start_local − buffer_hours`.
+
+        Корректно для обоих типов окон:
+        1. Нормальное окно (start <= end): catch window для club_date
+           длится от end_of_day до next day start − buffer.
+        2. Окно через полночь (start > end): catch window для club_date
+           длится от end_of_night до next day start − buffer
+           (= следующий день в TZ клуба, время start, − buffer).
+
+        Пример 1: окно 09:00-21:00 Europe/Moscow, club_date=2026-08-18.
+            next_window_start_local = 2026-08-19 09:00 MSK
+            catch_window_end_local   = 2026-08-19 07:00 MSK = 2026-08-19 04:00 UTC
+
+        Пример 2: окно 22:00-06:00 Europe/Moscow, club_date=2026-08-18.
+            next_window_start_local = 2026-08-19 22:00 MSK
+            catch_window_end_local   = 2026-08-19 20:00 MSK = 2026-08-19 17:00 UTC
+
+        Пример 3: окно 09:00-21:00 Asia/Tokyo (UTC+9), club_date=2026-08-18.
+            next_window_start_local = 2026-08-19 09:00 JST
+            catch_window_end_local   = 2026-08-19 07:00 JST = 2026-08-18 22:00 UTC
+
+        Используется в `apply_catch` для проверки
+        `now_utc <= habit.catch_window_end(violator.club_date)`.
+        """
+        buffer_hours = PenaltyConfig.CATCH_WINDOW_BUFFER_HOURS
+        club_tz = self.tzinfo
+        # Следующее начало окна чек-ина = club_date + 1 день в TZ клуба,
+        # время start. Одинаково для нормальных окон и окон через полночь.
+        next_window_start_local = datetime.combine(
+            club_date + timedelta(days=1),
+            self.checkin_window_start,
+            tzinfo=club_tz,
+        )
+        catch_window_end_local = next_window_start_local - timedelta(hours=buffer_hours)
+        return catch_window_end_local.astimezone(ZoneInfo("UTC"))
 
     def was_joined_after_window(self, joined_at_utc: datetime) -> bool:
         """True если joined_at_utc в TZ клуба — после закрытия checkin_window.
