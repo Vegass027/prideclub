@@ -155,8 +155,13 @@ async def test_apply_catch_writes_checkin_status_caught() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_window_expired_writes_checkin_status_missed() -> None:
-    """Item 2: apply_window_expired (cron close_catch_window) → Checkin(status='missed')."""
+async def test_apply_window_expired_no_op_does_not_write_checkin_missed() -> None:
+    """Pravki-manual-catch-2026-08-18 §Шаг 3 (Commit 1).
+
+    DEPRECATED `apply_window_expired` теперь no-op. Запись Checkin(status='missed')
+    больше не происходит отсюда — это будет делать close_catch_window worker
+    напрямую через checkin_repo.upsert_status (Commit 2).
+    """
     habit = make_habit()
     checkin_repo = FakeCheckinRepo()
     membership_repo = FakeMembershipRepo()
@@ -175,11 +180,14 @@ async def test_apply_window_expired_writes_checkin_status_missed() -> None:
         violator_membership_id=str(violator.id),
         club_date=date(2026, 1, 1),
     )
-    assert result is not None
+    assert result is None
 
+    # Checkin НЕ записывается — no-op.
     checkin = await checkin_repo.get_for_date(str(violator.id), date(2026, 1, 1))
-    assert checkin is not None, "apply_window_expired должен записать Checkin(status='missed')"
-    assert checkin.status == CheckinStatus.MISSED
+    assert checkin is None, (
+        "no-op apply_window_expired не должен создавать Checkin; "
+        "Checkin(status='missed') теперь пишется напрямую из close_catch_window"
+    )
 
 
 @pytest.mark.asyncio
