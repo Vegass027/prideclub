@@ -55,49 +55,57 @@
 
 ## 6. Аудит (выполнено 2026-07-23)
 
-### 6.1 Призовой фонд — ✅ работает корректно
+### 6.1 Призовой фонд — ⚠️ частично работает (средняя стрелка цепочки не реализована)
 
-**Цепочка (только ручная поимка):** `apply_catch → Penalty.amount → Habit.prize_pool (+= FOR UPDATE) → Season.prize_pool → распределение в close_season`.
+> **⚠️ Расхождение с реальностью / 2026-08-18.** Audit от 2026-07-23 пометил эту секцию «✅ работает корректно», но проверка через `git log --all -p` от initial commit `00884e8` (2026-07-21) до текущего HEAD показала: **средняя стрелка `Habit.prize_pool → Season.prize_pool` никогда не была реализована**. Это не регрессия — это never-implemented feature. Подробности: `Pravki-business-logic-recon-2026-08-18.md` #2.
 
-> **Изменение 2026-08-18 (Pravki-manual-catch-2026-08-18 §Шаг 3):** Авто-списание отключено. `PenaltyService.apply_window_expired` и `mark_waived_unable_to_pay` теперь safe no-op (deprecated, см. commit `1b1d325`). Штрафы в `Habit.prize_pool` теперь попадают **только** через ручную поимку (`apply_catch`). Хроника за 2026-07-23 (см. ниже) описывала активный авто-путь — это устарело, цепочка стала короче.
+**Что работает (✅):**
+- ✅ `Penalty.amount → Habit.prize_pool (+= FOR UPDATE)` — атомарный инкремент работает, защищён от гонки `apply_catch` ↔ `apply_window_expired`.
 
-| Файл | Что делает (актуально, 2026-08-18) |
-|---|---|
-| `repositories/habit_repository.py:119-135` | `add_to_prize_pool(habit_id, amount)` — атомарный инкремент с `session.get(..., with_for_update=True)`. Вызывается **только** из `apply_catch`. |
-| `services/penalty_service.py:71-156` (`apply_catch`) | `SELECT FOR UPDATE` на violator → `amount = min(penalty, deposit)` → `deposit -= amount` + `add_to_prize_pool(habit, amount)` + `penalty.fund_share = amount` (транзакция в БД) |
-| `services/penalty_service.py:159-231` (`apply_window_expired`) | **DEPRECATED**: safe no-op (`logger.warning("deprecated_auto_penalty_skipped")` + `return None`). Никаких финансовых движений. Вызывается только старыми Celery-сообщениями в брокере. |
-| `services/season_service.py:60-122` (`close_season`) | `SELECT FOR UPDATE` на Season → проверка status==ACTIVE → `validate_prize_rules` → цикл по rules → **basis points арифметика** (`prize_pool * percentage_bp // 10_000`, никакого float/Decimal) → запись `Transaction(type=PRIZE)` для каждого победителя → status=CLOSED |
-| `apps/worker/worker/tasks/close_catch_window.py` (`_process`) | **Housekeeping** (не штраф): для каждого не-LEFT члена без чек-ина за «вчера» в TZ клуба → `Checkin(status='missed')` + `MembershipService.recompute_pause_status(user_id)` под `lock_for_update(user)`. Никаких `Penalty`, `Transaction` или списания депозита. |
+**Что НЕ работает (❌):**
+- ❌ **`Habit.prize_pool → Season.prize_pool`** — нет ни setter'а, ни writer'а. `Season.prize_pool` всегда равен 0 (`server_default`). Ни один коммит за всю историю репо не пишет в эту колонку.
+- ❌ **`Season` (строки) не создаются в проде** — `start_season` определён в `services/season_service.py:45`, но не вызывается ниоткуда. `grep -rn "start_season"` = 1 строка определения + mypy cache.
+- ❌ **Нет admin endpoint для создания Season** — `grep -rn "Season\|seasons" apps/backend/app/api/` = 0 строк.
 
-**Инварианты (все соблюдены):**
-- Деньги — `int` копейки везде (`% 1 == 0` благодаря basis points)
-- `FOR UPDATE` на критических локах (нет race conditions)
-- Идемпотентность через уникальный индекс `penalties(membership_id, date, reason)` (нет двойных штрафов)
-- Целочисленное распределение (`BASIS_POINTS_TOTAL = 10_000`), без потери копеек
-- `validate_prize_rules` гарантирует что сумма percentages = ровно 100% (иначе `InvalidPrizeRulesError`)
+**Результат:** призовой фонд копится в `Habit.prize_pool` корректно (например, 50 000₽ за сезон), но `close_season.run` cron распределяет **0₽** всем, потому что `close_season` читает `Season.prize_pool = 0`, которое никогда не обновлялось.
 
-**Минорное замечание:** при распределении `share = per_member_pool // len(ranked)` остаток копеек теряется (идёт молча в ноль). Это нормально — нельзя раздать остаток копейки. Если нужно — можно добавить "first place gets remainder" как политику.
+**Где ошибся audit 2026-07-23:** перечислил файлы endpoint-ов (`add_to_prize_pool`, `apply_catch`, `close_season`), но не проверил, что **между ними передаются данные**. Пометка «✅ работает корректно» — ложная, должна быть снята до фикса цепочки.
 
-### 6.2 Ловля (catch) — ✅ работает корректно
+**Что нужно сделать для возврата «✅»:**
+1. Сделать `Habit.prize_pool → Season.prize_pool` зеркалирование (snapshot на момент `start_season`) ИЛИ end-of-season transfer ИЛИ live-update в `apply_catch`/`apply_window_expired`.
+2. Добавить admin endpoint `POST /admin/v1/habits/{id}/seasons` для создания Season.
+3. Добавить e2e-тест через broker/cron (не только unit), чтобы регрессия не повторилась.
 
-| Файл | Что делает |
-|---|---|
-| `services/penalty_service.py:58-156` (`apply_catch`) | 1) Rate-limit через Redis Lua (`incr_catch`, 10/10s); 2) `CannotCatchSelfError`; 3) проверка membership status==ACTIVE; 4) проверка habit существует; 5) идемпотентность через существующий penalty; 6) `lock_for_update(violator)`; 7) проверка `suspicious_pairs` (если пара в flagged → `catcher_membership_id=None` — бонус не начислится); 8) списание депозита + инкремент prize_pool + создание Penalty + flush + создание Transaction; 9) если deposit=0 → status=PAUSED |
-| `services/bonus_service.py:54-123` (`apply_catch_bonus`) | 1) Идемпотентность через `penalty.bonus_applied`; 2) проверка `catcher_membership_id is not None` (нет бонуса если suspicious); 3) повторная проверка `lookup_flagged`; 4) `user.bonus_points += 1`; 5) создание `Transaction(type=BONUS_CATCH)` (для `integrity_check`); 6) если достигли `bonus_rule.threshold` → `_grant_reward` |
-| `services/catch_rate_limiter.py` | Lua-скрипт атомарного INCR + EXPIRE (защита от гонки INCR без EXPIRE) |
-| `core/constants.py:72` | `RATE_LIMIT_CATCH = "10/10s"` (настраивается) |
+### 6.2 Ловля (catch) — ⚠️ частично работает (`apply_catch_bonus` не вызывается в проде)
 
-**Инварианты (все соблюдены):**
-- `FOR UPDATE` на violator + `add_to_prize_pool` (нет race condition)
-- Идемпотентность penalty через `(membership_id, date, reason)` UNIQUE
-- Rate-limit 10/10s per user через Redis Lua (атомарный)
-- Self-catch запрещён (`CannotCatchSelfError`)
-- Suspicious pairs → бонус не начисляется, но штраф списывается (дисциплина не ослабляется)
-- Bonus transaction записан в `transactions` для каждого `bonus_applied=true` (для `integrity_check_bonus_transactions` cron)
+> **⚠️ Расхождение с реальностью / 2026-08-18.** Audit от 2026-07-23 пометил эту секцию «✅ работает корректно», но проверка через `git log --all -p` показала: **`apply_catch_bonus` никогда не вызывается в проде**. Функция и её unit-тесты работают, но `celery_producer._TASK_NAMES` не содержит `"apply_catch_bonus"` с initial commit `8fc2b71` (2026-07-21). Подробности: `Pravki-business-logic-recon-2026-08-18.md` #1.
 
-**Известные нюансы:**
-- Если у юзера нет Redis (rate limiter не инициализирован) → fail-open (нет rate-limit). Для прод-режима `redis_port=None` бросает `RateLimitDisabledError` после commit'а T5.
-- `suspicious_pairs` lookup происходит дважды: в `apply_catch` (для записи `catcher_membership_id=None`) и в `apply_catch_bonus` (defence in depth). Доп. запрос в БД, но атомарность гарантирована.
+**Что работает (✅):**
+- ✅ `apply_catch` (penalty_service.py:58-156) — работает полностью: rate-limit, self-catch check, idempotency через существующий penalty, FOR UPDATE, suspicious_pairs, списание депозита, инкремент `Habit.prize_pool`, создание Penalty, переключение в PAUSED при deposit=0.
+
+**Что НЕ работает (❌):**
+- ❌ **`apply_catch_bonus` (bonus_service.py:54-123) НИКОГДА не вызывается в проде.** `git log --all -p` показал:
+  - `celery_producer._TASK_NAMES` — никогда не содержал `"apply_catch_bonus"` (с initial commit `8fc2b71`).
+  - `process_penalty.py` — никогда не слал `apply_catch_bonus` (поиск `grep "apply_catch_bonus\|bonus_service"` = 0 строк за всю историю).
+  - `members.py:catch_violator` — никогда не слал `apply_catch_bonus` (там есть `publish_catch_event` и `publish_you_were_caught`, но не bonus).
+  - `celery_app.beat_schedule` — нет periodic задачи для apply_catch_bonus.
+- ❌ **`User.bonus_points` остаётся 0 для всех ловцов** — обещанная механика «+1 балл за каждый пойманный» не работает.
+- ❌ **`Transaction(type=BONUS_CATCH)` не создаётся** — `integrity_check_bonus_transactions` cron находит 0 строк `bonus_applied=true`, отчитывается «0 orphans». **Гарантия целостности не выполняется** — просто потому что нет данных для проверки.
+- ❌ **`Penalty.catcher_bonus_points` (поле модели) — мёртвое.** Записывается = 1 в `apply_catch` (penalty_service.py:193), но никем не читается.
+
+**Почему тест `test_worker_cron_chain.py:84` вводит в заблуждение:**
+```python
+from worker.tasks.apply_catch_bonus import _process as apply_bonus
+bonus_result = await apply_bonus({"catcher_membership_id": ..., "penalty_id": ...})
+```
+Тест вызывает `_process` через **прямой импорт**, минуя Celery broker. Это «test the function», не «test the chain». **Тест зелёный, но прод не зелёный** — функция работает, но в прод не вызывается.
+
+**Где ошибся audit 2026-07-23:** перечислил файлы сервисов (`bonus_service.py:54-123`), но не проверил «кто зовёт эту функцию в проде через broker». Пометка «✅ работает корректно» — ложная, должна быть снята до фикса wiring'а.
+
+**Что нужно сделать для возврата «✅»:**
+1. Добавить `"apply_catch_bonus": "worker.tasks.apply_catch_bonus.run"` в `celery_producer._TASK_NAMES`.
+2. В `process_penalty.run` после успешного `apply_catch` слать `send_task("apply_catch_bonus", {"catcher_membership_id": ..., "penalty_id": ...})` (отдельный try/except, чтобы не ломать основной поток).
+3. Переписать `test_worker_cron_chain.py` на вызов через `run(payload, ...)` (прод-обёртку), а не `_process` напрямую. Добавить проверку, что `send_task` действительно ставит задачу в broker (mock или broker introspection).
 
 ### 6.3 Лидерборд — аудит для задачи «фото участников»
 
