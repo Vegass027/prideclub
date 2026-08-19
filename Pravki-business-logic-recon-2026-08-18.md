@@ -45,13 +45,11 @@
 
 ## TL;DR — карта дыр
 
-## TL;DR — карта дыр
-
 | # | Дыра | Severity | Влияние |
 |---|------|----------|---------|
 | 🔴 1 | `apply_catch_bonus` НИКОГДА не вызывается — `bonus_points` не начисляются ловцам | **Крит** | Ловец не получает обещанные баллы. `integrity_check` обходится (orphan'ов нет, потому что `bonus_applied` всегда False). |
 | 🔴 2 | Сезоны — мёртвый код: `Season.prize_pool` никогда не обновляется, `start_season` не вызывается, эндпоинта создания нет | **Крит** | Призовой фонд никогда не распределяется. `close_season` всегда находит 0 активных сезонов, а если найдёт — раздаёт 0 ₽. |
-| 🔴 3 | Cron `close_catch_window` на `:05` каждого часа ломает «catch window = чек-ин + 1ч» | **Крит** | У участников реально **5 минут** на поимку, а не 1 час. В `Pravki-deposit-sse.md` явно заявлено окно +1ч. |
+| ~~🔴 3~~ | ~~Cron `close_catch_window` ломает окно ловли (5 минут вместо часа)~~ → **ЗАКРЫТО Z-3** (коммиты `f4eb243`, `48210e9`, `3b81327`) — cron = housekeeping, не штраф. Окно ловли контролируется через `Habit.is_within_catch_window` (Z-1) + `CatchWindowClosedError` в `apply_catch` (Z-2). Per-habit-beat остаётся 🟢 техдолгом по эффективности расписания | Низ | Без финансового импакта. |
 | 🟠 4 | `enqueue_checkin` пропускает `is_forwarded` в worker, а `proof_validator` не получает `forward_date` — defense-in-depth на forward **не работает** | **Выс** | Пересланный кружок можно протащить через прямой POST на `/internal/checkins/process` (если утечёт service token). |
 | 🟠 5 | В `_resolve_catcher_membership_id` `catcher_membership_id` берётся из **любого** активного membership ловца, не обязательно из целевого habit | **Выс** | Атрибуция улова чужому membership → ловец получает leaderboard-очки в клубе, где не состоит. Anti-`suspicious_pairs` не срабатывает (пары в разных habit). |
 | 🟠 6 | Порядок проверок в `checkin_service.process_checkin` нарушает canonical priority v2 при race `caught_today + paused` | **Выс** | Юзер с `penalty=true AND status=paused` (штатный сценарий после `apply_catch`) получит в worker `membership_paused`, а не `caught_today`. Семантическая потеря для UI/логов. |
@@ -64,7 +62,7 @@
 | 🟡 13 | `is_within_checkin_window` не поддерживает окна через полночь (известный FIXME в `habit.py:117`) | **Ср** | Любой клуб с `start=22:00, end=06:00` (ночной) — `03:00` покажет «окно закрыто». `was_joined_after_window` корректно, но `is_within_checkin_window` — нет. |
 | 🟡 14 | `penalty_service.apply_catch` использует `await self._session.refresh(violator)` после user-lock — но `refresh` НЕ делает `FOR UPDATE` повторно, и **status может снова устареть** до flush/commit | **Ср** | Сейчас критично защищено тем, что `recompute_pause_status` идёт в той же транзакции. Но если кто-то удалит вызов `recompute_pause_status` — race вернётся. |
 | 🟡 15 | `effective_deposit` в `smart renew` (subscribe_and_join шаг 5) — `u.deposit_balance + deposit_amount_kopecks` — НЕ учитывает гонку с конкурентным списанием | **Ср** | На практике user-lock защищает, но при ошибке валидации (effective_deposit >= penalty) — `u.deposit_balance += 0` всё равно, но `dep_tx` создаётся с `amount=0` и `idempotency_key=dep_key`. После retry — вернёт тот же ключ. OK. |
-| 🟡 16 | `apply_window_expired` WAIVED-ветка (ACTIVE+deposit=0) пишет маркер, но **не вызывает `recompute_pause_status`** → юзер остаётся ACTIVE с deposit=0 | **Ср** | Штраф не списывается в моменте, но `apply_catch` после topup снимет деньги за прошлый день. **Несправедливая потеря денег.** |
+| ~~🟡 16~~ | ~~`apply_window_expired` WAIVED-ветка не вызывает `recompute_pause_status`~~ → **НЕ ПРИМЕНИМО после `1b1d325`** (2026-08-18): функция `apply_window_expired` deprecated, safe no-op (`logger.warning("deprecated_auto_penalty_skipped")` + `return None`). Никогда не пишет WAIVED-маркеры. Патчить нечего — нет активной WAIVED-ветки. | — | — |
 | 🟡 17 | `apply_catch` для `deposit=0` бросает `PenaltyAlreadyProcessedError("deposit_exhausted")` БЕЗ записи WAIVED-маркера | **Ср** | После topup `apply_catch` снимет деньги за прошлый день. **Несправедливая потеря денег.** |
 | 🟡 18 | `join` LEFT→ACTIVE reuse **не проверяет deposit** | **Ср** | Юзер с 0 deposit реактивируется, после первого штрафа уходит в PAUSED, не понимая почему. |
 | 🟡 19 | `leave` без возврата депозита — деньги остаются на `users.deposit_balance` глобально | **Ср** | UX hole, не финансовая — но документация заявляет «за вычетом техкомиссии», а возврата нет вообще. |
@@ -203,7 +201,14 @@ Audit говорит:
 
 ---
 
-### 🔴 #3 — Cron ломает окно ловли
+### ~~🔴 #3 — Cron ломает окно ловли~~ → 🟢 **ЗАКРЫТО Z-3** (2026-08-18)
+
+> **Snapshot 2026-08-19.** Закрыто серией manual-catch Z-1/Z-2/Z-3 (коммиты `f4eb243` → `48210e9` → `3b81327`):
+> - `f4eb243 feat(habit): catch_window_end + midnight window fix (#Z-1 manual-catch)` — добавлен `Habit.is_within_catch_window` (per-habit, не «checkin + 1ч»).
+> - `48210e9 feat(penalty): apply_catch race-free catch window check (#Z-2 manual-catch)` — `apply_catch` поднимает `CatchWindowClosedError` после `catch_window_end`. Штрафовать через auto-путь больше нельзя.
+> - `3b81327 feat(worker): close catch window without auto-penalties (#Z-3 manual-catch)` — `close_catch_window` = housekeeping (`Checkin(status='missed')` + `recompute_pause_status`). **Никаких `Penalty`, `Transaction` или списания депозита.**
+>
+> Ниже — оригинальный анализ (история), сохранён для трассировки.
 
 **Файл:** `apps/worker/worker/celery_app.py:69-75`
 
@@ -493,7 +498,21 @@ if effective_deposit < habit.penalty_amount:
 
 ---
 
-### 🟡 #16 — `apply_window_expired` WAIVED-ветка не пересчитывает паузу
+### ~~🟡 #16 — `apply_window_expired` WAIVED-ветка не пересчитывает паузу~~ → **НЕ ПРИМЕНИМО**
+
+> **Snapshot 2026-08-19.** Не применимо после `1b1d325 feat(penalty): deprecate auto-charge to safe no-op` (2026-08-18):
+> ```python
+> # apps/backend/app/services/penalty_service.py:282-299
+> async def apply_window_expired(...):
+>     logger.warning(
+>         "deprecated_auto_penalty_skipped",
+>         extra={"method": "apply_window_expired", ...},
+>     )
+>     return None
+> ```
+> Функция стала safe no-op. Никогда не пишет WAIVED-маркеры, никогда не вызывает `recompute_pause_status`. **Патчить нечего** — нет активной WAIVED-ветки. Сценарий «юзер с 0₽ остаётся ACTIVE после WAIVED-маркера от cron» больше не существует.
+>
+> Ниже — оригинальный анализ (история), сохранён для трассировки.
 
 **Файл:** `apps/backend/app/services/penalty_service.py:282-330` — для `amount <= 0` пишется WAIVED-маркер, но **`recompute_pause_status` НЕ вызывается**.
 
@@ -715,7 +734,7 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 |---|---|---|---|---|
 | #1 apply_catch_bonus не вызывается | 🔴 Крит | Каждый catch | 2 строки + регистрация в `_TASK_NAMES` | Да |
 | #2 Сезоны — мёртвый код | 🔴 Крит | Первый сезон | 5+ файлов, admin endpoint + snapshot логика | Нет (ещё не нужно) |
-| #3 Cron ломает окно ловли | 🔴 Крит | Каждый день после окна | Средне — per-habit-beat | Да |
+| #3 ~~Cron ломает окно ловли~~ → ЗАКРЫТО Z-3 | 🟢 Низ | Не стреляет (housekeeping only) | — | Нет |
 | #4 Forward в worker defense-in-depth | 🟠 Выс | bypassed bot | 1-2 строки | Нет |
 | #5 _resolve_catcher_membership_id кросс-habit | 🟠 Выс | если endpoint задействуют | 1 фильтр | Нет |
 | #6 Приоритет проверок в worker | 🟠 Выс | combo caught_today+paused | Reorder 10 строк | Нет |
@@ -728,7 +747,7 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 | #13 Окна через полночь | 🟡 Ср | ночные клубы | 3 строки | Нет (фича не запущена) |
 | #14 refresh(violator) под локом | 🟡 Ср | edge-case | defensive SELECT FOR UPDATE | Нет |
 | #15 effective_deposit без race | 🟡 Ср | крайне редкий | covered by user-lock | Нет |
-| #16 WAIVED-ветка без recompute | 🟡 Ср | deposit=0 ACTIVE | 1 строка recompute | Нет |
+| #16 ~~WAIVED-ветка без recompute~~ → НЕ ПРИМЕНИМО (deprecated) | — | Не применимо (функция deprecated `1b1d325`) | — | Нет |
 | #17 apply_catch deposit=0 без WAIVED | 🟡 Ср | deposit=0 ACTIVE | 5 строк | Нет |
 | #18 reuse LEFT без deposit-check | 🟡 Ср | возврат в клуб | 1 if блок | Нет |
 | #19 leave без возврата депозита | 🟡 Ср | UX, юзер уходит | отдельная задача возврата | Нет |
@@ -746,11 +765,11 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 
 ## Рекомендуемый порядок фиксов
 
-### Sprint 1 — критические для прода
+### Sprint 1 — критические для прода (после Z-серии manual-catch)
 1. **#1** `apply_catch_bonus` — 2 строки, восстанавливает обещанную ловцам механику.
-2. **#3** cron ломает catch window — переписать на per-habit-beat.
-3. **#17** `apply_catch` deposit=0 пишет WAIVED-маркер — закрывает «штраф за прошлый день» после topup.
-4. **#16** `apply_window_expired` WAIVED-ветка вызывает `recompute_pause_status` — закрывает тот же класс багов для ACTIVE+deposit=0.
+2. **#17** `apply_catch` deposit=0 пишет WAIVED-маркер — закрывает «штраф за прошлый день» после topup.
+
+> **#3 и #16 закрыты серией Z-1/Z-2/Z-3 (2026-08-18)** — см. детальные секции. Удалены из активного спринта.
 
 ### Sprint 2 — антифрод hardening
 5. **#4** forward в worker defense-in-depth.
@@ -805,11 +824,10 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 - **На что влияет:** на сезонную экономику. Победители не получают призы — главная мотивация к честным чек-инам исчезает.
 - **Что даст фикс:** реальные призы в конце сезона, сезонная механика работает как обещано. Требует admin endpoint + snapshot-логику (Sprint 4, не блокер).
 
-**#3 Окно ловли всего 5 минут вместо часа**
-- **Ошибка:** документация обещает «после окна чек-ина у тебя 1 час чтобы поймать нарушителя». Реальность — у тебя 5 минут, потому что cron штрафует через 5 минут после закрытия окна.
-- **Что происходит:** окно чек-ина закрылось в 10:00 → cron в 10:05 уже списывает штрафы всем, кто не отметился. Все, кто хотел поймать кого-то в 10:30 — опоздали.
-- **На что влияет:** на социальный контроль. Главная фича клубов («поймать прогульщика») почти не работает.
-- **Что даст фикс:** реальный час на поимку, социальный контроль включается как обещано. Per-habit-beat через `apply_async(eta=...)`.
+**#3 Окно ловли всего 5 минут вместо часа** — **🟢 ЗАКРЫТО Z-3 (2026-08-18)**
+- **Что было:** документация обещала 1 час, реальность — 5 минут (cron штрафовал через 5 мин после окна).
+- **Что сейчас:** окно ловли = `Habit.is_within_catch_window` (per-habit). `apply_catch` поднимает `CatchWindowClosedError` после `catch_window_end`. Cron = housekeeping (MISSED-маркер + пересчёт паузы), **не штрафует**.
+- **Что осталось:** per-habit-beat расписание cron (сейчас `crontab(minute=5)` каждый час) — 🟢 косметика эффективности, не блокирует.
 
 ### 🟠 Высокие (Sprint 2 — антифрод hardening)
 
@@ -887,11 +905,10 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 - **На что влияет:** на edge-case. Не стреляет.
 - **Что даст фикс:** ничего нового, user-lock уже защищает.
 
-**#16 Юзер с 0₽ остаётся ACTIVE после маркера**
-- **Ошибка:** юзер с 0₽ депозита в ACTIVE → cron пишет WAIVED-маркер → но НЕ пересчитывает статус. Юзер остаётся ACTIVE.
-- **Что происходит:** после topup юзер сразу становится ACTIVE (recompute_pause_status) — а если штраф был «вчера», новый apply_catch может списать деньги за «вчера».
-- **На что влияет:** на справедливость. Юзер не должен платить за день, который он «уже прошёл» с 0₽.
-- **Что даст фикс:** справедливое списание. 1 строка `recompute_pause_status`.
+**#16 Юзер с 0₽ остаётся ACTIVE после маркера** — **НЕ ПРИМЕНИМО после `1b1d325`**
+- **Что было:** `apply_window_expired` WAIVED-ветка писала маркер, но не звала `recompute_pause_status` → юзер ACTIVE с deposit=0.
+- **Что сейчас:** `apply_window_expired` **deprecated, safe no-op** (коммит `1b1d325`). Функция больше не пишет WAIVED-маркеры. Сценарий исчез.
+- **Что осталось:** связанная (но другая) дыра — `#17` (`apply_catch` deposit=0 без WAIVED-маркера) — **остаётся в Sprint 1**.
 
 **#17 Штраф списывается после topup за «старый» день**
 - **Ошибка:** `apply_catch` для deposit=0 выбрасывает ошибку, но НЕ пишет WAIVED-маркер. Если параллельно cron не записал — после topup catch снимет деньги за прошлый день.
@@ -941,7 +958,7 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 
 | Спринт | Что получаем |
 |---|---|
-| **Sprint 1** (3 крита: #1, #3, #17 + #16) | Бонусы ловцам работают, окно ловли реально час, штрафы справедливые. **Деньги пользователей больше не «повисают в воздухе».** |
+| **Sprint 1** (2 крита после Z-серии: #1, #17) | Бонусы ловцам работают, штрафы справедливые. **Деньги пользователей больше не «повисают в воздухе».** (#3 и #16 закрыты Z-3, удалены из плана.) |
 | **Sprint 2** (3 антифрод: #4, #6, #22 + #5, #8) | Трёхуровневая защита от пересыла, правильная диагностика событий, антифрод-эвристика работает. **Систему нельзя обмануть на edge-cases.** |
 | **Sprint 3** (UX/ФЗ-152: #13, #7, #20 + #18, #19) | Ночные клубы работают, время UTC-однозначное, ФЗ-152 соблюдён, справедливые UX-флоу. |
 | **Sprint 4** (Сезоны MVP: #2, #11, #28) | Сезонная экономика работает, реальные призы в конце сезона. |
@@ -960,7 +977,7 @@ if count > parse_rate_limit_spec(PenaltyConfig.RATE_LIMIT_CATCH)[0]:
 | #2 Season.prize_pool | ✅ Моя разведка **верна**. Перенос `Habit.prize_pool → Season.prize_pool` никогда не был реализован. `Pravki.md §6.1` audit перечислил endpoint-файлы без проверки передачи данных. | Sprint 4 — доделать MVP-фичу (admin endpoint + snapshot). Также **обновить `Pravki.md §6.1`** — снять «✅», иначе следующий агент будет введён в заблуждение. |
 
 **Статус по остальным критическим** (без противоречий):
-- ✅ #3 (cron ломает catch window) — подтверждено, идёт в Sprint 1.
+- ✅ ~~#3 (cron ломает catch window)~~ — **закрыто Z-3** (коммит `3b81327`, 2026-08-18). См. детальную секцию.
 - ✅ #4 (forward в worker defense-in-depth) — подтверждено, идёт в Sprint 2.
 - ✅ #6 (canonical priority в worker) — подтверждено, идёт в Sprint 2.
 - ✅ #13 (окна через полночь) — подтверждено, идёт в Sprint 3.
