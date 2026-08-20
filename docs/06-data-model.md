@@ -664,7 +664,7 @@ def validate_prize_rules(rules: list[PrizeRule]):
 > worker, `900ef4f` nginx, `5d8c6e6`+`d30832a` frontend). Активно используется на проде:
 > при чек-ине через бота worker публикует событие в Redis Stream, SSE-endpoint
 > читает его через `XREAD BLOCK 30000`, frontend получает фрейм через
-> `EventSource` и обновляет кэш React Query. Полная цепочка — `sse+redis.md`,
+> `EventSource` и обновляет кэш React Query. Полная цепочка — `docs/archive/2026-summer-fixes/sse+redis.md`,
 > §0.
 
 Redis DB 0 (тот же namespace, что `catch_rate:*` и `today:{habit_id}:{membership_id}`).

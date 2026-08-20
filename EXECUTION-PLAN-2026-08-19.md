@@ -18,13 +18,13 @@
 > - HEAD = `6830c42` (локально), origin = `6830c42` (синхронизировано после push 2026-08-19)
 > - CodeGraph v1.5.0 подключён к 5 агентам (Claude Code, Cursor, opencode/Kilo, Gemini, Antigravity)
 > - Прод: 2 users, 3 habits, 3 memberships, 4 transactions (snapshot 2026-08-09)
-> - 15 production-серий задеплоены (см. `STATUS-2026-08-19.md §2.1`)
+> - 15 production-серий задеплоены (см. `docs/archive/2026-summer-fixes/STATUS-2026-08-19.md §2.1`)
 > - 0 живых пользователей, 0₽ в обороте → цена ошибки низкая, время на рефакторинг есть
 >
 > **Источники ТЗ:**
 > - `TZ_kharakteristiki_personazha.md` — Фаза B (характеристики персонажа)
-> - `4_finansovaya_mehanika_shtrafov_i_prizov.md` — финансовая модель
-> - `prideclub_karta_proekta.md` — общая карта проекта
+> - `docs/archive/2026-summer-fixes/4_finansovaya_mehanika_shtrafov_i_prizov.md` — финансовая модель
+> - `docs/archive/2026-summer-fixes/prideclub_karta_proekta.md` — общая карта проекта
 > - `Pravki-business-logic-recon-2026-08-18.md` — 28 находок (gap-анализ)
 >
 > **Метод проверки:** `grep -rn` для каждой задачи + `codegraph query` /
@@ -52,7 +52,7 @@
 
 ## 1. Что ЗАДУМАНО (MVP-критерии полноценного продукта)
 
-Из `TZ_kharakteristiki_personazha.md` + `prideclub_karta_proekta.md` + `4_finansovaya_mehanika_shtrafov_i_prizov.md`:
+Из `TZ_kharakteristiki_personazha.md` + `docs/archive/2026-summer-fixes/prideclub_karta_proekta.md` + `docs/archive/2026-summer-fixes/4_finansovaya_mehanika_shtrafov_i_prizov.md`:
 
 ### 1.1 Core habit loop
 1. ✅ Юзер вступает в клуб (`POST /api/v1/habits/{id}/join` через Mini App)
@@ -103,7 +103,7 @@
 
 **Тесты:** 384 backend + 77 worker + 40 bot + 68 frontend (с pre-existing fails, не блокеры).
 
-**Подробности по каждой серии — `STATUS-2026-08-19.md §2.1`.**
+**Подробности по каждой серии — `docs/archive/2026-summer-fixes/STATUS-2026-08-19.md §2.1`.**
 
 ---
 
@@ -307,7 +307,7 @@ async def create_season(habit_id: str, payload: AdminSeasonCreateRequest, ...):
 
 Не "заменить `BASIS_POINTS_TOTAL`" — она уже правильная. А **создать дефолтные правила**
 (если `prize_rules_snapshot` пустой) — 5 мест по 35/25/20/12/8% из финансовой механики
-(`4_finansovaya_mehanika_shtrafov_i_prizov.md §3`):
+(`docs/archive/2026-summer-fixes/4_finansovaya_mehanika_shtrafov_i_prizov.md §3`):
 
 ```python
 DEFAULT_PRIZE_RULES = [
@@ -976,7 +976,7 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 ## Task 7.1: партнёрский кабинет (MVP)
 
-**Источник:** `1_kabinet_partnera_MVP.md`
+**Источник:** `docs/archive/2026-summer-fixes/1_kabinet_partnera_MVP.md`
 
 ### Что сделать
 - Mini App `cabinet.prideclub.fun` (или `/cabinet` маршрут в основном Mini App)
@@ -989,7 +989,7 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 ## Task 7.2: реферальная программа (30% lifetime revenue share)
 
-**Источник:** `1_kabinet_partnera_MVP.md`
+**Источник:** `docs/archive/2026-summer-fixes/1_kabinet_partnera_MVP.md`
 
 ### Что сделать
 - Генерация реферальных ссылок (`https://t.me/PrideClubBot?start=ref_{partner_id}`)
@@ -1004,10 +1004,10 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 ## Task 7.3: первая волна через лидеров сообществ
 
-**Источник:** `3_zapusk_cherez_liderov_soobshestv_checklist.md`
+**Источник:** `docs/archive/2026-summer-fixes/3_zapusk_cherez_liderov_soobshestv_checklist.md`
 
 ### Что сделать
-- Найти 10-20 лидеров сообществ (по `2_poisk_partnerov_instagram.md`)
+- Найти 10-20 лидеров сообществ (по `docs/archive/2026-summer-fixes/2_poisk_partnerov_instagram.md`)
 - Предложить бесплатный доступ основателям
 - Метрики успеха: конверсия, % чек-инов, retention
 

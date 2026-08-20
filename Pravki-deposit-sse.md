@@ -66,7 +66,7 @@
 ## 0. Контекст и принципы
 
 - **Стек:** Python 3.12 + FastAPI 0.115 + SQLAlchemy 2.0 + asyncpg + aiogram 3.30 + Celery 5.4 + Redis 7 + React 18 + TS 5. Все правила из `AGENTS.md` применяются (layered architecture, DI через конструктор, `int` копейки, `user_id` только из `request.state.telegram_user`, PII не логировать, доменные исключения).
-- **SSE-инфра уже есть и задеплоена** для чек-инов (`sse+redis.md` редакция 9, реализованная Steps 1-6). Контракты `stream_key`/`EventPublisher.publish_checkin` (актуальное имя метода в коде, **НЕ** `publish_to_user` — это была ошибка в ранних редакциях плана)/XREAD BLOCK 30s/`SseConnectionLimiter` — зафиксированы. Z-6/Z-7 расширяют, не переписывают.
+- **SSE-инфра уже есть и задеплоена** для чек-инов (`docs/archive/2026-summer-fixes/sse+redis.md` редакция 9, реализованная Steps 1-6). Контракты `stream_key`/`EventPublisher.publish_checkin` (актуальное имя метода в коде, **НЕ** `publish_to_user` — это была ошибка в ранних редакциях плана)/XREAD BLOCK 30s/`SseConnectionLimiter` — зафиксированы. Z-6/Z-7 расширяют, не переписывают.
 - **Telegram-бот уже работает с pre-filter** для длительности кружка и forwarded-сообщений. Z-5 добавляет четвёртый pre-filter — на депозит.
 - **Production snapshot 2026-08-07:** 0 юзеров с реальными деньгами на депозитах. Миграция 014 — низкий риск, но ритуал `pg_dump` всё равно соблюдаем (привычка).
 
@@ -101,7 +101,7 @@
 
 **Регрессионный пробел (Z-2.8):** `apps/backend/app/api/v1/members.py:204-209` ловит `Exception`, но `sqlalchemy.exc.IntegrityError` — не `DomainError`. Если UNIQUE constraint `uq_penalty_per_day_reason` сработает в API endpoint'е (любая будущая гонка или регрессия), это станет 500 для пользователя. Worker (`apps/worker/worker/tasks/process_penalty.py:190-193`) ловит IntegrityError корректно, API — нет. После Z-2.4 (user-lock вместо membership-lock) race в happy-path не возникает, но защита на этот случай обязательна.
 
-**Ложная посылка в первоначальном плане (исправлено 2026-08-07 после проверки проде):** «SSE-клиент для чек-инов ещё не задеплоен на проде». Утверждение было основано на устаревшем снэпшоте `sse+redis.md` (редакция 9, dated 2026-08-04), где Steps 1-4 помечены как ❌ НЕ задеплоены. На проверке 2026-08-07:
+**Ложная посылка в первоначальном плане (исправлено 2026-08-07 после проверки проде):** «SSE-клиент для чек-инов ещё не задеплоен на проде». Утверждение было основано на устаревшем снэпшоте `docs/archive/2026-summer-fixes/sse+redis.md` (редакция 9, dated 2026-08-04), где Steps 1-4 помечены как ❌ НЕ задеплоены. На проверке 2026-08-07:
 - `events.py` присутствует в контейнере `habit-backend` (`/app/apps/backend/app/api/v1/events.py`),
 - `events.router` смонтирован в `app/main.py:168` (`app.include_router(events.router, prefix="/api/v1", tags=["events"])`),
 - `SSE_AUTH_BYPASS_PATHS = {"/api/v1/events/stream"}` в `core/middleware.py` (строки 44, 72, 240),
@@ -1299,7 +1299,7 @@ ALTER TABLE penalties ADD COLUMN notify_sent BOOLEAN NOT NULL DEFAULT FALSE;
 **Файл:** `apps/worker/worker/tasks/process_penalty.py`
 
 **Q7 (принят):** два независимых механизма дедупликации:
-1. **Redis-guard `dm_sent:{penalty_id}` (TTL 7 дней)** — основная защита от дублей DM при worker-retry/rebalance. Guard-паттерн идентичен `sse_published:checkin:...` из `sse+redis.md §2.3` (SET NX + отдельный шаг). Переживает падение worker'а между DM и коммитом.
+1. **Redis-guard `dm_sent:{penalty_id}` (TTL 7 дней)** — основная защита от дублей DM при worker-retry/rebalance. Guard-паттерн идентичен `sse_published:checkin:...` из `docs/archive/2026-summer-fixes/sse+redis.md §2.3` (SET NX + отдельный шаг). Переживает падение worker'а между DM и коммитом.
 2. **`Penalty.notify_sent`** (БД-поле) — НЕ источник правды для дедупликации. Используется для аудита и отображения в админке «уведомление отправлено?».
 
 ```text
@@ -1374,7 +1374,7 @@ if bot_token and violator_user:
 
 Все 8 вопросов закрыты. Резолюции интегрированы в план (см. §1 «Сводка изменений» и соответствующие разделы Z-*).
 
-**Q5 ✅ (принят вариант B с уточнением):** клиент УЖЕ на проде — Steps 1-6 задеплоены ~2026-08-04 (см. `Pravki.md §7.8` — rebuild backend во время фикса nginx SSE-конфига). Снэпшот `sse+redis.md` (редакция 9) был написан ДО этого деплоя и устарел. Старый `last_event_id` нужно оставить как fallback для совместимости с уже-работающим `useTodayStream` в проде.
+**Q5 ✅ (принят вариант B с уточнением):** клиент УЖЕ на проде — Steps 1-6 задеплоены ~2026-08-04 (см. `Pravki.md §7.8` — rebuild backend во время фикса nginx SSE-конфига). Снэпшот `docs/archive/2026-summer-fixes/sse+redis.md` (редакция 9) был написан ДО этого деплоя и устарел. Старый `last_event_id` нужно оставить как fallback для совместимости с уже-работающим `useTodayStream` в проде.
 
 **Контракт endpoint'а после PR #4:**
 
@@ -1510,7 +1510,7 @@ def generate_sse_token(*, user_id, habit_id, secret, scope, ttl_seconds=...):
 | PR #1 | `Pravki.md` §6.2 (penalty audit) — обновить `apply_catch` на работу с user-deposit, `docs/06-data-model.md` §3 (миграции — добавить 014a, 014b), `docs/09-prod-readiness.md` §1.1 (список выполненных миграций). |
 | PR #2 | `Pravki.md` §3.2 (TopUpModal — был radio, теперь без), `docs/05-ui-ux.md` (если описаны денежные флоу). |
 | PR #3 | `apps/bot/tests/STATUS.md` (если есть), `Pravki.md` §6.2 (бот проверки), `docs/06-data-model.md` §3 (новый endpoint). |
-| PR #4 | `sse+redis.md` §2.3 (структура стримов — добавить `sse:habit:*`), `Pravki.md` §7 (SSE-фича для чек-инов — теперь мультиплекс + два курсора). |
+| PR #4 | `docs/archive/2026-summer-fixes/sse+redis.md` §2.3 (структура стримов — добавить `sse:habit:*`), `Pravki.md` §7 (SSE-фича для чек-инов — теперь мультиплекс + два курсора). |
 | PR #5 | `Pravki.md` §6.2 (DM violator — добавить в антифрод-секцию). |
 | PR #6 | `Pravki.md` §7.6 (лидерборд — zero_count). |
 
@@ -1536,7 +1536,7 @@ Push — только после явного «ок» пользователя.
 
 ## 8. Финальный чек-лист перед стартом
 
-- [ ] Прочитан `sse+redis.md` (1129 строк, особенно §2.3 «Структура Redis-ключей» и §2.4 «Last-Event-ID и реконнект»).
+- [ ] Прочитан `docs/archive/2026-summer-fixes/sse+redis.md` (1129 строк, особенно §2.3 «Структура Redis-ключей» и §2.4 «Last-Event-ID и реконнект»).
 - [ ] Прочитан `AGENTS.md` (правила поведения агента).
 - [ ] Прочитан `AGENT_BOOTSTRAP.md` (особенно §3 «ДВА .env файла», §6 «Git и коммиты», §12 «Ритуал поддержания доков»).
 - [ ] Прочитан `docs/04-code-standards.md` (layered architecture, DI).

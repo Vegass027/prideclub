@@ -339,7 +339,7 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 
 ### 9.3. SSE через Redis Streams — текущая ситуация (snapshot 2026-08-07)
 
-> Полный план — `sse+redis.md`. Шаги 1-6 (backend SSE endpoint, middleware bypass,
+> Полный план — `docs/archive/2026-summer-fixes/sse+redis.md`. Шаги 1-6 (backend SSE endpoint, middleware bypass,
 > worker event_publisher, XREAD pipeline + async-Redis singleton, nginx SSE
 > блок, frontend `useTodayStream`) **задеплоены и работают на проде с 2026-08-04**.
 > Покрыты 100 тестами (67 backend + 22 worker + 11 frontend vitest).

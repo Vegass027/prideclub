@@ -199,7 +199,7 @@ def generate_sse_token(user_id: int, habit_id: UUID) -> str:
 
 Если придётся ротировать `SSE_TOKEN_SECRET` (например, лог-утечка токена
 в access-логе nginx до применения `access_log off` для `/api/v1/events/stream`,
-см. `sse+redis.md §3.2`) — это не затронет internal-контур.
+см. `docs/archive/2026-summer-fixes/sse+redis.md §3.2`) — это не затронет internal-контур.
 
 **Membership-check на этапе выдачи токена (НЕ на стриме):**
 - Fail-fast — юзер сразу видит 403 `membership_not_active`, не открывает EventSource зря.
@@ -213,7 +213,7 @@ def generate_sse_token(user_id: int, habit_id: UUID) -> str:
   (фикс-up 1 `a0217ec` + тест `test_similar_path_under_events_is_not_bypassed`).
   `POST /events/stream/token` остаётся под initData-middleware.
 
-**Per-user concurrency limit** (см. `sse+redis.md §2.6`):
+**Per-user concurrency limit** (см. `docs/archive/2026-summer-fixes/sse+redis.md §2.6`):
 `MAX_CONCURRENT_CONNECTIONS_PER_USER = 5` через Lua-atomic `INCR + EXPIRE + DECR-rollback`
 в `services/sse/connection_limiter.py`. Защита от DoS через replayable token (TTL=60с,
 один валидный токен не открывает неограниченное число соединений в окне 60с).

@@ -640,7 +640,7 @@ outage логируется как `sse_publish_failed` warning, чек-ин у�
 `SseConnectionLimiter` через Lua-atomic `INCR + EXPIRE на ПЕРВОМ + проверка + DECR-rollback`.
 `MAX_CONCURRENT_CONNECTIONS_PER_USER = 5` — типичный юзер: 1 вкладка + 3-4 клуба + 1 дубль
 reconnect-race. `CONNECTION_TTL_SECONDS = 180` — страховка от `kill -9` permanent leak.
-Защита от DoS через replayable token (TTL=60с, осознанное решение Q4 в `sse+redis.md §5`).
+Защита от DoS через replayable token (TTL=60с, осознанное решение Q4 в `docs/archive/2026-summer-fixes/sse+redis.md §5`).
 
 **Frontend pure-function controller** (Step 6):
 `apps/frontend/src/shared/hooks/streamController.ts` — выделен из хука для
