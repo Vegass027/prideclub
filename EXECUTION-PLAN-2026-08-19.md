@@ -2,10 +2,21 @@
 
 > **Этот документ — ТОЧКА ВХОДА для работы.** Пошаговый план задач от сложных/нужных до мелких/техдолга.
 > Цель: после выполнения всех задач — **полноценный рабочий продукт**, на который можно наслаивать новые фичи.
-> **Версия:** 1.0. **Дата:** 2026-08-19. **Автор:** AI-ассистент по запросу Дмитрия.
+> **Версия:** 1.1. **Дата:** 2026-08-19 (создан), **2026-08-20 (verified)**. **Автор:** AI-ассистент по запросу Дмитрия.
+
+> **⚠️ Snapshot 2026-08-20 — post-verification.** После критики Дмитрия ("основывался
+> на документах а не на реальном проде") провёл верификацию всех 44 задач против
+> реального кода через `grep` + `codegraph`. **Найдено 6 ошибок**:
+> - `Task 0.1` уже закрыт (через Pravki-no-deposit-waived-marker + идемпотентность) → удалён
+> - `§3 E "Frontend не подключен к API"` — неправда, фронт уже подключен → удалён
+> - `Task 1.3` — тест через прямой импорт `_process`, не через broker → переписать существующий
+> - `Task 2.3` — структура `prize_rules_snapshot` уже гибкая (rank_from/rank_to/bp), не 5 мест хардкод
+> - `Task 5.5` — реально 10 вхождений устаревших комментариев, не 9
+> - `§3 D (Фаза B)` — полностью актуальна
 >
 > **Контекст:**
-> - HEAD = `2dd596c` (локально), origin = `c6647b7` (нужен push)
+> - HEAD = `6830c42` (локально), origin = `6830c42` (синхронизировано после push 2026-08-19)
+> - CodeGraph v1.5.0 подключён к 5 агентам (Claude Code, Cursor, opencode/Kilo, Gemini, Antigravity)
 > - Прод: 2 users, 3 habits, 3 memberships, 4 transactions (snapshot 2026-08-09)
 > - 15 production-серий задеплоены (см. `STATUS-2026-08-19.md §2.1`)
 > - 0 живых пользователей, 0₽ в обороте → цена ошибки низкая, время на рефакторинг есть
@@ -15,6 +26,10 @@
 > - `4_finansovaya_mehanika_shtrafov_i_prizov.md` — финансовая модель
 > - `prideclub_karta_proekta.md` — общая карта проекта
 > - `Pravki-business-logic-recon-2026-08-18.md` — 28 находок (gap-анализ)
+>
+> **Метод проверки:** `grep -rn` для каждой задачи + `codegraph query` /
+> `codegraph node` для подтверждения наличия символов. Не доверять `prod-readiness.md §2.3` —
+> там устарело.
 
 ---
 
@@ -94,88 +109,42 @@
 
 ## 3. Что НЕ реализовано (главный gap)
 
-| # | Что | Severity | Источник |
-|---|---|---|---|
-| A | **#17** `apply_catch` deposit=0 без WAIVED-маркера (прямая финансовая) | 🔴 | recon |
-| B | **#1** `apply_catch_bonus` не вызывается в проде (лидерборд мёртвый) | 🟠 | recon |
-| C | **#2** `Season.prize_pool` не пишется (призовой фонд не распределяется) | 🟠 | recon |
-| D | **Фаза B (TZ):** user_stats, user_statuses, increment/decrement, freeze worker, эндпоинты, frontend | 🟠 | TZ |
-| E | Frontend не подключен к API (7 страниц) | 🟠 | prod-readiness §2.3 |
-| F | Admin техдолг (TD-1..TD-4) | 🟡 | recon |
-| G | 9 устаревших production-комментариев | 🟢 | prod-readiness §3 |
+> **⚠️ Snapshot 2026-08-20 (post-verification).** Этот раздел был переписан после проверки
+> каждого пункта против реального кода. Несколько пунктов оказались неактуальными (закрыты
+> ранее, чем я думал), несколько — точнее чем я писал.
 
-**Всё разложено по фазам ниже.**
+| # | Что | Severity | Источник | Статус |
+|---|---|---|---|---|
+| A | **#17** `apply_catch` deposit=0 без WAIVED-маркера (прямая финансовая) | 🔴 | recon | **✅ УЖЕ ЗАКРЫТ** — `commit 9c32d6f` (Pravki-no-deposit-waived-marker) + идемпотентность `apply_catch` на ЛЮБУЮ `Penalty` за день (комментарий `penalty_service.py:165-180`). Задача Task 0.1 в плане — **дубликат** |
+| B | **#1** `apply_catch_bonus` не вызывается в проде (лидерборд мёртвый) | 🟠 | recon | ✅ Подтверждено: нет в `_TASK_NAMES`, нет `send_task` в `process_penalty`. Tasks 1.1+1.2 актуальны |
+| C | **#2** `Season.prize_pool` не пишется (призовой фонд не распределяется) | 🟠 | recon | ✅ Подтверждено: `start_season` нигде не вызывается, admin endpoint `/seasons` отсутствует. Tasks 2.1+2.2 актуальны |
+| D | **Фаза B (TZ):** user_stats, user_statuses, increment/decrement, freeze worker, эндпоинты, frontend | 🟠 | TZ | ✅ Подтверждено: моделей, репозиториев, CharacterService, worker — нет. Фаза 3 полностью актуальна |
+| ~~E~~ | ~~Frontend не подключен к API (7 страниц)~~ | — | — | **❌ STALE** — фронт **уже подключен** через хуки `useMarketplace/useToday/useMembers/useCatch/useBalance/useWallet/useLeaderboard/useHabitSse/useMyHabits`. Удаляю из gap-списка |
+| F | Admin техдолг (TD-1..TD-4) | 🟡 | recon | ✅ Подтверждено: TD-1 (нет метода в HabitService), TD-2 (нет asyncio.Lock), TD-4 (нет test_chat_preview/test_chat_member.py) — всё актуально |
+| G | 9 устаревших production-комментариев | 🟢 | prod-readiness §3 | ⚠️ Неточно: реально **10 вхождений** (`grep -nE "apply_window_expired\|WINDOW_CLOSED_NO_CATCH"` в `penalty_service.py` + `checkin_service.py`). Масштаб чуть больше |
+
+**Всё разложено по фазам ниже.~~Phase 4 (Frontend) была не блокером — пересмотрен приоритет.~~**
 
 ---
 
-# Фаза 0 — Закрыть финансовую дыру (30 мин)
+# Фаза 0 — ~~Закрыть финансовую дыру~~ ✅ УЖЕ ЗАКРЫТО
 
-## Task 0.1: fix #17 — `apply_catch` deposit=0 пишет WAIVED-маркер
+> **⚠️ Snapshot 2026-08-20.** При верификации плана выяснилось: дыра **#17 уже закрыта** через
+> `commit 9c32d6f feat(penalty): mark_waived_unable_to_pay` (Pravki-no-deposit-waived-marker, 2026-08-17) +
+> расширенная идемпотентность в `apply_catch` на ЛЮБУЮ `Penalty` за день
+> (см. комментарий `apps/backend/app/services/penalty_service.py:165-180`).
+>
+> `apply_catch` для `deposit=0` сейчас ведёт себя так:
+> - Существующая логика `mark_waived_unable_to_pay` (для PAUSED юзеров) пишет `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)` при смене статуса на PAUSED
+> - Idempotency check: если за день есть ЛЮБАЯ Penalty — повторный catch отвергается
+> - После topup юзер с WAIVED за прошлый день не получит двойное списание
+>
+> **Task 0.1 в исходном плане был дубликатом — удаляю.**
 
-**Приоритет:** 🔴 Critical (но 0₽ в обороте, не стреляет сейчас — стрельнёт на первом юзере).
-**Время:** 30 мин (1 коммит + тест).
-**Зависимости:** нет.
-**Блокирует:** Фазу 1 (бонус-wiring) — иначе в тестах WAIVED-маркер не будет работать.
+## ~~Task 0.1: fix #17~~ — НЕ ТРЕБУЕТСЯ (закрыт до создания плана)
 
-### Что сделать
-
-**Файл:** `apps/backend/app/services/penalty_service.py:171-177`
-
-Текущий код:
-```python
-amount = min(habit.penalty_amount, violator_user.deposit_balance)
-if amount <= 0:
-    raise PenaltyAlreadyProcessedError("deposit_exhausted", code="deposit_exhausted")
-```
-
-Заменить на:
-```python
-amount = min(habit.penalty_amount, violator_user.deposit_balance)
-if amount <= 0:
-    # WAIVED-маркер для справедливости (см. recon #17):
-    # без него после topup apply_catch спишет деньги за прошлый день.
-    # Паттерн: см. apply_window_expired WAIVED-ветку в Pravki-no-deposit-waived-marker.
-    waived = Penalty(
-        user_id=violator_user.id,
-        habit_id=habit.id,
-        membership_id=violator_membership_id,
-        catcher_id=None,
-        amount=0,
-        reason=PenaltyReason.WAIVED_UNABLE_TO_PAY,
-        club_date=club_date,
-        idempotency_key=f"waived:{violator_membership_id}:{club_date}",
-    )
-    self._session.add(waived)
-    await self._session.flush()
-    raise PenaltyAlreadyProcessedError(
-        "deposit_exhausted",
-        code="deposit_exhausted",
-        waived_marker_id=str(waived.id),
-    )
-```
-
-### Критерий «готово»
-
-- [ ] Юнит-тест `test_apply_catch_deposit_zero_writes_waived_marker`:
-  - Юзер ACTIVE + deposit=0
-  - apply_catch → бросает `PenaltyAlreadyProcessedError("deposit_exhausted")` + в БД появился `Penalty(reason=WAIVED_UNABLE_TO_PAY, amount=0)`
-  - UNIQUE на `(membership_id, date, reason)` не нарушается (idempotency_key)
-- [ ] Юнит-тест `test_apply_catch_deposit_zero_then_topup_no_double_charge`:
-  - Юзер ACTIVE + deposit=0 + WAIVED-маркер за вчера
-  - topup → deposit > 0
-  - apply_catch за вчера → existing Penalty check отвергает (no double charge)
-- [ ] `make test` зелёный (все 384 + новые 2)
-- [ ] `make lint` чистый
-
-### Запуск
-```bash
-# Локально
-git checkout -b fix/apply-catch-deposit-zero-waived
-# ... правка ...
-git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "fix(penalty): apply_catch deposit=0 writes WAIVED marker (#17)"
-make test
-# Push + deploy (по отдельному "ок" пользователя)
-```
+**Проверка:** см. `apps/backend/app/services/penalty_service.py:165-180` (комментарий
+"Идемпотентность: если за день есть ЛЮБАЯ Penalty ... повторный catch отвергается").
 
 ---
 
@@ -240,7 +209,12 @@ except Exception as exc:
 
 ## Task 1.3: e2e-тест через broker (НЕ прямой импорт!)
 
-**Файл:** новый `apps/worker/tests/test_apply_catch_bonus_e2e.py`
+> **⚠️ Snapshot 2026-08-20.** Текущий тест `apps/worker/tests/test_apply_catch_bonus.py`
+> использует **прямой импорт `_process`** (строки 20, 71, 118) — это именно то,
+> что recon'овская находка #1 помечала как **вводящее в заблуждение** ("выглядит
+> как доказательство работы цепочки, но это не оно").
+
+**Файл:** ~~новый `apps/worker/tests/test_apply_catch_bonus_e2e.py`~~ → **переписать** существующий `apps/worker/tests/test_apply_catch_bonus.py`
 
 ### Что сделать
 
@@ -322,27 +296,36 @@ async def create_season(habit_id: str, payload: AdminSeasonCreateRequest, ...):
 
 ## Task 2.3: `close_season` распределяет по 5 местам (35/25/20/12/8%)
 
-**Файл:** `apps/backend/app/services/season_service.py:60-122`
+> **⚠️ Snapshot 2026-08-20.** Реальная структура — **гибкая**: `prize_rules_snapshot`
+> это `{"rules": [{"metric": str, "rank_from": int, "rank_to": int, "percentage_bp": int}, ...]}`.
+> Нет хардкода "5 мест". `BASIS_POINTS_TOTAL = 10_000` уже есть, идемпотентность
+> под `FOR UPDATE` уже есть.
+
+**Файл:** `apps/backend/app/services/season_service.py:30-90`
 
 ### Что сделать
 
-Заменить `BASIS_POINTS_TOTAL = 10_000` на **дефолтные 5 правил**:
+Не "заменить `BASIS_POINTS_TOTAL`" — она уже правильная. А **создать дефолтные правила**
+(если `prize_rules_snapshot` пустой) — 5 мест по 35/25/20/12/8% из финансовой механики
+(`4_finansovaya_mehanika_shtrafov_i_prizov.md §3`):
+
 ```python
 DEFAULT_PRIZE_RULES = [
-    {"place": 1, "percentage_bp": 3500},  # 35%
-    {"place": 2, "percentage_bp": 2500},  # 25%
-    {"place": 3, "percentage_bp": 2000},  # 20%
-    {"place": 4, "percentage_bp": 1200},  # 12%
-    {"place": 5, "percentage_bp":  800},  # 8%
+    {"metric": "streak", "rank_from": 1, "rank_to": 1, "percentage_bp": 3500},  # 35%
+    {"metric": "streak", "rank_from": 2, "rank_to": 2, "percentage_bp": 2500},  # 25%
+    {"metric": "streak", "rank_from": 3, "rank_to": 3, "percentage_bp": 2000},  # 20%
+    {"metric": "streak", "rank_from": 4, "rank_to": 4, "percentage_bp": 1200},  # 12%
+    {"metric": "streak", "rank_from": 5, "rank_to": 5, "percentage_bp":  800},  # 8%
 ]
 # Сумма = 10000 bp = 100% (без остатка)
 ```
 
-Использовать `season.prize_rules` (если заданы в Task 2.2), иначе `DEFAULT_PRIZE_RULES`.
+В `close_season` — fallback на `DEFAULT_PRIZE_RULES`, если `prize_rules_snapshot` пуст или None.
 
 ### Критерий «готово»
-- [ ] Юнит-тест: `close_season` для фонда 15 000₽ → 1 место 5250₽, 2 место 3750₽, 3 место 3000₽, 4 место 1800₽, 5 место 1200₽
+- [ ] Юнит-тест: `close_season` для фонда 15 000₽ + DEFAULT правила → 1 место 5250₽, 2 место 3750₽, 3 место 3000₽, 4 место 1800₽, 5 место 1200�
 - [ ] Юнит-тест: пустой фонд → 0 выплат (или по сценарию rollover)
+- [ ] Юнит-тест: кастомные правила в `prize_rules_snapshot` (например, 3 места 50/30/20) — применяются вместо дефолтных
 - [ ] `Transaction(type=PRIZE)` создаётся для каждого победителя
 
 ## Task 2.4: e2e для seasons через broker
@@ -1091,7 +1074,7 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 | Фаза | Задач | Время | Блокирует прод? |
 |---|---|---|---|
-| 0 | 1 (Task 0.1) | 30 мин | нет (0₽), но стрельнёт на первом юзере |
+| 0 | ~~1~~ (Task 0.1 — закрыт до создания плана) | — | — |
 | 1 | 3 (Tasks 1.1-1.3) | 1-2 дня | нет, но лидерборд мёртвый |
 | 2 | 4 (Tasks 2.1-2.4) | 1 неделя | нет (сезонов нет) |
 | 3 | 12 (Tasks 3.1-3.12) | 2-3 недели | нет, но это центральная ТЗ-фича |
@@ -1099,30 +1082,33 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 | 5 | 6 (Tasks 5.1-5.6) | 1-2 дня | нет |
 | 6 | 4 (Tasks 6.1-6.4) | по 1 дню | нет (для soft-launch) |
 | 7 | 3 (Tasks 7.1-7.3) | 2-3 недели | нет, но без роста нет пользователей |
-| **Всего** | **~44 задачи** | **5-6 недель** | |
+| **Всего** | **~43 задачи** (после удаления Task 0.1) | **5-6 недель** | |
 
 ---
 
-# С чего начать СЕГОДНЯ (одна команда)
+# С чего начать СЕГОДНЯ (после верификации 2026-08-20)
+
+**Task 0.1 удалён** (закрыт до создания плана). Первая реальная задача — **Task 1.1** (register `apply_catch_bonus` в `_TASK_NAMES`).
 
 ```bash
-# 1. Подтянуть origin (нужен push 2 docs-коммитов)
-git push origin feature/qa-batch-2026-08-14
+# 1. Создать ветку для Task 1.1
+git checkout -b fix/bonus-wiring-task-1-1
 
-# 2. Создать ветку для Task 0.1
-git checkout -b fix/apply-catch-deposit-zero-waived
+# 2. Правка celery_producer.py — добавить в _TASK_NAMES:
+#    "apply_catch_bonus": "worker.tasks.apply_catch_bonus.run",
 
-# 3. Правка penalty_service.py:171-177 (5 строк)
-
-# 4. Тесты + commit + push
+# 3. Тест (хотя бы sanity check что import работает)
 make test
-git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "fix(penalty): apply_catch deposit=0 writes WAIVED marker (#17)"
-git push origin fix/apply-catch-deposit-zero-waived
 
-# 5. Deploy (по отдельному "ок" пользователя)
+# 4. Commit
+git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "fix(bonus): register apply_catch_bonus in celery _TASK_NAMES"
+
+# 5. Push + deploy (по отдельному "ок" пользователя)
 ```
 
-**Первая задача = Task 0.1** (единственная «бьёт деньги» дыра, 30 мин, 5 строк + 2 теста). После неё — Фаза 1 (bonus wiring), и т.д.
+**Первая задача = Task 1.1** (3 строки, 5 мин). Затем **Task 1.2** (send_task в process_penalty, 30 мин). И **Task 1.3** (rewrite теста через broker, 2-3 часа).
+
+После Фазы 1 — **Фаза 5** (техдолг, 1-2 дня) → **Фаза 3** (Фаза B, 2-3 недели).
 
 ---
 
