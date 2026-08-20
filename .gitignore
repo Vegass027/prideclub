@@ -67,3 +67,11 @@ htmlcov/
 # Local secrets not under repo root
 infra/.env
 
+# CodeGraph — pre-indexed knowledge graph (SQLite, 100% local)
+# Per codegraph install: "Ignore everything in .codegraph/ except this file"
+.codegraph/
+
+# Local virtualenv variant (user-specific name suffix)
+.venv-step7/
+apps/backend/.venv-step7/
+
