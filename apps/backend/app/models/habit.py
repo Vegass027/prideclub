@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Integer, String, Text, Time, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, Time, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,7 @@ from app.db.session import Base
 
 if TYPE_CHECKING:
     from app.models.membership import Membership
+    from app.models.stat_definition import StatDefinition
 
 
 class Habit(Base):
@@ -90,6 +91,22 @@ class Habit(Base):
         back_populates="habit",
         passive_deletes=True,
     )
+
+    # Phase 3 v2 (per Дмитрий 2026-08-21, migration 019) — global stat
+    # reference. Source of truth для названий статов = stat_definitions
+    # (NOT free text `stat_name`). Nullable, чтобы существующие клубы с
+    # неканоническим stat_name (например 'Дисциплина') могли существовать,
+    # пока админ не выберет каноническую характеристику через UI-баннер
+    # (Task 3.8). NOT NULL constraint — отдельная миграция 020, не
+    # часть Phase 3.1. Старые `stat_name`/`stat_icon` удалятся в Task 3.12
+    # (отдельная миграция 021, Phase 5/6 — НЕ часть Phase 3).
+    stat_definition_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("stat_definitions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    stat_definition: Mapped["StatDefinition | None"] = relationship()
 
     def club_date(self, moment_utc: datetime) -> date:
         local = moment_utc.astimezone(self.tzinfo)

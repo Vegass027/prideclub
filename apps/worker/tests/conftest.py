@@ -114,8 +114,11 @@ def _remap_postgres_types_for_sqlite() -> None:
     from app.models.membership import Membership
     from app.models.penalty import Penalty
     from app.models.season import Season, SeasonStats
+    from app.models.stat_definition import StatDefinition
     from app.models.transaction import Transaction
     from app.models.user import User
+    from app.models.user_stats import UserStats
+    from app.models.user_status import UserStatus
 
     models = [
         User,
@@ -129,6 +132,10 @@ def _remap_postgres_types_for_sqlite() -> None:
         DailyStreakSnapshot,
         SuspiciousPair,
         SeasonPrizeRule,
+        # NEW (Phase 3.1, migration 019)
+        StatDefinition,
+        UserStatus,
+        UserStats,
     ]
     for m in models:
         for col in m.__table__.columns:
@@ -167,8 +174,11 @@ async def worker_db(monkeypatch):
     from app.models.membership import Membership
     from app.models.penalty import Penalty
     from app.models.season import Season, SeasonStats
+    from app.models.stat_definition import StatDefinition
     from app.models.transaction import Transaction
     from app.models.user import User
+    from app.models.user_stats import UserStats
+    from app.models.user_status import UserStatus
     from datetime import date, datetime
     from uuid import uuid4
     import os
@@ -206,6 +216,10 @@ async def worker_db(monkeypatch):
         DailyStreakSnapshot.__table__,
         SuspiciousPair.__table__,
         SeasonPrizeRule.__table__,
+        # NEW (Phase 3.1, migration 019)
+        StatDefinition.__table__,
+        UserStatus.__table__,
+        UserStats.__table__,
     ]
 
     async with test_engine.begin() as conn:

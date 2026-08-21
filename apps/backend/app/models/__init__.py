@@ -13,8 +13,11 @@ from app.models.habit import Habit
 from app.models.membership import Membership
 from app.models.penalty import Penalty
 from app.models.season import Season, SeasonStats
+from app.models.stat_definition import StatDefinition
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.user_stats import UserStats
+from app.models.user_status import UserStatus
 
 __all__ = [
     "User",
@@ -31,4 +34,8 @@ __all__ = [
     "PricingRule",
     "OfferVersion",
     "UserConsent",
+    # NEW (Phase 3.1, migration 019 — global stats + справочник)
+    "StatDefinition",
+    "UserStatus",
+    "UserStats",
 ] 
