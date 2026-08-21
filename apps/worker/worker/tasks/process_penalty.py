@@ -155,7 +155,7 @@ async def _process(
 
     async with factory() as session:
         try:
-service = PenaltyService(
+            service = PenaltyService(
                 session=session,
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),

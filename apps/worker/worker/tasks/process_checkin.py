@@ -52,16 +52,16 @@ async def _build_today_payload(
     """
     from app.core.exceptions import HabitArchivedError, MembershipNotFoundError
 
-async with session_factory() as session:
-            service = CheckinService(
-                session=session,
-                habit_repo=HabitRepository(session),
-                membership_repo=MembershipRepository(session),
-                checkin_repo=CheckinRepository(session),
-                penalty_repo=PenaltyRepository(session),
-                cache=None,
-                character_service=_build_character_service(session),
-            )
+    async with session_factory() as session:
+        service = CheckinService(
+            session=session,
+            habit_repo=HabitRepository(session),
+            membership_repo=MembershipRepository(session),
+            checkin_repo=CheckinRepository(session),
+            penalty_repo=PenaltyRepository(session),
+            cache=None,
+            character_service=_build_character_service(session),
+        )
         try:
             habit, membership, stats = await service.get_today_status(
                 user_id=user_id,
