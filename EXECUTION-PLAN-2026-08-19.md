@@ -434,9 +434,15 @@ penalty = Penalty(
     id=str(uuid4()),
     membership_id=violator_membership_id,
     catcher_membership_id=catcher_membership_id,  # ВСЕГДА пишем (для истории)
-    amount=penalty_amount,            # полная сумма штрафа
+    # amount = ФАКТИЧЕСКИ СПИСАННОЕ (клэмп ДО: min(penalty_amount, deposit)),
+    # а НЕ номинал. Иначе CHECK ck_penalties_amount_equals_sum
+    # (amount = catcher_amount + fund_share) не сходится при клэмпе.
+    # В существующем коде (line 217) уже было `amount=amount` — оставлено
+    # без изменений. fund_share переиспользует существующую колонку
+    # (создана в 001_initial_schema.py), а НЕ новую fund_amount.
+    amount=amount,
     catcher_amount=catcher_amount,    # ← НОВОЕ ПОЛЕ: сколько ушло ловцу
-    fund_amount=fund_amount,          # ← НОВОЕ ПОЛЕ: сколько ушло в фонд
+    fund_share=fund_share_amount,     # переиспользуем существующую колонку fund_share
     is_suspicious_pair=is_suspicious_pair,  # ← НОВОЕ ПОЛЕ: для лидерборда
     reason=PenaltyReason.CAUGHT,
     date=club_date,
