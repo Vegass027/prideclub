@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
@@ -35,7 +34,7 @@ class UserStatsRepository:
     WHERE `is_frozen IS false` (defense-in-depth от worker
     redelivery / дубля батча / нескольких cron-инстансов).
 
-    ⚠️ `iter_for_freeze_cron` НЕ использует OFFSET (recon fix 1
+    ⚠️ `list_for_freeze_batch` НЕ использует OFFSET (recon fix 1
     от 21.08.2026). После bulk_freeze выпавшие строки исчезают из
     WHERE is_frozen=false, и OFFSET привёл бы к пропуску ещё не
     замороженных candidate'ов. Top-N по тому же WHERE +
@@ -184,55 +183,50 @@ class UserStatsRepository:
         )
         return list(result.scalars().all())
 
-    async def iter_for_freeze_cron(
+    async def list_for_freeze_batch(
         self,
         *,
-        threshold_days: int = 30,
-        batch: int = 1000,
-    ) -> AsyncIterator[list[str]]:
-        """Async generator: yield батчи stat.id для bulk_freeze.
+        threshold_days: int,
+        batch: int,
+    ) -> list[str]:
+        """Single-batch SELECT для worker-driven top-N loop (Task 3.5).
 
-        Drives partial index ix_user_stats_freeze_cron
-        (`WHERE is_frozen=false AND last_checkin_at IS NOT NULL`)
-        → cron scan быстрый.
+        Возвращает ровно одну страницу stat.id (≤ `batch` элементов),
+        отсортированную для детерминированной пагинации.
+
+        WHERE (НЕ возвращает уже frozen):
+          is_frozen = false
+          AND last_checkin_at IS NOT NULL
+          AND last_checkin_at < now() - INTERVAL threshold_days
+
+        ORDER BY (стабильный, для OFFSET-free worker iteration):
+          stat_definition_id, last_checkin_at, id
+
+        LIMIT `batch`. Без OFFSET (worker перечитывает каждый раз
+        после commit предыдущего batch; per-batch session lifecycle
+        Phase 3 Task 3.5).
 
         ⚠️ `last_checkin_at IS NULL` (юзер ни разу не чек-инился)
         НЕ входит в cron. Семантика из TZ v2 §4.4: «никогда не делал
         чек-ин» ≠ «заморожен за неактивность».
-
-        ⚠️ OFFSET НЕ используется (recon Phase 3.2 fix 1). После
-        bulk_freeze выпавшие строки исчезают из WHERE is_frozen=false;
-        OFFSET пропустил бы ещё не замороженных candidate'ов. Подход:
-        каждый SELECT делает top-N по тому же WHERE + стабильному
-        ORDER BY — естественно «протаскивает» через весь набор.
-
-        ORDER BY (stat_definition_id, last_checkin_at, id) —
-        полностью детерминирован (id как финальный tiebreak), что
-        даёт стабильную пагинацию при прочих равных.
-
-        Одна короткая tx на батч (caller commit'ит между yield'ами).
         """
         threshold_dt = datetime.now(tz=timezone.utc) - timedelta(days=threshold_days)
-        while True:
-            stmt = (
-                select(UserStats.id)
-                .where(
-                    UserStats.is_frozen.is_(False),
-                    UserStats.last_checkin_at.is_not(None),
-                    UserStats.last_checkin_at < threshold_dt,
-                )
-                .order_by(
-                    UserStats.stat_definition_id,
-                    UserStats.last_checkin_at,
-                    UserStats.id,
-                )
-                .limit(batch)
+        stmt = (
+            select(UserStats.id)
+            .where(
+                UserStats.is_frozen.is_(False),
+                UserStats.last_checkin_at.is_not(None),
+                UserStats.last_checkin_at < threshold_dt,
             )
-            result = await self._session.execute(stmt)
-            ids = [str(row[0]) for row in result.all()]
-            if not ids:
-                return
-            yield ids
+            .order_by(
+                UserStats.stat_definition_id,
+                UserStats.last_checkin_at,
+                UserStats.id,
+            )
+            .limit(batch)
+        )
+        result = await self._session.execute(stmt)
+        return [str(row[0]) for row in result.all()]
 
     # ─── Writes (caller уже держит lock или имеет row) ────
 
@@ -336,7 +330,7 @@ class UserStatsRepository:
 
         Cron batch-update. Двойная защита:
         1. Cron вызывает только на отфильтрованных is_frozen=false
-           строках через iter_for_freeze_cron (нормальный путь).
+           строках через list_for_freeze_batch (нормальный путь).
         2. WHERE ... AND is_frozen.is_(False) в самом UPDATE — на
            случай worker-redelivery, дубля батча или нескольких
            cron-инстансов. rowcount тогда честно показывает именно

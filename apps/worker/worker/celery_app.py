@@ -3,6 +3,7 @@ from __future__ import annotations
 from celery import Celery
 from celery.schedules import crontab
 
+from app.core.constants import CharacterConfig
 from worker.config import get_settings
 from worker.logging_setup import configure_logging
 
@@ -49,6 +50,8 @@ celery_app = Celery(
         # в user-stream через EventPublisher.publish_checkin
         # (event_type='caught' → COLLISION-изоляция).
         "worker.tasks.publish_you_were_caught",
+        # Phase 3 v2 Task 3.5: cron freeze inactive stats (30 дней без чек-инов).
+        "worker.tasks.freeze_inactive_stats",
     ],
 )
 
@@ -81,5 +84,17 @@ celery_app.conf.beat_schedule = {
         # не пересекаться с другими cron'ами (см. docs/02-architecture.md §2).
         "task": "worker.tasks.update_user_photos.run",
         "schedule": crontab(hour=6, minute=0),
+    },
+    "freeze_inactive_stats_daily": {
+        # Phase 3 v2 Task 3.5: ежедневная заморозка неактивных характеристик.
+        # ⚠️ НЕ литералы 4 — читаем из CharacterConfig.
+        # Запускаем до close_catch_window (04:00 vs hourly :05), чтобы
+        # новые штрафы в этот день не учитывали fresh-frozen users
+        # для streak-recency purposes.
+        "task": "worker.tasks.freeze_inactive_stats.run",
+        "schedule": crontab(
+            hour=CharacterConfig.FREEZE_CRON_HOUR_UTC,
+            minute=0,
+        ),
     },
 }

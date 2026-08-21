@@ -20,6 +20,7 @@ Variant 1 (per Дмитрий 21.08.2026): freeze() НЕ идемпотенте�
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -352,46 +353,94 @@ async def test_bulk_freeze_empty_list_returns_zero_without_execute() -> None:
     assert sess.execute_calls == []  # нет смысла UPDATE по пустому списку
 
 
-# ─── 8. iter_for_freeze_cron — SQL без OFFSET ─────────────────
+# ─── 8. list_for_freeze_batch — SQL без OFFSET ────────────────
+
+
+def _extract_order_by_keys(sql: str) -> list[str]:
+    """Extract exact ORDERED columns из rendered SQL.
+
+    Normalizes: lowercase, single-spaced, strips table-qualifiers
+    (`user_stats.id` → `id`). Returns list of column names в порядке
+    ORDER BY. Used для position-based assertion ordering contract.
+    """
+    norm = re.sub(r"\s+", " ", sql.lower())
+    norm = re.sub(r"\b\w+\.", "", norm)  # strip qualifier prefix
+    ob_start = norm.index("order by") + len("order by")
+    rest = norm[ob_start:]
+    end = len(rest)
+    for term in ("limit", "offset", "returning"):
+        idx = rest.find(f" {term} ")
+        if 0 < idx < end:
+            end = idx
+    clause = rest[:end].strip().strip(",")
+    parts = [p.strip() for p in clause.split(",")]
+    keys = []
+    for p in parts:
+        first_token = p.split()[0]
+        keys.append(first_token)
+    return keys
+
 
 @pytest.mark.asyncio
-async def test_iter_for_freeze_cron_sql_filters_correctly_no_offset() -> None:
-    """Только is_frozen=false AND last_checkin_at NOT NULL AND < threshold.
+async def test_list_for_freeze_batch_uses_top_n_sql_without_offset() -> None:
+    """SQL-contract для list_for_freeze_batch (Phase 3 Task 3.5).
 
-    ⚠️ OFFSET запрещён (recon Phase 3.2 fix 1): после bulk_freeze
-    выпавшие строки исчезают из WHERE, и OFFSET пропустил бы ещё
-    не замороженных candidate'ов. Подход — top-N каждый раз заново
-    по тому же WHERE + стабильный ORDER BY (stat_definition_id,
-    last_checkin_at, id).
+    Проверяет exact no-offset top-N contract:
+    - SELECT UserStats.id (НЕ INSERT);
+    - WHERE-блок с composite filters;
+    - строгая позиция ORDER BY columns: stat_definition_id →
+      last_checkin_at → id;
+    - LIMIT batch;
+    - нет OFFSET.
     """
-    sess = _ScriptedSession(
-        [SimpleNamespace(all=lambda: [])]  # empty → generator exits
+    fake_id_1 = "stat-uuid-1"
+    fake_id_2 = "stat-uuid-2"
+    fake_result = SimpleNamespace(
+        all=lambda: [(fake_id_1,), (fake_id_2,)]
     )
+    sess = _ScriptedSession([fake_result])
     repo = UserStatsRepository(sess)  # type: ignore[arg-type]
 
-    agen = repo.iter_for_freeze_cron(threshold_days=30, batch=1000)
-    async for _ in agen:  # consume to trigger one execute
-        pass
+    ids = await repo.list_for_freeze_batch(
+        threshold_days=30, batch=1000
+    )
+
+    assert ids == [fake_id_1, fake_id_2]
 
     sql = _sql_of(sess.execute_calls[0])
-    sql_lower = sql.lower()
     sql_upper = sql.upper()
+    sql_lower = sql.lower()
+
+    # Тип операции.
     assert sql_upper.startswith("SELECT")
-    assert "from user_stats" in sql_lower
-    # WHERE-clauses:
+    assert "INSERT" not in sql_upper
+
+    # SELECT поле.
+    assert "user_stats.id" in sql_lower
+
+    # WHERE.
     assert "is_frozen" in sql_lower
-    assert "false" in sql_lower
+    assert "is false" in sql_lower
     assert "last_checkin_at is not null" in sql_lower
     assert "last_checkin_at <" in sql_lower
-    # Стабильный ORDER BY:
-    assert "order by" in sql_lower
-    assert "stat_definition_id" in sql_lower
-    assert "last_checkin_at" in sql_lower
+
+    # ⚠️ CRITICAL: exact ORDER BY sequence (защита от регрессий
+    # при перестановке колонок). Это ПЕРВОЕ что нарушается при
+    # грязном рефакторе.
+    order_keys = _extract_order_by_keys(sql)
+    assert order_keys == ["stat_definition_id", "last_checkin_at", "id"], (
+        f"ORDER BY must be exactly [stat_definition_id, last_checkin_at, id] "
+        f"(защита от регрессий), got {order_keys}. "
+        f"Full SQL: {sql}"
+    )
+
+    # LIMIT batch.
     assert "limit" in sql_lower
-    # ⚠️ offset НЕ должно быть (защита от пропуска):
+
+    # ⚠️ CRITICAL: нет OFFSET (worker-driven top-N loop).
     assert "offset" not in sql_lower, (
-        "OFFSET запрещён в iter_for_freeze_cron — будет пропуск "
-        "после freeze первого батча"
+        "list_for_freeze_batch не должен использовать OFFSET — "
+        "worker iteration полагается на per-batch commit + WHERE drop-out"
     )
 
 
