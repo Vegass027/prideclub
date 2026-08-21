@@ -66,6 +66,10 @@ class HabitService:
         proof_types: list[str],
         price_month: int,
         penalty_amount: int,
+        # Pravki-catcher-deposit (Phase 1 Task 1.5, 2026-08-21): сумма ловцу
+        # от штрафа в копейках. DEFAULT 0 = для новых клубов поведение
+        # "всё в фонд" по умолчанию (обратная совместимость).
+        catcher_amount_kopecks: int = 0,
         stat_gain_per_checkin: int,
         stat_loss_per_miss: int,
         member_limit: int | None,
@@ -176,6 +180,10 @@ class HabitService:
             "proof_type": ProofType(proof_types[0]),
             "penalty_amount": penalty_amount,
             "price_month": price_month,
+            # Pravki-catcher-deposit (Phase 1 Task 1.5): новое поле, передаём
+            # в fields dict для INSERT. Валидация ge=0 на уровне Pydantic-схемы
+            # (AdminHabitCreateRequest.catcher_amount_kopecks).
+            "catcher_amount_kopecks": catcher_amount_kopecks,
             "prize_pool": 0,
             "is_active": False,
             "photo_url": photo_url,

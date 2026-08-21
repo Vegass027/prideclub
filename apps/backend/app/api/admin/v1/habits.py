@@ -115,6 +115,8 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         stat_icon=habit.stat_icon,
         stat_gain_per_checkin=habit.stat_gain_per_checkin,
         stat_loss_per_miss=habit.stat_loss_per_miss,
+        # Pravki-catcher-deposit (Phase 1 Task 1.5): в response для UI.
+        catcher_amount_kopecks=habit.catcher_amount_kopecks,
         member_limit=habit.member_limit,
         curator_id=habit.curator_id,
         checkin_topic_thread_id=habit.checkin_topic_thread_id,
@@ -155,6 +157,8 @@ async def create_habit(
         proof_types=payload.proof_types or [],
         price_month=payload.price_month,
         penalty_amount=payload.penalty_amount,
+        # Pravki-catcher-deposit (Phase 1 Task 1.5): сумма ловцу в копейках.
+        catcher_amount_kopecks=payload.catcher_amount_kopecks,
         stat_gain_per_checkin=payload.stat_gain_per_checkin,
         stat_loss_per_miss=payload.stat_loss_per_miss,
         member_limit=payload.member_limit,

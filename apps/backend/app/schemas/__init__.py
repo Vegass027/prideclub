@@ -236,6 +236,12 @@ class AdminHabitCreateRequest(BaseModel):
     proof_types: list[str] | None = Field(default=None, min_length=1, max_length=3)
     price_month: int = Field(gt=0)
     penalty_amount: int = Field(gt=0)
+    # Pravki-catcher-deposit (Phase 1 Task 1.5, 2026-08-21): сумма ловцу от
+    # штрафа в копейках. Pydantic-валидация `ge=0` — никаких отрицательных.
+    # Нет верхнего limit (int копейки) — clamp к penalty_amount в apply_catch
+    # (если catcher_amount_kopecks >= penalty_amount, всё уходит ловцу).
+    # DEFAULT 0 = старое поведение "всё в фонд" (обратная совместимость).
+    catcher_amount_kopecks: int = Field(default=0, ge=0)
     stat_gain_per_checkin: int = Field(default=2, gt=0)
     stat_loss_per_miss: int = Field(default=1, gt=0)
     member_limit: int | None = Field(default=None, gt=0)
@@ -310,6 +316,12 @@ class AdminHabitUpdateRequest(BaseModel):
     proof_types: list[str] | None = Field(default=None, min_length=1, max_length=3)
     price_month: int | None = Field(default=None, gt=0)
     penalty_amount: int | None = Field(default=None, gt=0)
+    # Pravki-catcher-deposit (Phase 1 Task 1.5, 2026-08-21): опционально
+    # обновление суммы ловцу. None = оставить как есть (default в Pydantic).
+    # В отличие от price_month/penalty_amount, catcher_amount_kopecks
+    # можно менять БЕЗ заморозки после первого участника — это не
+    # финансовое обязательство (не влияет на существующие транзакции).
+    catcher_amount_kopecks: int | None = Field(default=None, ge=0)
     stat_gain_per_checkin: int | None = Field(default=None, gt=0)
     stat_loss_per_miss: int | None = Field(default=None, gt=0)
     member_limit: int | None = Field(default=None, gt=0)
@@ -374,6 +386,8 @@ class AdminHabitOut(BaseModel):
     stat_icon: str | None
     stat_gain_per_checkin: int
     stat_loss_per_miss: int
+    # Pravki-catcher-deposit (Phase 1 Task 1.5, 2026-08-21): в response.
+    catcher_amount_kopecks: int = 0
     member_limit: int | None
     curator_id: int | None
     checkin_topic_thread_id: int | None
