@@ -232,6 +232,11 @@ def make_habit(
         prize_pool=0,
         proof_type=proof,
         proof_types=pts,
+        # Pravki-catcher-deposit (Phase 1 Task 1.1, 2026-08-21): default=0 в
+        # SQLAlchemy mapped_column не применяется в Python __init__ если
+        # значение не передано — поэтому явно передаём 0 для Fake-тестов
+        # (старое поведение "всё в фонд" по умолчанию).
+        catcher_amount_kopecks=0,
     )
 
 

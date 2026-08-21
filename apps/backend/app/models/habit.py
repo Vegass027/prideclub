@@ -59,32 +59,28 @@ class Habit(Base):
     photo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     telegram_invite_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
-    stat_name: Mapped[str] = mapped_column(
-        String(64), nullable=False, server_default="Дисциплина"
-    )
+    stat_name: Mapped[str] = mapped_column(String(64), nullable=False, server_default="Дисциплина")
     stat_icon: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    stat_gain_per_checkin: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="2"
-    )
-    stat_loss_per_miss: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="1"
+    stat_gain_per_checkin: Mapped[int] = mapped_column(Integer, nullable=False, server_default="2")
+    stat_loss_per_miss: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Pravki-catcher-deposit (Phase 1 Task 1.1, 2026-08-21): сумма ловцу от
+    # штрафа в копейках. DEFAULT 0 = для существующих клубов поведение не
+    # меняется (всё в фонд, обратная совместимость). Админ настраивает при
+    # create/update клуба. Миграция 016 добавила колонку в БД, эта правка
+    # синхронизирует модель. default=0 нужен для Python-конструктора
+    # (Fake-тесты и seed-данные создают Habit() без явного поля — без
+    # default получится None и min(None, amount) упадёт с TypeError).
+    catcher_amount_kopecks: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
     )
     member_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     curator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    checkin_topic_thread_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True
-    )
-    notifications_topic_thread_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True
-    )
-    chat_topic_thread_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True
-    )
+    checkin_topic_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    notifications_topic_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_topic_thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -214,9 +210,7 @@ class Habit(Base):
         club_tz = self.tzinfo
         if self.checkin_window_start <= self.checkin_window_end:
             # Нормальное окно: club_date = дата окна.
-            local_end = datetime.combine(
-                club_date, self.checkin_window_end, tzinfo=club_tz
-            )
+            local_end = datetime.combine(club_date, self.checkin_window_end, tzinfo=club_tz)
         else:
             # Окно через полночь: club_date = дата открытия (вечер),
             # окно закрывается на следующий день утром.

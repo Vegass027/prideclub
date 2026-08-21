@@ -837,9 +837,13 @@ async def test_apply_catch_rejects_when_time_crosses_boundary_after_lock() -> No
     )
 
     # Lock_for_update был вызван (race-fix semantic: lock acquired перед
-    # time check).
-    assert user_repo._lock_calls == [1], (
-        "lock_for_update(user_id=1) должен быть вызван до time check"
+    # time check). После Phase 1 Task 1.3 (Pravki-catcher-deposit):
+    # ASC-сортировка лочит ОБОИХ юзеров (violator + catcher) перед time
+    # check. catcher_user_id=2 != violator_user_id=1 → лочим оба.
+    # Если бы catcher == violator — только один lock (set dedup).
+    assert user_repo._lock_calls == [1, 2], (
+        "lock_for_update([violator_id, catcher_id]) в ASC порядке "
+        "должен быть вызван до time check"
     )
 
 
