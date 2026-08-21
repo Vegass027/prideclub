@@ -32,15 +32,30 @@ class Penalty(Base):
 
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     fund_share: Mapped[int] = mapped_column(Integer, nullable=False)
-    catcher_bonus_points: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Pravki-catcher-deposit (Phase 1 Task 1.4, 2026-08-21): сколько ушло
+    # ловцу на депозит. DEFAULT 0 = для существующих строк поведение не меняется
+    # (бонусная механика не писала деньги ловцу). Инвариант: amount =
+    # catcher_amount + fund_share (CHECK в миграции 017). Удалить в Phase 8:
+    # нет — это часть новой механики, не бонусная миграция.
+    catcher_amount: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    catcher_bonus_points: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # DEPRECATED 2026-08-21 (Phase 8): удалить после cleanup бонусной механики.
 
     reason: Mapped[PenaltyReason] = mapped_column(
         String(64), nullable=False, server_default=PenaltyReason.CAUGHT.value
     )
-    date: Mapped[date] = mapped_column(
-        Date, nullable=False, server_default=func.current_date()
+    date: Mapped[date] = mapped_column(Date, nullable=False, server_default=func.current_date())
+    bonus_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )  # DEPRECATED 2026-08-21 (Phase 8): удалить после cleanup.
+    # Pravki-catcher-deposit (Phase 1 Task 1.4, 2026-08-21): флаг для лидерборда
+    # (variant A — деньги НЕ блокируются для suspicious_pairs, только метка).
+    # DEFAULT false = для существующих строк не меняется. Удалить нельзя —
+    # часть новой механики.
+    is_suspicious_pair: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
     )
-    bonus_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
