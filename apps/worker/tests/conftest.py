@@ -105,7 +105,6 @@ def _remap_postgres_types_for_sqlite() -> None:
     from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 
     from app.models.auxiliary import (
-        BonusRule,
         DailyStreakSnapshot,
         SeasonPrizeRule,
         SuspiciousPair,
@@ -129,7 +128,6 @@ def _remap_postgres_types_for_sqlite() -> None:
         SeasonStats,
         DailyStreakSnapshot,
         SuspiciousPair,
-        BonusRule,
         SeasonPrizeRule,
     ]
     for m in models:
@@ -157,10 +155,9 @@ async def worker_db(monkeypatch):
         - engine: AsyncEngine
         - session_factory: async_sessionmaker[AsyncSession]
         - add_user, add_habit, add_membership, add_checkin, add_penalty, add_transaction,
-          add_season, add_season_stats, add_bonus_rule — хелперы для сидинга.
+          add_season, add_season_stats — хелперы для сидинга.
     """
     from app.models.auxiliary import (
-        BonusRule,
         DailyStreakSnapshot,
         SeasonPrizeRule,
         SuspiciousPair,
@@ -208,7 +205,6 @@ async def worker_db(monkeypatch):
         SeasonStats.__table__,
         DailyStreakSnapshot.__table__,
         SuspiciousPair.__table__,
-        BonusRule.__table__,
         SeasonPrizeRule.__table__,
     ]
 
@@ -244,16 +240,12 @@ async def worker_db(monkeypatch):
             first_name: str = "Test",
             username: str | None = "tester",
             timezone_name: str = "Europe/Moscow",
-            bonus_points: int = 0,
-            bonus_points_updated_at: datetime | None = None,
         ) -> User:
             u = User(
                 id=id if id is not None else 1000 + (id or 0),
                 first_name=first_name,
                 username=username,
                 timezone=timezone_name,
-                bonus_points=bonus_points,
-                bonus_points_updated_at=bonus_points_updated_at,
             )
             session.add(u)
             await session.flush()
@@ -371,7 +363,6 @@ async def worker_db(monkeypatch):
             fund_share: int = 100,
             reason: str,
             on_date: date,
-            bonus_applied: bool = False,
         ) -> Penalty:
             p = Penalty(
                 id=str(uuid4()),
@@ -381,7 +372,6 @@ async def worker_db(monkeypatch):
                 fund_share=fund_share,
                 reason=reason,
                 date=on_date,
-                bonus_applied=bonus_applied,
             )
             session.add(p)
             await session.flush()
@@ -456,25 +446,8 @@ async def worker_db(monkeypatch):
             await session.flush()
             return st
 
-        @staticmethod
-        async def add_bonus_rule(
-            session: AsyncSession,
-            *,
-            event_type: str,
-            threshold: int,
-            reward_type: str,
-            reward_value: int,
-        ) -> BonusRule:
-            r = BonusRule(
-                id=str(uuid4()),
-                event_type=event_type,
-                threshold=threshold,
-                reward_type=reward_type,
-                reward_value=reward_value,
-            )
-            session.add(r)
-            await session.flush()
-            return r
+        # REMOVED Phase 8 (2026-08-21): add_bonus_rule factory удалён вместе с
+# BonusRule и бонусной механикой.
 
     yield _Fixture()
 
