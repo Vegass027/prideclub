@@ -101,12 +101,32 @@ class PenaltyService:
         if catcher_membership_id is not None and catcher_membership_id == violator_membership_id:
             raise CannotCatchSelfError()
         if violator.status != MembershipStatus.ACTIVE:
+            # Первый re-check ACTIVE (Z-22): до лока, чтобы быстро отсеять
+            # уже-Paused жертв без захвата блокировки.
             raise MembershipNotActiveError()
 
-        # 2. SELECT FOR UPDATE на user. Сериализует все параллельные
-        #    catch/topup этого юзера в любых клубах (Z-2.4).
-        violator_user = await self._user_repo.lock_for_update(violator.user_id)
+        # 2. SELECT FOR UPDATE на user'ов в ASC-порядке (deadlock-free).
+        #    Pravki-catcher-deposit (Phase 1 Task 1.3, 2026-08-21): ловец
+        #    теперь тоже блокируется (нужно для зачисления на его депозит).
+        #    ASC-сортировка обязательна ДО первого lock_for_update, чтобы
+        #    избежать крест-накрест deadlock'а между параллельными catch'ами
+        #    (например, X ловит Y + Y ловит Z → если порядок локов разный
+        #    в разных транзакциях, получаем deadlock).
+        user_ids_to_lock: set[int] = {violator.user_id}
+        if catcher_user_id != violator.user_id:
+            # catcher_user_id уже в аргументах apply_catch (line 81). Если
+            # catcher == violator — CannotCatchSelfError выше уже отсеял,
+            # но защищаемся на случай edge-case (catcher_membership_id=None
+            # но catcher_user_id == violator.user_id).
+            user_ids_to_lock.add(catcher_user_id)
+        for uid in sorted(user_ids_to_lock):
+            await self._user_repo.lock_for_update(uid)
+        violator_user = await self._user_repo.get(violator.user_id)
         assert violator_user is not None, "violator membership has no user"
+        # Lookup catcher_user_obj (None если catcher_amount == 0 или catcher_membership_id is None).
+        catcher_user_obj = None
+        if catcher_user_id in user_ids_to_lock and catcher_user_id != violator.user_id:
+            catcher_user_obj = await self._user_repo.get(catcher_user_id)
 
         # Pravki-paused-race-2026-08-14: defense-in-depth. Между SELECT
         # violator (шаг 1) и lock_for_update(user) (шаг 2) существует окно
@@ -121,8 +141,8 @@ class PenaltyService:
         # семантически inconsistent: Penalty создаётся для жертвы с
         # membership.status != ACTIVE → UI жертвы может мигнуть
         # "поймали" → "уже на паузе".
-        # Решение: перечитать violator под user-lock'ом + повторная
-        # проверка. Один additional SELECT из БД, ~1ms overhead.
+        # Второй re-check ACTIVE (Z-22): под локом, после refresh'а
+        # violator. ОБЯЗАТЕЛЬНО оставить на месте (Дмитрий, 2026-08-21).
         await self._session.refresh(violator)
         if violator.status != MembershipStatus.ACTIVE:
             raise MembershipNotActiveError()
@@ -132,10 +152,7 @@ class PenaltyService:
         # воскрешает из PAUSED), но старый catch остаётся. Защита: reject с тем
         # же MembershipNotActiveError (UI уже умеет мапить, см. CATCH_ERROR_LABELS
         # в MembersPage.tsx). Сравнение по club_date (Q2): без grace period.
-        if (
-            violator.subscription_until is not None
-            and violator.subscription_until < club_date
-        ):
+        if violator.subscription_until is not None and violator.subscription_until < club_date:
             raise MembershipNotActiveError()
 
         habit = await self._habit_repo.get(str(violator.habit_id))
@@ -150,7 +167,7 @@ class PenaltyService:
         #
         # Race без этого фикса: ловец нажал «Поймать» в последнюю допустимую
         # секунду окна → time-check прошёл (now=T0) → ждёт user-lock пока
-        # другая транзакция (например, topup) завершится → catch window
+        # другая транзакция (например, topup) завершится → lock window
         # уже закрылся → lock освободился → старый код всё ещё создавал
         # Penalty после границы. Теперь now_utc capture = момент после
         # lock'а, штраф после границы невозможен.
@@ -193,7 +210,13 @@ class PenaltyService:
         if existing.first() is not None:
             raise PenaltyAlreadyProcessedError()
 
-        # Списываем депозит (но не ниже 0).
+        # === Финансы (Pravki-catcher-deposit, Phase 1 Task 1.3) ===
+        #
+        # Клэмп ДО: списываем фактически доступное (не больше номинала и
+        # не больше текущего депозита). Это исторически сложилось и
+        # означает, что Penalty.amount в БД = фактически списанное.
+        # CHECK ck_penalties_amount_equals_sum (миграция 017) гарантирует
+        # amount = catcher_amount + fund_share.
         amount = min(habit.penalty_amount, violator_user.deposit_balance)
         if amount <= 0:
             # Депозит исчерпан. Статус membership'а пересчитается в recompute ниже
@@ -202,24 +225,50 @@ class PenaltyService:
             # построчных `status = PAUSED` в этом методе.
             raise PenaltyAlreadyProcessedError("deposit_exhausted", code="deposit_exhausted")
 
-        violator_user.deposit_balance -= amount
-        await self._habit_repo.add_to_prize_pool(str(habit.id), amount)
+        # Разделение штрафа на 2 части:
+        # - catcher_amount — ловцу на депозит (ОТ amount, не от номинала!)
+        #   Если считать от номинала: при клэмпе (deposit < penalty) мы бы
+        #   раздали больше, чем списали — расхождение баланса.
+        # - fund_share (= amount - catcher_amount) — в призовой фонд клуба.
+        # Если catcher_amount_kopecks == 0 → всё в фонд (старое поведение).
+        # Если catcher_amount_kopecks >= amount → всё ловцу, фонд = 0.
+        catcher_amount = min(habit.catcher_amount_kopecks, amount)
+        fund_share_amount = amount - catcher_amount
 
-        # Применяется ли кэтчер-бонус — отдельная проверка suspicious_pairs (см. apply_catch_bonus).
-        grant_catcher_bonus = not await self._suspicious_repo.lookup_flagged(
+        # Suspicious pair (variant A, ПДмитрий 2026-08-21): деньги НЕ блокируются
+        # (сговор финансово невыгоден в текущей модели). Только метка для
+        # лидерборда — лидерборд фильтрует flagged пары из метрик catches_count.
+        is_suspicious_pair = await self._suspicious_repo.lookup_flagged(
             catcher_membership_id, violator_membership_id
         )
 
+        # 1. Списание с депозита нарушителя (одна сумма — amount).
+        violator_user.deposit_balance -= amount
+
+        # 2. Зачисление ловцу (если есть доля и catcher_user_obj загружен).
+        #    Под тем же user-lock'ом — деньги движутся атомарно.
+        if catcher_amount > 0 and catcher_user_obj is not None:
+            catcher_user_obj.deposit_balance += catcher_amount
+
+        # 3. Доля в призовой фонд клуба (fund_share_amount, не amount).
+        if fund_share_amount > 0:
+            await self._habit_repo.add_to_prize_pool(str(habit.id), fund_share_amount)
+
+        # 4. Penalty insert.
+        #    Pravki-catcher-deposit: разделение на fund_share/catcher_amount,
+        #    флаг is_suspicious_pair для лидерборда. catcher_membership_id
+        #    ВСЕГДА пишем (variant A — деньги идут даже для suspicious пар,
+        #    просто лидерборд скрывает).
         penalty = Penalty(
             id=str(uuid4()),
             membership_id=violator_membership_id,
-            catcher_membership_id=catcher_membership_id if grant_catcher_bonus else None,
+            catcher_membership_id=catcher_membership_id,
             amount=amount,
-            fund_share=amount,
-            catcher_bonus_points=PenaltyConfig.CATCHER_BONUS_POINTS if grant_catcher_bonus else 0,
+            fund_share=fund_share_amount,
+            catcher_amount=catcher_amount,
+            is_suspicious_pair=is_suspicious_pair,
             reason=PenaltyReason.CAUGHT,
             date=club_date,
-            bonus_applied=False,
         )
         self._session.add(penalty)
 
@@ -243,6 +292,7 @@ class PenaltyService:
             status=CheckinStatus.CAUGHT,
         )
 
+        # 5. Transaction для нарушителя (штраф, отрицательная сумма).
         transaction = Transaction(
             id=str(uuid4()),
             user_id=violator.user_id,
@@ -253,6 +303,19 @@ class PenaltyService:
             related_membership_id=violator_membership_id,
         )
         self._session.add(transaction)
+
+        # 6. Transaction для ловца (зачисление доли, положительная сумма).
+        if catcher_amount > 0 and catcher_user_obj is not None:
+            catcher_deposit_tx = Transaction(
+                id=str(uuid4()),
+                user_id=catcher_user_obj.id,
+                type=TransactionType.CATCHER_DEPOSIT.value,
+                amount=+catcher_amount,
+                balance_after=catcher_user_obj.deposit_balance,
+                related_penalty_id=penalty.id,
+                related_membership_id=catcher_membership_id,
+            )
+            self._session.add(catcher_deposit_tx)
 
         # Единственный источник статуса membership при изменении депозита —
         # централизованный recompute_pause_status (Pravki Z-2.5, правка B).
@@ -266,9 +329,12 @@ class PenaltyService:
                 "violator_membership_id": violator_membership_id,
                 "catcher_membership_id": catcher_membership_id,
                 "amount": amount,
+                "catcher_amount": catcher_amount,
+                "fund_share_amount": fund_share_amount,
+                "is_suspicious_pair": is_suspicious_pair,
                 "habit_id": str(habit.id),
                 "club_date": str(club_date),
-                "user_deposit_after": violator_user.deposit_balance,
+                "violator_deposit_after": violator_user.deposit_balance,
             },
         )
         return penalty
