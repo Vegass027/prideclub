@@ -185,6 +185,30 @@
 > Суммарно: ~5-6 недель, как и было, но Phase 1 теперь 2-3 дня вместо 3-4 ч
 > (добавилась миграция + рефактор `apply_catch` + новые транзакции + admin поле).
 
+> **⏳ Snapshot 2026-08-21 — PHASE 3 v2 PLAN APPROVED.**
+> Продуктовое решение Дмитрия: характеристики пользователя — **глобальные** per `user_id + stat_definition_id` (не per-club).
+> Source of truth — справочник `stat_definitions` (8 канонических: intelligence/strength/endurance/balance/energy/focus/creativity/connections).
+> 5 статусов с emoji (🐣🌊⚡🔥🐺, пороги 0/30/100/300/700). Freeze условие и текст — новые. Admin API: только `stat_definition_id`,
+> без legacy fallback на `stat_name`.
+>
+> **Зачем этот snapshot:** старый TZ `TZ_kharakteristiki_personazha.md` v3.1 (22.07.2026) описывал per-club + 4 статуса + `icon_url`
+> — **superseded** новым `TZ_kharakteristiki_personazha_v2.md` от 21.08.2026. Подробности в новом ТЗ §0, §1, §6.
+>
+> **Согласованный порядок имплементации** (Task 3.1 — 3.11):
+> 3.1 миграция 019 (schema 4 DDL + backfill `Дисциплина → NULL`)
+> → 3.2 repositories (StatDefinition + UserStats + UserStatus)
+> → 3.3 CharacterConfig + CharacterService
+> → 3.4 интеграция CheckinService + PenaltyService + worker DI
+> → (3.5 freeze cron / 3.6 API character+leaderboard / 3.7 admin API stat_definition_id обязателен)
+> → 3.8 frontend admin dropdown + обязательные баннеры для NULL-клубов
+> → 3.9 frontend CharacterPage + Leaderboard таб
+> → 3.10 E2E scenario_character (2 клуба одна stat → одна строка user_stats)
+> → 3.11 docs full sync после деплоя.
+>
+> **Сейчас:** Task 3.0 (этот supersede-marker) завершён. **⏳ Awaiting ОК Дмитрия на Task 3.1.**
+> Полная разведка v2 — в чате AI-ассистента от 2026-08-21 (recon отчёт со всеми SQL-схемами, dependency map, критериями DoD,
+> caveats и сценариями E2E).
+
 ---
 
 ## 0. TL;DR
@@ -194,7 +218,7 @@
 | **0** | Закрыть финансовую дыру | — | — | ✅ уже закрыт (`9c32d6f`) | — |
 | **1** | **Catcher deposit share** (бывш. Bonus wiring) | 5 | **2-3 дня** (было 3-4 ч) | нет, но лидерборд мёртвый | **🔜 первый** |
 | **2** | Призовой фонд на депозит (seasons enable + prize → deposit) | 4 | **3-4 дня** (было 1 нед) | нет (сезонов нет) | **после Phase 3** |
-| **3** | Character & Stats (Фаза B из TZ) | 12 | 2-3 недели | нет, но это центральная фича ТЗ | **🎯 главный** |
+| **3** | Character & Stats (Фаза B из TZ, **v2 план 21.08.2026** — глобальные статы + `stat_definitions`) | 11 (+ опц. 12) | 8-10 дней | нет, но это центральная фича ТЗ | **🎯 главный** · **⏳ awaiting Task 3.1 OK** |
 | **4** | Frontend (страницы + персонаж) | **4** (было 11) | **1-2 дня** хвоста (было 3-5) | нет — хвост за Phase 3 | параллельно Phase 3 |
 | **5** | Техдолг (admin, hardening) | 6 | 1-2 дня | нет | после Phase 2 |
 | **6** | Deploy & Production | 4 | по 1 дню | нет (для soft-launch) | после Phase 5 |
@@ -743,11 +767,21 @@ for entry in ranked:
 
 ---
 
-# Фаза 3 — Character & Stats (Фаза B из TZ, 2-3 недели)
+# Фаза 3 — Character & Stats (Фаза B из TZ, 8-10 дней)
 
-**Цель:** характеристика растёт/падает, глобальный статус, лидерборд по характеристике, заморозка.
+> **⏳ Snapshot 2026-08-21 — версия плана v2, APPROVED Дмитрием, awaiting Task 3.1 OK.**
+>
+> **Актуальная спецификация:** `TZ_kharakteristiki_personazha_v2.md` от 21.08.2026 (глобальные статы по `user_id + stat_definition_id`, справочник `stat_definitions` 8 шт, 5 статусов с emoji, freeze по-новому, admin API только `stat_definition_id`, баннеры обязательны).
+>
+> **Разведка v2** — в чате AI-ассистента от 21.08.2026 (полные SQL-схемы, dependency map, критические race-тесты, E2E plan).
+>
+> **План задач 3.0-3.11 см. ниже** (миграция 019, repo/service/integration/API/admin/frontend/e2e/docs).
+>
+> **Что НЕ делаем:** legacy `stat_name` fallback в API (Дмитрий 21.08.2026 зафиксировал), DROP COLUMN `stat_name`/`stat_icon` (отдельная фаза позже, Task 3.12 вне Phase 3), `contributing_habits` в `/character/me` (отдельная задача), `first_name_initial` ФЗ-152 (отдельная задача на все табы).
 
-**Важно:** `apps/backend/alembic/versions/009_chat_id_partial_unique.py` уже существует → **миграция для `user_statuses` seed будет 016**, не 009. Учесть в именовании.
+**Цель:** характеристика растёт/падает (глобально по stat_definition_id, не per-club), глобальный статус по сумме ВСЕХ user_stats, лидерборд по характеристике в клубе (агрегирует все клубы с этой stat), заморозка через 30 дней без чек-ина в любом клубе с этой stat, Admin Mini App с обязательным dropdown из 8 канонических.
+
+**Важно:** миграция следующая в head — `019_user_stats_and_statuses.py` (от `018_drop_bonus_mechanics`). Будет содержать **4 DDL-блока в одной миграции** (stat_definitions + ALTER habits + user_statuses + user_stats) + backfill по точному мэтчу `stat_name='Интеллект' → intelligence`. `Дисциплина` и подобные неканонические остаются `NULL` — админ выбирает вручную через банер (UI обязателен в Task 3.8).
 
 ## Task 3.1: модель `UserStats`
 
