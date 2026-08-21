@@ -15,11 +15,15 @@
 > - User Mini App: `https://app.prideclub.fun/`
 > - Admin Mini App: `https://admin.prideclub.fun/` (owner-only, через `OWNER_TELEGRAM_ID`)
 >
-> **Snapshot 2026-08-18 (Pravki-subscription-2026-08-17 deploy на HEAD `403219d`; ранее 2026-08-09 Pravki-subscribe-and-join + bug-fixes Z-19):**
-> bundle `main-BY8E9p_-.js` + `index-D1YDiVX1.js` + `admin-CoTYu9ZG.js`
-> (включает `JoinPayModal` с режимом `renew-only` для smart renew,
-> 3-state `SubscriptionBadge` для бейджа подписки 1-2 дня / expired,
-> блок `joined_late` в `TodayPage`, defensive fallback в `StatusBadge`).
+> **Snapshot 2026-08-21 (Phase 1 + Phase 8 deployed на HEAD `132add1`; ранее 2026-08-18 Pravki-subscription):**
+> bundles: `main-x6Kd9Fwa.js` + `index-D1YDiVX1.js` + `admin-I6Pe1zBL.js`.
+> Phase 1 (Task 1.6 + 1.6b): admin UI теперь поддерживает настройку
+> `catcher_amount_kopecks` через `HabitCreatePage` / `HabitEditForm` (ПОЛЕ
+> «Сумма ловцу (₽)» сразу после «Штраф за пропуск»), плюс отображение в
+> `AdminHabitCard` («Ловцу за поимку: X ₽», ⚠️ если ≥ штрафа).
+> Phase 8 (Task 8.4): удалены все bonus-ссылки (`User.bonus_points`, label
+> `bonus_catch` / `bonus_subscription` / `bonus_points` в format.ts).
+> Добавлен label `catcher_deposit: 'Доля за поимку'` (Phase 1).
 > Compose workaround для overlay-конфликта — `image: nginx:1.27-alpine` +
 > volume mount на bundle, см. `docs/10-deploy.md` §9.1.
 > **ВНИМАНИЕ:** не возвращать `build:` в compose до диагностики

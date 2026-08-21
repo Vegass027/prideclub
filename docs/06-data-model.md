@@ -1,11 +1,35 @@
 # 06 — Модель данных
 
-> Snapshot от 2026-07-23 (обновлено 2026-08-18 после Pravki-subscription-2026-08-17
-> deploy на HEAD `403219d`; ранее 2026-08-09 после Pravki-subscribe-and-join Z-19
-> deploy). Схема таблиц и антифрод актуальны. **Без новых миграций** —
-> `memberships.subscription_until` существовал, но НЕ проверялся; теперь
-> проверяется **на лету** через `habit.club_date(now_utc)` в `internal_checkins` /
-> `checkin_service.process_checkin` / `penalty_service.apply_catch` (TZ клуба,
+> Snapshot от 2026-07-23 (обновлено 2026-08-21 после Phase 1 + Phase 8 deploy
+> на HEAD `132add1`; ранее 2026-08-18 Pravki-subscription-2026-08-17 на HEAD `403219d`;
+> 2026-08-09 Pravki-subscribe-and-join Z-19). Схема таблиц и антифрод актуальны.
+>
+> **Phase 8 (Tasks 8.1-8.6) — cleanup bonus mechanics:** удалены колонки
+> `users.bonus_points` / `users.bonus_points_updated_at`,
+> `memberships.bonus_points`, `penalties.catcher_bonus_points` /
+> `penalties.bonus_applied`; таблица `bonus_rules` (DROP TABLE);
+> enum-члены `TransactionType.BONUS_CATCH` / `BONUS_SUBSCRIPTION` /
+> `BONUS_POINTS` удалены из Python кода; Python-модули
+> `apps/backend/app/services/bonus_service.py` +
+> `apps/backend/app/repositories/bonus_rule_repository.py` +
+> `apps/backend/app/models/auxiliary.py::BonusRule` УДАЛЕНЫ; 3 worker tasks
+> (`apply_catch_bonus.py` / `expire_bonus_points.py` /
+> `integrity_check_bonus_transactions.py`) УДАЛЕНЫ; 4 test-файла УДАЛЕНЫ;
+> 1 infra-fix `WEBHOOK_SECRET` в `x-backend-env` anchor docker-compose.yml.
+> Миграция 018 (`018_drop_bonus_mechanics`) применена на проде — `alembic current` =
+> `018_drop_bonus_mechanics (head)`. E2E catcher-share после cleanup bonus:
+> **ALL ASSERTS PASSED ✓** (8/8 метрик).
+>
+> **Phase 1 (Tasks 1.1, 1.4) — catcher deposit share:** добавлены колонки
+> `habits.catcher_amount_kopecks` (int, ge=0, DEFAULT 0, настройка админом
+> через admin endpoint), `penalties.catcher_amount` (int, DEFAULT 0, доля
+> ловцу на депозит), `penalties.is_suspicious_pair` (bool, DEFAULT false,
+> флаг для лидерборда — variant A: деньги идут даже для flagged пар).
+> CHECK constraints: `amount = catcher_amount + fund_share` +
+> `catcher_amount >= 0`. Настройка `memberships.subscription_until`
+> теперь проверяется **на лету** через `habit.club_date(now_utc)` в
+> `internal_checkins` / `checkin_service.process_checkin` /
+> `penalty_service.apply_catch` (TZ клуба,
 > без grace period). См. `Pravki-subscription-2026-08-17.md §Z-22`.
 > **Список миграций остался 15** (000 → 015, см. §3). Финансовая
 > идемпотентность — через уникальные индексы, см. §5. Topic-scoped чек-ины

@@ -2,6 +2,11 @@
 
 > Дата среза: 2026-07-23 (обновлено 2026-08-07 после Step 7 — успешный деплой
 > SSE+Redis Streams на проде, см. §1.0 ниже).
+> **Snapshot 2026-08-21 — Phase 1 + Phase 8 DEPLOYED + VERIFIED.**
+> Финальная финансовая механика штрафов (catcher deposit share) работает на проде
+> (e2e проверка: 8/8 assertions passed). Виртуальная бонусная механика полностью
+> удалена (миграция 018 + Task 8.2-8.6 в коммитах `5f010a5`..`132add1`). См.
+> `EXECUTION-PLAN-2026-08-19.md` §Snapshot 2026-08-21 для деталей.
 > Сервер: Contabo Cloud VPS 4 (4 vCPU / 8 GB / 100 GB SSD), `169.58.52.78`
 > Домены: `prideclub.fun` (основной), `app.prideclub.fun` (Mini App),
 > `admin.prideclub.fun` (Admin Mini App), `api.prideclub.fun` (API), `db.prideclub.fun` (pgweb)
@@ -12,7 +17,14 @@
 
 ---
 
-## 1. Текущая стадия: **✅ готов к soft-launch + Admin Mini App + SSE real-time**
+## 1. Текущая стадия: **✅ Phase 1 + Phase 8 DEPLOYED + VERIFIED**
+
+**(обновлено 2026-08-21)** Phase 1 (catcher deposit share) и Phase 8 (cleanup
+bonus mechanics) задеплоены на прод. Новая финансовая механика работает:
+штраф делится на `catcher_amount` (ловцу на депозит) и `fund_share` (в призовой
+фонд клуба). Настройка через admin endpoint: `PATCH /admin/v1/habits/{id}`
+с `catcher_amount_kopecks` (int, копейки, ge=0). Подробности — EXECUTION-PLAN
+v1.5 + docs/06-data-model.md.
 
 ### 1.0 Что сделано в этой итерации
 - ✅ `/setdomain` в BotFather → Mini App открывается кнопкой в боте

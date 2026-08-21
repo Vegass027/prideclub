@@ -2,7 +2,46 @@
 
 > **Этот документ — ТОЧКА ВХОДА для работы.** Пошаговый план задач от сложных/нужных до мелких/техдолга.
 > Цель: после выполнения всех задач — **полноценный рабочий продукт**, на который можно наслаивать новые фичи.
-> **Версия:** 1.4. **Дата:** 2026-08-19 (создан), **2026-08-20 (verified)**, **2026-08-21 (rebuilt)**, **2026-08-21 (product-changes)**, **2026-08-21 (deployed)**. **Автор:** AI-ассистент по запросу Дмитрия.
+> **Версия:** 1.5. **Дата:** 2026-08-19 (создан), **2026-08-20 (verified)**, **2026-08-21 (rebuilt)**, **2026-08-21 (product-changes)**, **2026-08-21 (Phase 1 deployed)**, **2026-08-21 (Phase 8 deployed + verified)**. **Автор:** AI-ассистент по запросу Дмитрия.
+
+> **✅ Snapshot 2026-08-21 — PHASE 8 DEPLOYED + VERIFIED.** Phase 8 (Tasks 8.1 +
+> 8.2 + 8.3 + 8.4 + 8.5 + 8.6 + infra-fix `WEBHOOK_SECRET`) задеплоен на прод через
+> `privichki-prod`. Коммиты в `feat/catcher-deposit-share-task-1-1`:
+> `5f010a5` (Task 8.1 миграция 018) + `55ff9e1` (Task 8.2 backend) +
+> `60f868c` (Task 8.3 worker) + `e56f040` (Task 8.4 frontend) +
+> `1dae3c0` (Task 8.6 backend tests) + `73f4311` (Task 8.6 worker tests) +
+> `fb3dfc4` (Task 8.5 docs) + `132add1` (infra-fix `WEBHOOK_SECRET` в `x-backend-env`).
+> Все 8 коммитов запушены в `origin/feat/catcher-deposit-share-task-1-1`.
+>
+> **Verify после деплоя (run_tag=`20260821-114619`):**
+> - `alembic current` = `018_drop_bonus_mechanics (head)` ✅
+> - DB schema: `users.bonus_points` / `users.bonus_points_updated_at` /
+>   `memberships.bonus_points` / `penalties.catcher_bonus_points` /
+>   `penalties.bonus_applied` — **все отсутствуют** ✅
+> - DB schema: `bonus_rules` таблица — **отсутствует** ✅
+> - DB schema: новая механика (Phase 1) — `habits.catcher_amount_kopecks` есть ✅,
+>   `penalties.catcher_amount` / `fund_share` / `is_suspicious_pair` есть ✅,
+>   CHECK constraints `amount = catcher_amount + fund_share` + `catcher_amount >= 0` на месте ✅
+> - Реальные данные Phase 1-2 сохранены: 2 юзера (Sofia + 𝔭𝖗𝖎𝖓𝖙), 1 клуб
+>   с `catcher_amount_kopecks=20000` (Пробежка), 3 клуба с `prize_pool` ✅
+> - Python imports чистые: `TransactionType.BONUS_*` отсутствуют, `CATCHER_DEPOSIT`
+>   на месте ✅; `BonusService` / `BonusRuleRepository` ImportError ✅;
+>   worker tasks `apply_catch_bonus` / `expire_bonus_points` /
+>   `integrity_check_bonus_transactions` не существуют ✅
+> - E2E catcher-share после cleanup bonus mechanics: **ALL ASSERTS PASSED ✓**
+>   (8 метрик: penalty.amount=10000, catcher_amount=3000, fund_share=7000,
+>   is_suspicious_pair=false, catcher deposit Δ +3000, victim deposit Δ -10000,
+>   prize_pool Δ +7000, CHECK invariant intact)
+> - E2E scoped cleanup (run_tag=20260821-114619) — удалено только тестовые
+>   артефакты, реальные данные не затронуты
+> - Infra-fix `WEBHOOK_SECRET` в `x-backend-env` — больше не нужно
+>   `-e WEBHOOK_SECRET=...` через docker exec для e2e прогонов
+> - Cleanup артефакта неудачного прогона 113939 (orphan habit `01a2372f`):
+>   DELETE через прямую SQL-команду (вне scope scoped cleanup)
+>
+> **Phase 1 + Phase 8: ЗАКРЫТЫ и задеплоены.** Следующие фазы:
+> Phase 3 (Character & Stats — 2-3 нед), Phase 2 (prize pool → депозит — 3-4 дня),
+> Phase 5 (tech debt — 1-2 дня), Phase 6 (deploy ops), Phase 7 (growth).
 
 > **✅ Snapshot 2026-08-21 — PHASE 1 DEPLOYED.** Phase 1 (Tasks 1.1 + 1.2 + 1.3
 > + 1.4 + 1.5 + test-fix) задеплоен на прод через `privichki-prod`. Коммиты:

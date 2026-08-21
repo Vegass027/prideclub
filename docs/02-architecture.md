@@ -50,8 +50,9 @@
 ### Хранение данных
 - **PostgreSQL 16** (`postgres:16-alpine` в compose) — основная БД
   (users, habits, memberships, checkins, penalties, transactions, seasons, season_stats,
-  suspicious_pairs, offer_versions, user_consents, pricing_rules, bonus_rules,
+  suspicious_pairs, offer_versions, user_consents, pricing_rules,
   season_prize_rules, daily_streak_snapshots).
+  *REMOVED Phase 8 (2026-08-21):* `bonus_rules` таблица — удалена миграцией 018.
 - **Redis 7** (`redis:7-alpine`, AOF, `--maxmemory 256mb --maxmemory-policy allkeys-lru`)
   — кэш + брокер очередей Celery + today cache + catch rate-limit (Lua).
 - **Медиа-кружки** не хранятся долгосрочно — живут в чате Telegram.
