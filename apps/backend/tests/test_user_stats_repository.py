@@ -393,3 +393,71 @@ async def test_iter_for_freeze_cron_sql_filters_correctly_no_offset() -> None:
         "OFFSET запрещён в iter_for_freeze_cron — будет пропуск "
         "после freeze первого батча"
     )
+
+
+# ─── try_get_for_update (Task 3.3) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_try_get_for_update_returns_none_when_missing_and_uses_select_for_update() -> None:
+    """SELECT ... FOR UPDATE без INSERT.
+
+    SQL включает: composite key (user_id, stat_definition_id) и
+    FOR UPDATE. INSERT INTO не должно появляться (защита от
+    случайного create-on-decrement).
+    """
+    sess = _ScriptedSession(
+        [SimpleNamespace(scalar_one_or_none=lambda: None)]
+    )
+    repo = UserStatsRepository(sess)  # type: ignore[arg-type]
+
+    result = await repo.try_get_for_update(
+        user_id=42, stat_definition_id="intel"
+    )
+
+    assert result is None
+    assert len(sess.execute_calls) == 1
+    sql = _sql_of(sess.execute_calls[0])
+    sql_upper = sql.upper()
+    sql_lower = sql.lower()
+    assert sql_upper.startswith("SELECT")
+    assert "FOR UPDATE" in sql_upper
+    assert "user_id" in sql_lower
+    assert "stat_definition_id" in sql_lower
+    # ⚠️ КРИТИЧНО: нет INSERT ON CONFLICT, нет INSERT INTO.
+    # decrement_on_penalty/apply_freeze запрещают create-on-decrement.
+    assert "INSERT INTO" not in sql_upper, (
+        "try_get_for_update не должен делать INSERT — защита от "
+        "создания пустой stat-строки при apply_freeze/decrement"
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_get_for_update_returns_existing_row_without_creating() -> None:
+    """Зеркальный случай: при наличии строки возвращает её под FOR UPDATE.
+
+    SQL: SELECT с composite key + FOR UPDATE, БЕЗ INSERT (как и в None-кейсе).
+    """
+    existing_row = _make_stat(value=42, is_frozen=False)
+    sess = _ScriptedSession(
+        [SimpleNamespace(scalar_one_or_none=lambda: existing_row)]
+    )
+    repo = UserStatsRepository(sess)  # type: ignore[arg-type]
+
+    result = await repo.try_get_for_update(
+        user_id=42, stat_definition_id="intel"
+    )
+
+    assert result is existing_row
+    assert result.value == 42
+    assert len(sess.execute_calls) == 1
+    sql = _sql_of(sess.execute_calls[0])
+    sql_upper = sql.upper()
+    sql_lower = sql.lower()
+    assert sql_upper.startswith("SELECT")
+    assert "FOR UPDATE" in sql_upper
+    assert "user_id" in sql_lower
+    assert "stat_definition_id" in sql_lower
+    assert "INSERT INTO" not in sql_upper, (
+        "try_get_for_update должен быть SELECT — decrement/apply_freeze "
+        "запрещают create"
+    )

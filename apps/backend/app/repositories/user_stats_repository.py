@@ -117,6 +117,37 @@ class UserStatsRepository:
         )
         return result.scalar_one_or_none()
 
+    async def try_get_for_update(
+        self,
+        *,
+        user_id: int,
+        stat_definition_id: str,
+    ) -> UserStats | None:
+        """SELECT ... WHERE (user_id, stat_definition_id) FOR UPDATE.
+
+        Без INSERT — ТОЛЬКО существующая строка; None если её нет.
+
+        Используется CharacterService для операций, где создание
+        пустой stat-строки ЗАПРЕЩЕНО (Task 3.3 §1.2 / §1.3):
+        - decrement_on_penalty: чтобы профиль не получал пустые
+          характеристики только из штрафов;
+        - apply_freeze: нечего замораживать, если stat-строки нет.
+
+        Тот же lock-семантикс, что у lock_for_update(stat_id) —
+        по композитному ключу вместо UUID PK. Под READ COMMITTED
+        сериализует параллельные мутации.
+        """
+        stmt = (
+            select(UserStats)
+            .where(
+                UserStats.user_id == user_id,
+                UserStats.stat_definition_id == stat_definition_id,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     # ─── Reads ───────────────────────────────────────────────
 
     async def list_for_user(self, user_id: int) -> list[UserStats]:

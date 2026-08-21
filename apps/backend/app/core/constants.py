@@ -215,3 +215,34 @@ class HttpRateLimitConfig:
 
     RATE_LIMIT_API_V1 = "60/60s"  # 60 запросов в минуту на /api/v1/*
     RATE_LIMIT_INTERNAL = "120/60s"  # 120 на /internal/* (бот шлёт чаще)
+
+
+class CharacterConfig:
+    """Константы геймификации (Phase 3 v2, миграция 019).
+
+    Используется CharacterService (Task 3.3) и worker'ом freeze-cron
+    (Task 3.5).
+
+    ⚠️ LEADERBOARD_TOP_LIMIT перенесён в Task 3.6 (там, где будет
+    endpoint и SQL с JOIN). Не держать в этом классе преждевременно
+    — иначе придётся уточнять контекст использования.
+    """
+
+    DEFAULT_STAT_GAIN_PER_CHECKIN = 2
+    DEFAULT_STAT_LOSS_PER_MISS = 1
+
+    FREEZE_AFTER_DAYS_INACTIVE = 30
+    DEFAULT_FROZEN_REASON = (
+        "Характеристика заморожена: нет чек-инов более 30 дней. "
+        "Сделай чек-ин, чтобы продолжить рост."
+    )
+
+    # Display filter (per Dmitry 21.08.2026).
+    # Stat с value >= MIN_STAT_VALUE_TO_SHOW (= 1) ИЛИ is_frozen →
+    # показывается в /character/me stats[].
+    # Frozen stats при value=0 — остаются (UI рисует ❄ + reason).
+    MIN_STAT_VALUE_TO_SHOW = 1
+
+    # Cron (Task 3.5).
+    FREEZE_CRON_HOUR_UTC = 4
+    FREEZE_CRON_BATCH = 1000

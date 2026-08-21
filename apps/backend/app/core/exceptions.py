@@ -375,5 +375,44 @@ class IdempotencyConflictError(DomainError):
     параметры (habit_id, deposit_amount_kopecks) — это явная ошибка клиента.
     На практике не должно случаться если uuid4 генерится правильно.
     """
+
     status_code = 400
     code = "idempotency_conflict"
+
+
+class StatDefinitionMissingError(DomainError):
+    """Referential-integrity нарушение: UserStats ссылается на
+    несуществующий StatDefinition.
+
+    Под FK ON DELETE RESTRICT (миграция 019) такое НЕ должно
+    случаться; возможно только при прямом SQL-импорте /
+    миграционных скриптах / bug-инжекциях. НЕ маскировать
+    пустыми строками в /character/me — это скроет расхождение
+    данных от юзера и от логов. Исключение делает нарушение
+    наблюдаемым для вызывающего API-слоя.
+
+    per Dmitry 21.08.2026 (Task 3.3): prefer domain exception
+    over plain RuntimeError.
+
+    ⚠️ Маппинг DomainError → HTTP response не покрывается в
+    Task 3.3; проверим фактический mapping в Task 3.6 вместе
+    с endpoint-тестами /character/me.
+    """
+
+    status_code = 500
+    code = "stat_definition_missing"
+
+    def __init__(
+        self,
+        *,
+        stat_definition_id: str,
+        user_stats_id: str,
+        user_id: int,
+    ) -> None:
+        super().__init__(
+            f"StatDefinition {stat_definition_id!r} "
+            f"not found for UserStats {user_stats_id!r}",
+            stat_definition_id=stat_definition_id,
+            user_stats_id=user_stats_id,
+            user_id=user_id,
+        )
