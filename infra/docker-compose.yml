@@ -19,6 +19,11 @@ x-backend-env: &backend-env
   ADMIN_TELEGRAM_CHAT_ID: ${ADMIN_TELEGRAM_CHAT_ID:-}
   OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-0}
   BOT_TOKEN_ADMIN: ${BOT_TOKEN_ADMIN:-}
+  # Pravki-catcher-deposit deploy (2026-08-21): добавлен WEBHOOK_SECRET в x-backend-env
+  # — pre-existing баг, e2e-scenario требовал -e WEBHOOK_SECRET=... через docker exec.
+  # Теперь backend получает секрет из /app/infra/.env через docker-compose,
+  # что позволяет запускать e2e без передачи секрета через командную строку.
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET}
 
 x-bot-env: &bot-env
   BOT_TOKEN: ${BOT_TOKEN}
