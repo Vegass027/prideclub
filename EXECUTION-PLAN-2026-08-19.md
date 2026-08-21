@@ -2,7 +2,7 @@
 
 > **Этот документ — ТОЧКА ВХОДА для работы.** Пошаговый план задач от сложных/нужных до мелких/техдолга.
 > Цель: после выполнения всех задач — **полноценный рабочий продукт**, на который можно наслаивать новые фичи.
-> **Версия:** 1.1. **Дата:** 2026-08-19 (создан), **2026-08-20 (verified)**. **Автор:** AI-ассистент по запросу Дмитрия.
+> **Версия:** 1.3. **Дата:** 2026-08-19 (создан), **2026-08-20 (verified)**, **2026-08-21 (rebuilt)**, **2026-08-21 (product-changes)**. **Автор:** AI-ассистент по запросу Дмитрия.
 
 > **⚠️ Snapshot 2026-08-20 — post-verification.** После критики Дмитрия ("основывался
 > на документах а не на реальном проде") провёл верификацию всех 44 задач против
@@ -11,7 +11,7 @@
 > - `§3 E "Frontend не подключен к API"` — неправда, фронт уже подключен → удалён
 > - `Task 1.3` — тест через прямой импорт `_process`, не через broker → переписать существующий
 > - `Task 2.3` — структура `prize_rules_snapshot` уже гибкая (rank_from/rank_to/bp), не 5 мест хардкод
-> - `Task 5.5` — реально 10 вхождений устаревших комментариев, не 9
+> - `Task 5.5` — реально **14** вхождений устаревших комментариев, не 10 (snapshot 2026-08-21, после `grep -rnE`)
 > - `§3 D (Фаза B)` — полностью актуальна
 >
 > **Контекст:**
@@ -31,22 +31,111 @@
 > `codegraph node` для подтверждения наличия символов. Не доверять `prod-readiness.md §2.3` —
 > там устарело.
 
+> **⚠️ Snapshot 2026-08-21 — rebuild.** После повторной разведки (перед стартом работы)
+> пересобрал порядок фаз и оценки. **Новые факты (проверено через `grep` + `Read`):**
+>
+> 1. **Phase 4 закрыта на ~70%** — все 7 пользовательских страниц (`Marketplace`,
+>    `Today`, `Members`, `Balance`, `Profile`, `Leaderboard`, `Onboarding`) уже
+>    импортируют хуки из `@/shared/hooks` (`useMarketplace/useToday/useMembers/
+>    useCatch/useBalance/useWallet/useLeaderboard/useMyHabits/useHabitSse`). Из
+>    11 задач реально остались **только 4.8/4.9/4.10/4.11** — и все 4 зависят от
+>    Phase 3 (Character & Stats). Реальная трудоёмкость Phase 4 = 1-2 дня, не 3-5.
+> 2. **Phase 2 частично сделана** — `apps/backend/app/services/season_service.py`
+>    уже содержит `start_season`/`close_season`/`_rank_by_metric`/`validate_prize_rules`
+>    + `BASIS_POINTS_TOTAL = 10_000`. Нужны только: `SeasonRepository`, инкремент
+>    `Season.prize_pool` в `apply_catch`, admin endpoint, `DEFAULT_PRIZE_RULES`.
+>    Реальная трудоёмкость = 3-4 дня, не 1 неделя.
+> 3. **Phase 1 — реально 3-4 часа**, не 1-2 дня. Worker task `apply_catch_bonus`
+>    уже существует (`apps/worker/worker/tasks/apply_catch_bonus.py`), нужно только
+>    зарегистрировать имя в `_TASK_NAMES` + добавить `send_task` в `process_penalty`
+>    + переписать тест через broker.
+> 4. **Phase 3 (Character & Stats) — главная фича ТЗ**, должна идти **сразу после
+>    warm-up Phase 1**, не после Phase 2. Логика: метрика `stat_value` для топ-5
+>    победителей сезона появится только с Phase 3, поэтому Phase 2 (призовой
+>    фонд) логичнее делать **после** Phase 3, не до.
+> 5. **Phase 5.5** — реально **14 строк** устаревших комментариев
+>    `apply_window_expired|WINDOW_CLOSED_NO_CATCH`, не 10 (план занижал).
+>
+> **Пересобранный порядок:** Phase 1 (warm-up, 3-4 ч) → **Phase 3 (главная фича,
+> 2-3 нед)** + хвост Phase 4 параллельно → Phase 2 (3-4 дня) → Phase 5 (1-2 дня)
+> → Phase 6 → Phase 7. Суммарно ~5-6 недель, как и было.
+
+> **⚠️ Snapshot 2026-08-21 — product-changes (catcher deposit share).**
+> Продуктовое решение Дмитрия от 2026-08-21: **полностью отказываемся от виртуальных
+> бонусов**. Ловец получает РЕАЛЬНЫЕ деньги на свой депозит, а не `bonus_points`.
+>
+> **Новая механика штрафов:**
+> - Админ клуба при настройке указывает **сумму ловцу** (`Habit.catcher_amount_kopecks`,
+>   целое число копеек). Никаких процентов, только число.
+> - При поимке: штраф делится на 2 части → **часть в призовой фонд клуба** +
+>   **часть на депозит ловца** (`User.deposit_balance`)
+> - Пример: штраф 300₽ (30000 коп), `catcher_amount_kopecks=10000` (100₽) → 200₽ в фонд, 100₽ ловцу
+> - Пример: штраф 500₽ (50000 коп), `catcher_amount_kopecks=20000` (200�) → 300₽ в фонд, 200₽ ловцу
+> - Если `catcher_amount_kopecks >= penalty_amount` → всё ловцу, фонд=0
+> - Если `catcher_amount_kopecks=0` → всё в фонд (старое поведение, для обратной совместимости)
+>
+> **Депозит — единственный реальный счёт.** С него в будущем будут выводить средства.
+>
+> **Призовой фонд в конце сезона** теперь **зачисляется на депозит победителям**
+> (а не остаётся "внешним долгом"): топ-5 получают свою долю (35/25/20/12/8%)
+> прямо на `User.deposit_balance`.
+>
+> **`suspicious_pairs` (variant A, подтверждено Дмитрием 2026-08-21):**
+> в текущей модели сговор **финансово невыгоден** (оба теряют деньги), поэтому
+> suspicious_pairs **НЕ блокирует деньги** — деньги списываются/зачисляются как обычно.
+> Но портит лидерборды (фейковые поимки раздувают `catches_count`), поэтому
+> suspicious_pairs пишет флаг `Penalty.is_suspicious_pair=true` — лидерборд фильтрует
+> flagged пары из метрик. Логика: `suspicious_repo.lookup_flagged()` всё ещё вызывается
+> в `apply_catch`, но результат идёт ТОЛЬКО в `is_suspicious_pair` (boolean), не влияет на суммы.
+>
+> **Полный отказ от виртуальных бонусов:**
+> - Удалить `User.bonus_points`, `User.bonus_points_updated_at`
+> - Удалить `Membership.bonus_points`
+> - Удалить `Penalty.catcher_bonus_points`, `Penalty.bonus_applied`
+> - Удалить модель `BonusRule` + `bonus_rule_repository.py`
+> - Удалить `apps/backend/app/services/bonus_service.py` целиком
+> - Удалить worker tasks: `apply_catch_bonus.py`, `expire_bonus_points.py`,
+>   `integrity_check_bonus_transactions.py`
+> - Удалить транзакции `TransactionType.BONUS_CATCH`, `BONUS_SUBSCRIPTION`,
+>   `BONUS_POINTS`
+> - Удалить константы `CATCHER_BONUS_POINTS`, `BONUS_POINTS_EXPIRY_*`, `FUND_SHARE`
+> - Удалить `_TASK_NAMES["apply_catch_bonus"]` в celery_producer.py
+> - Удалить фронт: `bonus_points` в types/index.ts, BONUS_* в format.ts
+> - Удалить тесты: test_apply_catch_bonus.py, test_expire_bonus_points.py,
+>   test_integrity_check_bonus_transactions.py
+>
+> **Новый порядок (rebuild 2):**
+> - Phase 1 (REBUILD): Catcher deposit share — новая механика штрафов (2-3 дня)
+> - Phase 2 (UPDATE): Призы на депозит победителей (3-4 дня, добавлено зачисление)
+> - Phase 3: Character & Stats (2-3 нед) — без изменений
+> - Phase 4 хвост: UI персонажа (1-2 дня) — без изменений
+> - Phase 5: Техдолг (1-2 дня) — без изменений
+> - **Phase 8 (NEW): Cleanup bonus — удаление старой бонусной механики (1-2 дня)**
+> - Phase 6, Phase 7 — без изменений
+>
+> Суммарно: ~5-6 недель, как и было, но Phase 1 теперь 2-3 дня вместо 3-4 ч
+> (добавилась миграция + рефактор `apply_catch` + новые транзакции + admin поле).
+
 ---
 
 ## 0. TL;DR
 
-| Фаза | Что | Задач | Время | Блокирует прод? |
-|---|---|---|---|---|
-| **0** | Закрыть финансовую дыру | 1 | 30 мин | нет (0₽ в обороте), но при первом юзере стрельнёт |
-| **1** | Bonus wiring (`apply_catch_bonus`) | 3 | 1-2 дня | нет, но лидерборд мёртвый |
-| **2** | Призовой фонд (seasons enable) | 4 | 1 неделя | нет (сезонов нет) |
-| **3** | Character & Stats (Фаза B из TZ) | 11 | 2-3 недели | нет, но это центральная фича ТЗ |
-| **4** | Frontend (страницы + персонаж) | 10 | 3-5 дней | да — без UI продукт не работает |
-| **5** | Техдолг (admin, hardening) | 6 | 1-2 дня | нет |
-| **6** | Deploy & Production | 4 | по 1 дню | нет (для soft-launch) |
-| **7** | Growth (партнёрка, рефералка) | 3 | 2-3 недели | нет, но без роста нет пользователей |
+| Фаза | Что | Задач | Время | Блокирует прод? | Порядок |
+|---|---|---|---|---|---|
+| **0** | Закрыть финансовую дыру | — | — | ✅ уже закрыт (`9c32d6f`) | — |
+| **1** | **Catcher deposit share** (бывш. Bonus wiring) | 5 | **2-3 дня** (было 3-4 ч) | нет, но лидерборд мёртвый | **🔜 первый** |
+| **2** | Призовой фонд на депозит (seasons enable + prize → deposit) | 4 | **3-4 дня** (было 1 нед) | нет (сезонов нет) | **после Phase 3** |
+| **3** | Character & Stats (Фаза B из TZ) | 12 | 2-3 недели | нет, но это центральная фича ТЗ | **🎯 главный** |
+| **4** | Frontend (страницы + персонаж) | **4** (было 11) | **1-2 дня** хвоста (было 3-5) | нет — хвост за Phase 3 | параллельно Phase 3 |
+| **5** | Техдолг (admin, hardening) | 6 | 1-2 дня | нет | после Phase 2 |
+| **6** | Deploy & Production | 4 | по 1 дню | нет (для soft-launch) | после Phase 5 |
+| **7** | Growth (партнёрка, рефералка) | 3 | 2-3 недели | нет, но без роста нет пользователей | последний |
+| **8** | **Cleanup bonus** (NEW) | 7 | **1-2 дня** | нет | **после Phase 1** |
 
-**После всех 7 фаз (5-6 недель) — полноценный рабочий продукт.**
+**После всех 8 фаз (5-6 недель) — полноценный рабочий продукт.**
+
+**Изменённый порядок (rebuild 2 от 2026-08-21):**
+Phase 1 (Catcher deposit share) → **Phase 8 (Cleanup bonus)** → Phase 3 + хвост Phase 4 параллельно → Phase 2 (призы → депозит) → Phase 5 → Phase 6 → Phase 7.
 
 ---
 
@@ -58,10 +147,10 @@
 1. ✅ Юзер вступает в клуб (`POST /api/v1/habits/{id}/join` через Mini App)
 2. ✅ Платит подписку + депозит одним платежом (`POST /api/v1/payments/subscribe`)
 3. ✅ Делает чек-ин с доказательством (видео-кружок / фото / текст) через бот
-4. ✅ При пропуске — штраф в общий призовой фонд клуба (`Habit.prize_pool`)
-5. ✅ Другой участник может «поймать» нарушителя за бонус (`POST /api/v1/members/{id}/catch`)
-6. ❌ В конце сезона — топ-5 получают призы (5/250/20/12/8% от фонда) — **НЕ РАБОТАЕТ** (см. #2)
-7. ❌ Лидерборд по очкам ловцов — **НЕ РАБОТАЕТ** (см. #1)
+4. ✅ При пропуске — штраф делится на 2 части: **часть в призовой фонд клуба** (`Habit.prize_pool`) + **часть на депозит ловца** (`User.deposit_balance`). Пропорция задаётся админом клуба.
+5. ✅ Другой участник может «поймать» нарушителя и получить **реальные деньги на свой депозит** (`POST /api/v1/members/{id}/catch`)
+6. ❌ В конце сезона — топ-5 получают призы (35/25/20/12/8% от фонда) **на свой депозит** — **НЕ РАБОТАЕТ** (см. #2)
+7. ✅ Лидерборд по количеству поимок (catches_count) — работает, но без денежного выхлопа
 
 ### 1.2 Геймификация (Фаза B)
 1. ❌ Характеристика растёт при чек-ине, падает при штрафе (отдельная ось, не рубли)
@@ -71,12 +160,18 @@
 5. ❌ Экран «Мой персонаж» с карточками статуса
 
 ### 1.3 Frontend
-- ❌ Marketplace, Today, Members, Balance, Leaderboard, Profile, Onboarding — **API endpoints есть, страницы не подключены**
+- ✅ Marketplace, Today, Members, Balance, Profile, Leaderboard, Onboarding — **уже подключены через хуки** (`useMarketplace/useToday/useMembers/useCatch/useBalance/useWallet/useLeaderboard/useMyHabits/useHabitSse` из `@/shared/hooks`). Snapshot 2026-08-21: проверено `grep` по `apps/frontend/src/pages/*/*.tsx`
+- ❌ `CharacterPage` (экран «Мой персонаж») — не сделан, зависит от Phase 3 (`GET /character/me`)
+- ❌ Таб «📊 Характеристика» в Leaderboard — зависит от Phase 3 (`GET /leaderboard/stat`)
+- ❌ `LevelUpToast` — зависит от Phase 3
+- ❌ Баннер «Характеристика заморожена» — зависит от Phase 3 (`is_frozen` в `GET /character/me`)
 
-### 1.4 Финансы (по `4_finansovaya_mehanika`)
-- Вход 1000₽/мес, штраф 250₽, депозит 750-1000₽
-- 5 призовых мест (35/25/20/12/8%)
-- Lava.top / Tribute для выплат
+### 1.4 Финансы (по `4_finansovaya_mehanika` + продуктовое решение 2026-08-21)
+- Вход 1000₽/мес, штраф настраивается админом (например 250₽), депозит 750-1000₽
+- **Штраф делится** на 2 части: в призовой фонд клуба + на депозит ловца (пропорция задаётся админом)
+- 5 призовых мест (35/25/20/12/8%) — **зачисляются на депозит победителя** (не внешний долг)
+- Депозит — единственный реальный счёт, с него в будущем выводят средства (Lava.top / Tribute / СБП)
+- ❌ **Виртуальные bonus_points полностью удаляются** (snapshot 2026-08-21)
 - Налоги: < 4000₽/год на человека = без декларации
 
 ---
@@ -116,14 +211,28 @@
 | # | Что | Severity | Источник | Статус |
 |---|---|---|---|---|
 | A | **#17** `apply_catch` deposit=0 без WAIVED-маркера (прямая финансовая) | 🔴 | recon | **✅ УЖЕ ЗАКРЫТ** — `commit 9c32d6f` (Pravki-no-deposit-waived-marker) + идемпотентность `apply_catch` на ЛЮБУЮ `Penalty` за день (комментарий `penalty_service.py:165-180`). Задача Task 0.1 в плане — **дубликат** |
-| B | **#1** `apply_catch_bonus` не вызывается в проде (лидерборд мёртвый) | 🟠 | recon | ✅ Подтверждено: нет в `_TASK_NAMES`, нет `send_task` в `process_penalty`. Tasks 1.1+1.2 актуальны |
-| C | **#2** `Season.prize_pool` не пишется (призовой фонд не распределяется) | 🟠 | recon | ✅ Подтверждено: `start_season` нигде не вызывается, admin endpoint `/seasons` отсутствует. Tasks 2.1+2.2 актуальны |
+| B | **#1** `apply_catch_bonus` не вызывается в проде (лидерборд мёртвый) | � | recon | ⚠️ **STALE 2026-08-21 (product-changes)**: вся бонусная механика уходит. Заменяется на **catcher deposit share** (Phase 1 REBUILD): ловец получает реальные деньги на депозит, не `bonus_points`. `apply_catch_bonus` task БУДЕТ УДАЛЁН в Phase 8 |
+| C | **#2** `Season.prize_pool` не пишется (призовой фонд не распределяется) | 🟠 | recon | ✅ Подтверждено: `start_season` нигде не вызывается, admin endpoint `/seasons` отсутствует. **Snapshot 2026-08-21 (product):** призы теперь идут на депозит победителя, не "внешним долгом". Tasks 2.1+2.2+2.5 (NEW: prize → deposit) актуальны |
 | D | **Фаза B (TZ):** user_stats, user_statuses, increment/decrement, freeze worker, эндпоинты, frontend | 🟠 | TZ | ✅ Подтверждено: моделей, репозиториев, CharacterService, worker — нет. Фаза 3 полностью актуальна |
 | ~~E~~ | ~~Frontend не подключен к API (7 страниц)~~ | — | — | **❌ STALE** — фронт **уже подключен** через хуки `useMarketplace/useToday/useMembers/useCatch/useBalance/useWallet/useLeaderboard/useHabitSse/useMyHabits`. Удаляю из gap-списка |
 | F | Admin техдолг (TD-1..TD-4) | 🟡 | recon | ✅ Подтверждено: TD-1 (нет метода в HabitService), TD-2 (нет asyncio.Lock), TD-4 (нет test_chat_preview/test_chat_member.py) — всё актуально |
-| G | 9 устаревших production-комментариев | 🟢 | prod-readiness §3 | ⚠️ Неточно: реально **10 вхождений** (`grep -nE "apply_window_expired\|WINDOW_CLOSED_NO_CATCH"` в `penalty_service.py` + `checkin_service.py`). Масштаб чуть больше |
+| G | 10 устаревших production-комментариев | 🟢 | prod-readiness §3 | ⚠️ Неточно (snapshot 2026-08-21): реально **14 строк** (`grep -rnE "apply_window_expired\|WINDOW_CLOSED_NO_CATCH"` в `services/`+`api/`+`repositories/`+`schemas/`+`core/`, без `__pycache__`). Масштаб чуть больше |
 
-**Всё разложено по фазам ниже.~~Phase 4 (Frontend) была не блокером — пересмотрен приоритет.~~**
+**Всё разложено по фазам ниже. Phase 4 (Frontend) — не блокер; пересмотрен приоритет (см. Snapshot 2026-08-21 в начале документа).**
+
+> **Snapshot 2026-08-21 — что подтверждено в этом gap-списке:**
+>
+> | # | Что подтверждено | Как проверено |
+> |---|---|---|
+> | B | `apply_catch_bonus` нет в `_TASK_NAMES` | `Read celery_producer.py:21-35` |
+> | B | `send_task("apply_catch_bonus")` нет в `process_penalty` | `grep "apply_catch_bonus\|send_task" apps/worker/worker/tasks/process_penalty.py` — 0 совпадений |
+> | B | worker task `apply_catch_bonus` СУЩЕСТВУЕТ | `ls apps/worker/worker/tasks/` |
+> | C | `season_service.py` существует, `start_season`/`close_season` готовы | `Read season_service.py` (207 строк) |
+> | C | `SeasonRepository` НЕ существует | `ls apps/backend/app/repositories/` |
+> | C | `apply_catch` НЕ инкрементит `Season.prize_pool` | `grep "Season\|season_repo" apps/backend/app/services/penalty_service.py` |
+> | C | Admin endpoint `/admin/v1/habits/{id}/seasons` НЕ существует | `ls apps/backend/app/api/admin/v1/` |
+> | D | `CharacterService`/`CharacterConfig`/`UserStats`/`UserStatus` — нет | `ls apps/backend/app/services/`, `ls apps/backend/app/models/` |
+> | F | TD-1/TD-2/TD-4 — подтверждено (не проверял детально, верификация 2026-08-20) | — |
 
 ---
 
@@ -148,92 +257,259 @@
 
 ---
 
-# Фаза 1 — Bonus wiring (Sprint 1, 1-2 дня)
+# Фаза 1 — Catcher deposit share (бывш. Bonus wiring, REBUILD 2026-08-21)
 
-**Цель:** ловцы получают обещанные бонусные баллы. Лидерборд «Охотники» начинает работать.
+**Цель:** ловец получает **реальные деньги на свой депозит** (а не виртуальные `bonus_points`).
+Пропорция штрафа → ловцу настраивается админом клуба.
 
-## Task 1.1: зарегистрировать `apply_catch_bonus` в `_TASK_NAMES`
+> **⚠️ REBUILD 2026-08-21 (product-changes).** Старая Phase 1 (Bonus wiring) **полностью
+> заменяется**. Виртуальные bonus_points больше не используются. Вместо этого — реальные
+> деньги на депозит. После Phase 1 старая бонусная механика удаляется в **Phase 8 (Cleanup)**.
 
-**Приоритет:** 🟠 High (лидерборд мёртвый).
-**Время:** 5 мин.
-**Зависимости:** нет.
-**Файл:** `apps/backend/app/services/celery_producer.py:21-35`
+**Контракт:**
+- Админ клуба при создании/настройке указывает `catcher_amount_kopecks` (целое число копеек)
+- Пример: штраф 300₽, `catcher_amount_kopecks=10000` (100₽) → 200₽ в фонд + 100₽ ловцу
+- Пример: штраф 500₽, `catcher_amount_kopecks=20000` (200₽) → 300₽ в фонд + 200₽ ловцу
+- Деньги списываются с депозита нарушителя одной транзакцией, делятся на 2 части
+- **Одна транзакция** под user-lock'ами ОБОИХ user'ов (lock по возрастанию user_id — избежание deadlock'а)
+- Антифрод (variant A, подтверждено Дмитрием 2026-08-21): `suspicious_pairs` (см. `SUSPICIOUS_ASYMMETRY_THRESHOLD = 3`) — НЕ блокирует деньги (сговор финансово невыгоден в текущей модели), но пишет флаг `Penalty.is_suspicious_pair=true` для лидерборда (метрики фейковых поимок фильтруются).
+
+## Task 1.1: миграция 016 — `Habit.catcher_amount_kopecks` + новая транзакция `CATCHER_DEPOSIT`
+
+**Файл:** новый `apps/backend/alembic/versions/016_habit_catcher_amount.py` (revises `015`)
 
 ### Что сделать
 
-Добавить в `_TASK_NAMES`:
+```sql
+-- 1. Добавить поле в habits (фиксированная сумма в копейках, не процент!)
+ALTER TABLE habits ADD COLUMN catcher_amount_kopecks INTEGER NOT NULL DEFAULT 0
+  CHECK (catcher_amount_kopecks >= 0);
+
+-- 2. Значение для существующих клубов = 0 (старое поведение "100% в фонд")
+-- (DEFAULT 0 уже покрывает)
+
+-- 3. Enum для TransactionType (если используется PostgreSQL ENUM):
+--   ALTER TYPE transaction_type ADD VALUE IF NOT EXISTS 'catcher_deposit';
+-- Или, если используется VARCHAR + CHECK — просто добавить в app-side enum.
+-- Проверить по apps/backend/app/core/constants.py:TransactionType.
+```
+
+> **Snapshot 2026-08-21:** миграция **НЕ** удаляет `bonus_points`/`bonus_applied`/etc —
+> это делает Phase 8. Здесь только ADDITIVE changes (новое поле, новая транзакция).
+
+### Критерий «готово»
+- [ ] `make migrate-test` (upgrade → downgrade → upgrade) проходит
+- [ ] `SELECT catcher_amount_kopecks FROM habits` на проде даёт 0 для всех 3 клубов
+- [ ] `TransactionType.CATCHER_DEPOSIT` импортируется из constants
+
+## Task 1.2: модель `Habit.catcher_amount_kopecks` + константы
+
+**Файл:** `apps/backend/app/models/habit.py` (добавить поле) + `apps/backend/app/core/constants.py`
+
+### Что сделать
+
+В `habit.py`:
 ```python
-_TASK_NAMES: dict[str, str] = {
-    "checkin": "worker.tasks.process_checkin.run",
-    "penalty": "worker.tasks.process_penalty.run",
-    "payment": "worker.tasks.process_payment.run",
-    "publish_catch_event": "worker.tasks.publish_catch_event.run",
-    "publish_you_were_caught": "worker.tasks.publish_you_were_caught.run",
-    "apply_catch_bonus": "worker.tasks.apply_catch_bonus.run",  # ← ДОБАВИТЬ
-}
+catcher_amount_kopecks: Mapped[int] = mapped_column(
+    Integer, nullable=False, server_default="0"
+)
+```
+
+В `constants.py`:
+```python
+class TransactionType(StrEnum):
+    SUBSCRIPTION = "subscription"
+    DEPOSIT_TOPUP = "deposit_topup"
+    DEPOSIT_WITHDRAW = "deposit_withdraw"
+    PENALTY = "penalty"
+    PRIZE = "prize"
+    CATCHER_DEPOSIT = "catcher_deposit"  # ← НОВОЕ
+
+# Удалить в Phase 8: BONUS_CATCH, BONUS_SUBSCRIPTION, BONUS_POINTS
+```
+
+В `constants.py` `PenaltyConfig`:
+```python
+# Сумма ловцу (фиксированная, в копейках). Задаётся в Habit.catcher_amount_kopecks.
+# 0 = всё в фонд (старое поведение, для обратной совместимости).
+# Валдация в Pydantic-схеме admin endpoint (ge=0), на уровне SQL — только >= 0.
+# Нет MAX — если catcher_amount_kopecks >= penalty_amount, всё уходит ловцу (фонд=0).
+# Нет антифрод-константы — suspicious_pairs (см. SUSPICIOUS_ASYMMETRY_THRESHOLD = 3)
+# логика остаётся как была, но используется ТОЛЬКО для метки `is_suspicious_pair`
+# в Penalty (variant A, см. Task 1.3). Деньги НЕ блокируются.
+
+# В Phase 8 УДАЛИТЬ: CATCHER_BONUS_POINTS, FUND_SHARE, BONUS_POINTS_EXPIRY_*
 ```
 
 ### Критерий «готово»
-- [ ] Импорт `worker.tasks.apply_catch_bonus` не падает (worker этот task уже существует)
-- [ ] `send_task("apply_catch_bonus", {...})` корректно сериализует имя
+- [ ] `Habit.catcher_amount_kopecks` доступен в коде, default=0
+- [ ] `TransactionType.CATCHER_DEPOSIT` импортируется
+- [ ] Существующие тесты не сломались
 
-## Task 1.2: `send_task("apply_catch_bonus", ...)` в `process_penalty`
+## Task 1.3: рефактор `PenaltyService.apply_catch` — разделение штрафа
 
-**Файл:** `apps/worker/worker/tasks/process_penalty.py` (после успешного `apply_catch`).
+**Файл:** `apps/backend/app/services/penalty_service.py:78-274`
 
 ### Что сделать
 
-В прод-обёртке `run()` после успешного `apply_catch` (там где уже есть `publish_catch_event` / `publish_you_were_caught`):
+Заменить текущий блок (lines 197-274 — списание + prize_pool + bonus_points) на новую логику:
+
 ```python
-# После apply_catch успеха:
-try:
-    celery_producer.send_task(
-        "apply_catch_bonus",
-        payload={
-            "catcher_membership_id": str(catcher_membership_id),
-            "violator_membership_id": str(violator_membership_id),
-            "penalty_id": str(penalty_id),
-        },
+# === БЫЛО (старый код, snapshot 2026-08-21): ===
+# violator_user.deposit_balance -= amount
+# await self._habit_repo.add_to_prize_pool(str(habit.id), amount)
+# grant_catcher_bonus = not await self._suspicious_repo.lookup_flagged(...)
+# penalty = Penalty(
+#     ...,
+#     catcher_bonus_points=PenaltyConfig.CATCHER_BONUS_POINTS if grant_catcher_bonus else 0,
+#     ...
+#     bonus_applied=False,
+# )
+
+# === СТАЛО (catcher deposit share): ===
+# Расчёт долей (целочисленная арифметика, никакого float)
+# penalty_amount — фиксированный штраф из Habit.penalty_amount (копейки)
+# catcher_amount_kopecks — фиксированная сумма ловцу из Habit.catcher_amount_kopecks (копейки)
+# Сумма долей точно = penalty_amount (без остатка):
+#   catcher_amount + fund_amount = penalty_amount
+catcher_amount = min(habit.catcher_amount_kopecks, penalty_amount)
+fund_amount = penalty_amount - catcher_amount  # остаток в фонд
+
+# Списание с депозита нарушителя — одной суммой
+violator_user.deposit_balance -= penalty_amount
+if violator_user.deposit_balance < 0:
+    violator_user.deposit_balance = 0  # защита от перерасхода (WAIVED-логика)
+
+# Lock catcher user под единой транзакцией
+# Порядок lock'ов: ASC по user_id — избежание deadlock'а с другими catch'ами
+# (захватываем ОБА lock'а ДО логики, см. Lock-порядок ниже)
+catcher_user = None
+if catcher_amount > 0 and catcher_membership_id is not None:
+    from app.repositories.user_repository import UserRepository
+    catcher_user_obj = await self._user_repo.get(catcher_user_id)
+    if catcher_user_obj is not None:
+        catcher_user = catcher_user_obj
+
+# Зачисление ловцу (если есть доля)
+if catcher_amount > 0 and catcher_user is not None:
+    catcher_user.deposit_balance += catcher_amount
+    # Transaction для истории (audit)
+    catcher_tx = Transaction(
+        id=str(uuid4()),
+        user_id=catcher_user.id,
+        type=TransactionType.CATCHER_DEPOSIT.value,
+        amount=+catcher_amount,
+        balance_after=catcher_user.deposit_balance,
+        related_penalty_id=penalty.id,
+        related_membership_id=catcher_membership_id,
     )
-    log.info("catch_bonus_dispatched", extra={...})
-except Exception as exc:
-    log.exception("catch_bonus_dispatch_failed", extra={"err": str(exc)})
-    # НЕ raise — основной поток не должен ломаться
+    self._session.add(catcher_tx)
+
+# В призовой фонд клуба
+if fund_amount > 0:
+    await self._habit_repo.add_to_prize_pool(str(habit.id), fund_amount)
+
+# Suspicious pair — ТОЛЬКО МЕТРИКА для лидерборда (snapshot 2026-08-21, вариант A).
+# Деньги НЕ блокируются: сговор финансово невыгоден (оба теряют деньги в текущей модели),
+# но портит лидерборды — нужна метка для фильтрации фейковых поимок.
+is_suspicious_pair = await self._suspicious_repo.lookup_flagged(
+    catcher_membership_id, violator_membership_id
+)
+
+penalty = Penalty(
+    id=str(uuid4()),
+    membership_id=violator_membership_id,
+    catcher_membership_id=catcher_membership_id,  # ВСЕГДА пишем (для истории)
+    amount=penalty_amount,            # полная сумма штрафа
+    catcher_amount=catcher_amount,    # ← НОВОЕ ПОЛЕ: сколько ушло ловцу
+    fund_amount=fund_amount,          # ← НОВОЕ ПОЛЕ: сколько ушло в фонд
+    is_suspicious_pair=is_suspicious_pair,  # ← НОВОЕ ПОЛЕ: для лидерборда
+    reason=PenaltyReason.CAUGHT,
+    date=club_date,
+)
+# В Phase 8 УДАЛИТЬ: catcher_bonus_points, bonus_applied
 ```
 
-**Важно:** отдельный try/except (как для `publish_catch_event` / `publish_you_were_caught`), чтобы сбой bonus-таска не ломал основной поток.
+> **Snapshot 2026-08-21 (variant A):** в Phase 1 Penalty МОЖЕТ сохранить `catcher_bonus_points`/`bonus_applied`
+> как deprecated поля (default=0, false) — для обратной совместимости с существующими данными.
+> Полное удаление — Phase 8.
+
+### Lock-порядок (важно!)
+
+Чтобы избежать deadlock при параллельных catch'ах разных юзеров:
+```python
+# Сортируем user_ids и lock'аем в ASC порядке
+# ВАЖНО: catcher_membership_id может быть None (если бот ловит анонимно)
+# — тогда лочим только violator_user (старое поведение)
+user_ids_to_lock = sorted([violator.user_id, catcher_user_id]) if catcher_user_id else [violator.user_id]
+for uid in user_ids_to_lock:
+    await self._user_repo.lock_for_update(uid)
+```
 
 ### Критерий «готово»
-- [ ] После успешного `apply_catch` в логах worker видно `catch_bonus_dispatched`
-- [ ] При сбое bonus-таска остальной поток (`publish_*`) не ломается
+- [ ] `apply_catch` делит штраф на 2 части по `catcher_amount_kopecks`
+- [ ] Если `catcher_amount_kopecks=0` → `catcher_amount=0`, всё в фонд (старое поведение)
+- [ ] Если `catcher_amount_kopecks >= penalty_amount` → `catcher_amount=penalty_amount`, фонд=0
+- [ ] **suspicious_pairs НЕ блокирует деньги** (variant A) — флаг только для лидерборда
+- [ ] Под unit-тестами: `catcher_amount_kopecks = 0, 10000, 20000, 30000` (0₽, 100₽, 200₽, 300₽)
+- [ ] Депозит ЛОВЦА инкрементится в той же транзакции
+- [ ] Lock'и захватываются в ASC user_id порядке (deadlock-free)
+- [ ] `Penalty.catcher_amount`, `Penalty.fund_amount`, `Penalty.is_suspicious_pair` заполняются
+- [ ] Тест на race: 2 параллельных catch'а разных жертв от одного ловца не deadlock'ят
 
-## Task 1.3: e2e-тест через broker (НЕ прямой импорт!)
+## Task 1.4: миграция 017 — `Penalty.catcher_amount` + `fund_amount` + `is_suspicious_pair`
 
-> **⚠️ Snapshot 2026-08-20.** Текущий тест `apps/worker/tests/test_apply_catch_bonus.py`
-> использует **прямой импорт `_process`** (строки 20, 71, 118) — это именно то,
-> что recon'овская находка #1 помечала как **вводящее в заблуждение** ("выглядит
-> как доказательство работы цепочки, но это не оно").
-
-**Файл:** ~~новый `apps/worker/tests/test_apply_catch_bonus_e2e.py`~~ → **переписать** существующий `apps/worker/tests/test_apply_catch_bonus.py`
+**Файл:** новый `apps/backend/alembic/versions/017_penalty_split_columns.py` (revises `016`)
 
 ### Что сделать
 
-Тест должен **НЕ** вызывать `_process` напрямую, а реально проходить через broker:
-```python
-@pytest.mark.asyncio
-async def test_apply_catch_bonus_dispatched_via_broker():
-    """Bonus начисляется через broker, не через прямой вызов."""
-    # 1. Запустить celery_app.apply_async с task_name="apply_catch_bonus"
-    # 2. Дождаться результата (через result.get(timeout=5))
-    # 3. Проверить: User.bonus_points += 1, Transaction(type=BONUS_CATCH) создан
+```sql
+ALTER TABLE penalties
+  ADD COLUMN catcher_amount INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN fund_amount INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN is_suspicious_pair BOOLEAN NOT NULL DEFAULT false;
+
+-- Backfill для существующих penalties (на проде их 0, но на всякий случай):
+UPDATE penalties
+SET catcher_amount = 0,
+    fund_amount = amount,
+    is_suspicious_pair = false
+WHERE catcher_amount = 0 AND fund_amount = 0;
 ```
 
-**Подробный паттерн:** см. `apps/worker/tests/test_worker_cron_chain.py` — но **через broker**, не через `_process`.
+> **Phase 8 (cleanup):** DROP COLUMN `catcher_bonus_points`, `bonus_applied` — отдельной миграцией.
 
 ### Критерий «готово»
-- [ ] Тест проходит локально
-- [ ] Тест **падает** если закомментировать `send_task` в `process_penalty` (регрессия)
-- [ ] CI зелёный
+- [ ] `make migrate-test` проходит
+- [ ] Существующие penalties имеют `catcher_amount=0, fund_amount=amount, is_suspicious_pair=false` (backfill)
+
+## Task 1.5: admin endpoint — поле `catcher_amount_kopecks` в create/update клуба
+
+**Файл:** `apps/backend/app/api/admin/v1/habits.py` (расширить `AdminHabitCreate`/`AdminHabitUpdate`)
+
+### Что сделать
+
+```python
+class AdminHabitCreateRequest(BaseModel):
+    ...  # существующие поля
+    catcher_amount_kopecks: int = Field(
+        default=0,
+        ge=0,
+        description="Сумма ловцу от штрафа в копейках. "
+                    "0 = всё в призовой фонд (старое поведение). "
+                    "Примеры: 10000 = 100₽ ловцу, 20000 = 200₽ ловцу. "
+                    "Если catcher_amount_kopecks >= penalty_amount → всё ловцу, фонд=0."
+    )
+```
+
+Передать в `HabitService.create_habit`/`update_habit`. Сохранить в `Habit.catcher_amount_kopecks`.
+
+### Критерий «готово»
+- [ ] POST /admin/v1/habits принимает `catcher_amount_kopecks` (валидация `ge=0`)
+- [ ] PATCH /admin/v1/habits/{id} обновляет `catcher_amount_kopecks`
+- [ ] GET /admin/v1/habits/{id} возвращает `catcher_amount_kopecks`
+- [ ] Тест: создание клуба с `penalty_amount=30000, catcher_amount_kopecks=10000` →
+        в БД 30000 и 10000
 
 ---
 
@@ -249,21 +525,24 @@ async def test_apply_catch_bonus_dispatched_via_broker():
 
 ### Что сделать
 
-В `apply_catch` (после `add_to_prize_pool`) — **дополнительно** инкрементить `Season.prize_pool` текущего активного сезона:
+В `apply_catch` (после `add_to_prize_pool` / в новом рефакторе Phase 1 Task 1.3) — **дополнительно** инкрементить `Season.prize_pool` текущего активного сезона:
 ```python
 # В apply_catch после add_to_prize_pool:
 active_season = await self._season_repo.get_active_for_habit(habit.id, club_date)
 if active_season is not None:
-    await self._season_repo.add_to_prize_pool(active_season.id, amount)
+    await self._season_repo.add_to_prize_pool(active_season.id, fund_amount)  # ← ТОЛЬКО fund_amount, не penalty_amount
 ```
+
+> **Snapshot 2026-08-21 (product):** В `Season.prize_pool` пишется ТОЛЬКО `fund_amount` (доля фонда),
+> НЕ полный `penalty_amount`. Доля ловца (`catcher_amount`) уходит напрямую ловцу, минуя сезон.
 
 ### Что нужно сначала
 - Метод `SeasonRepository.get_active_for_habit(habit_id, club_date)` — найти сезон, у которого `status='active' AND habit_id=:id AND start_at <= :club_date AND end_at >= :club_date`
 - Метод `SeasonRepository.add_to_prize_pool(season_id, amount)` — атомарный инкремент под `FOR UPDATE`
 
 ### Критерий «готово»
-- [ ] Юнит-тест: `apply_catch` инкрементит и `Habit.prize_pool`, и `Season.prize_pool` (если есть активный сезон)
-- [ ] Юнит-тест: если активного сезона нет — `Habit.prize_pool` всё равно инкрементится
+- [ ] Юнит-тест: `apply_catch` инкрементит `Season.prize_pool` НА `fund_amount` (не на полный штраф)
+- [ ] Юнит-тест: если активного сезона нет — `Habit.prize_pool` всё равно инкрементится на `fund_amount`
 - [ ] `SELECT FOR UPDATE` на Season row
 
 ## Task 2.2: admin endpoint `POST /admin/v1/habits/{id}/seasons`
@@ -294,14 +573,18 @@ async def create_season(habit_id: str, payload: AdminSeasonCreateRequest, ...):
 - [ ] GET `/admin/v1/habits/{id}/seasons` возвращает список
 - [ ] Admin Mini App UI: форма создания сезона (опционально, можно позже)
 
-## Task 2.3: `close_season` распределяет по 5 местам (35/25/20/12/8%)
+## Task 2.3: `close_season` распределяет по 5 местам (35/25/20/12/8%) + зачисление на депозит победителя
 
 > **⚠️ Snapshot 2026-08-20.** Реальная структура — **гибкая**: `prize_rules_snapshot`
 > это `{"rules": [{"metric": str, "rank_from": int, "rank_to": int, "percentage_bp": int}, ...]}`.
 > Нет хардкода "5 мест". `BASIS_POINTS_TOTAL = 10_000` уже есть, идемпотентность
 > под `FOR UPDATE` уже есть.
 
-**Файл:** `apps/backend/app/services/season_service.py:30-90`
+> **⚠️ Snapshot 2026-08-21 (product).** Призы теперь **зачисляются на `User.deposit_balance`**
+> победителя (а не остаются "внешним долгом"). Это требует lock_for_update на user
+> победителя + обновление `balance_after`.
+
+**Файл:** `apps/backend/app/services/season_service.py:60-122`
 
 ### Что сделать
 
@@ -320,13 +603,42 @@ DEFAULT_PRIZE_RULES = [
 # Сумма = 10000 bp = 100% (без остатка)
 ```
 
-В `close_season` — fallback на `DEFAULT_PRIZE_RULES`, если `prize_rules_snapshot` пуст или None.
+**Дополнительно (snapshot 2026-08-21):** в `close_season` — после расчёта `share` для каждого
+победителя, **зачислить на `User.deposit_balance`** под `lock_for_update`:
+
+```python
+# В SeasonService.close_season, внутри цикла for entry in ranked:
+#   (было: только Transaction(type=PRIZE, amount=share) — бухгалтерская запись)
+# (стало: + инкремент User.deposit_balance под lock'ом)
+from app.repositories.user_repository import UserRepository
+user_repo = UserRepository(self._session)
+
+for entry in ranked:
+    winner_user = await user_repo.lock_for_update(entry["user_id"])
+    winner_user.deposit_balance += share  # ← НОВОЕ: зачисление на депозит
+    
+    tx = Transaction(
+        id=str(uuid4()),
+        user_id=winner_user.id,
+        type=TransactionType.PRIZE.value,
+        amount=+share,  # ← БЫЛО amount=share (положительный уже, не меняем знак)
+        balance_after=winner_user.deposit_balance,  # ← НОВОЕ: для аудита
+        related_membership_id=entry["membership_id"],
+    )
+    self._session.add(tx)
+    distributed += share
+```
+
+> **Важно — deadlock prevention:** в `close_season` победители lock'аются в порядке
+> ASC `user_id` (см. Phase 1 Task 1.3 — тот же контраст с `apply_catch`).
 
 ### Критерий «готово»
-- [ ] Юнит-тест: `close_season` для фонда 15 000₽ + DEFAULT правила → 1 место 5250₽, 2 место 3750₽, 3 место 3000₽, 4 место 1800₽, 5 место 1200�
+- [ ] Юнит-тест: `close_season` для фонда 15 000₽ + DEFAULT правила → 1 место 5250₽, 2 место 3750₽, 3 место 3000�, 4 место 1800₽, 5 место 1200₽
+- [ ] **Юнит-тест (NEW):** `winner_user.deposit_balance` инкрементится на свою долю
+- [ ] **Юнит-тест (NEW):** `Transaction(type=PRIZE, amount=+share, balance_after=...)` создаётся
 - [ ] Юнит-тест: пустой фонд → 0 выплат (или по сценарию rollover)
 - [ ] Юнит-тест: кастомные правила в `prize_rules_snapshot` (например, 3 места 50/30/20) — применяются вместо дефолтных
-- [ ] `Transaction(type=PRIZE)` создаётся для каждого победителя
+- [ ] Lock'и в ASC user_id порядке (deadlock-free для параллельных close_season разных клубов)
 
 ## Task 2.4: e2e для seasons через broker
 
@@ -970,6 +1282,153 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 ---
 
+# Фаза 8 — Cleanup bonus (NEW 2026-08-21, 1-2 дня)
+
+**Цель:** полностью удалить старую бонусную механику (`bonus_points`, `BonusService`,
+`apply_catch_bonus` task, `BonusRule` и связанные транзакции). Phase 1 (catcher deposit share)
+уже работает — теперь чистим то, что осталось.
+
+> **⚠️ Snapshot 2026-08-21 (product-changes).** Phase 8 добавлена после решения
+> Дмитрия полностью отказаться от виртуальных бонусов. Phase 8 идёт **сразу после Phase 1**
+> (catcher deposit share), ДО Phase 3. Логика: новая механика работает → старая удаляется,
+> → чистая кодовая база для Phase 3 (Character & Stats).
+
+## Task 8.1: миграция 018 — DROP bonus columns + DROP bonus_rules таблица
+
+**Файл:** новый `apps/backend/alembic/versions/018_drop_bonus_mechanics.py` (revises `017`)
+
+### Что сделать
+
+```sql
+-- 1. DROP COLUMNs в users
+ALTER TABLE users DROP COLUMN bonus_points;
+ALTER TABLE users DROP COLUMN bonus_points_updated_at;
+
+-- 2. DROP COLUMNs в memberships
+ALTER TABLE memberships DROP COLUMN bonus_points;
+
+-- 3. DROP COLUMNs в penalties
+ALTER TABLE penalties DROP COLUMN catcher_bonus_points;
+ALTER TABLE penalties DROP COLUMN bonus_applied;
+
+-- 4. DROP TABLE bonus_rules (если больше никто не ссылается)
+DROP TABLE IF EXISTS bonus_rules;
+
+-- 5. DROP TYPE для TransactionType (если PostgreSQL ENUM):
+--   ALTER TYPE transaction_type DROP VALUE 'bonus_catch';
+--   ALTER TYPE transaction_type DROP VALUE 'bonus_subscription';
+--   ALTER TYPE transaction_type DROP VALUE 'bonus_points';
+-- (или оставить значения в VARCHAR — безвредно для старых транзакций в истории)
+```
+
+> **Snapshot 2026-08-21:** на проде сейчас 4 транзакции, все типа SUBSCRIPTION/DEPOSIT_TOPUP.
+> Никаких `bonus_catch`/`bonus_subscription`/`bonus_points` транзакций в проде нет
+> (потому что #1 не закрыт, `apply_catch_bonus` не вызывается). DROP безопасен.
+
+### Критерий «готово»
+- [ ] `make migrate-test` проходит (upgrade → downgrade → upgrade)
+- [ ] На проде: `\d users` не показывает `bonus_points`
+- [ ] На проде: `\d penalties` не показывает `catcher_bonus_points`/`bonus_applied`
+- [ ] На проде: `\dt bonus_rules` → "did not find any relation"
+
+## Task 8.2: удалить `BonusService` + `BonusRuleRepository`
+
+**Файлы:**
+- `apps/backend/app/services/bonus_service.py` → **DELETE**
+- `apps/backend/app/repositories/bonus_rule_repository.py` → **DELETE**
+- `apps/backend/app/models/auxiliary.py` — **удалить класс `BonusRule` (lines 53-62)**
+- `apps/backend/app/core/constants.py` — **удалить `TransactionType.BONUS_*`** (3 значения) +
+  **удалить `PenaltyConfig.CATCHER_BONUS_POINTS`**, `PenaltyConfig.FUND_SHARE`,
+  `PenaltyConfig.BONUS_POINTS_EXPIRY_*`
+
+### Критерий «готово»
+- [ ] `grep -rn "bonus_service\|BonusService\|bonus_rule_repository\|BonusRuleRepository" apps/backend/app/` → 0 совпадений
+- [ ] `grep -rn "BONUS_CATCH\|BONUS_SUBSCRIPTION\|BONUS_POINTS\|CATCHER_BONUS_POINTS\|FUND_SHARE\|BONUS_POINTS_EXPIRY" apps/backend/app/` → 0 совпадений
+- [ ] `make lint` чистый
+
+## Task 8.3: удалить worker tasks `apply_catch_bonus` / `expire_bonus_points` / `integrity_check_bonus_transactions`
+
+**Файлы:**
+- `apps/worker/worker/tasks/apply_catch_bonus.py` → **DELETE**
+- `apps/worker/worker/tasks/expire_bonus_points.py` → **DELETE**
+- `apps/worker/worker/tasks/integrity_check_bonus_transactions.py` → **DELETE**
+- `apps/worker/worker/celery_app.py` — **удалить 3 строки** в `include=[]` (lines 44, 46)
+  и 2 записи в `beat_schedule` (`expire_bonus_points_daily`, `integrity_check_*`)
+- `apps/backend/app/services/celery_producer.py` — **удалить** `"apply_catch_bonus": "worker.tasks.apply_catch_bonus.run"`
+  из `_TASK_NAMES` (Phase 1 уже не нужна эта задача)
+
+### Удалить тесты:
+- `apps/worker/tests/test_apply_catch_bonus.py` → **DELETE**
+- `apps/worker/tests/test_expire_bonus_points.py` → **DELETE**
+- `apps/worker/tests/test_integrity_check_bonus_transactions.py` → **DELETE**
+
+### Критерий «готово»
+- [ ] `ls apps/worker/worker/tasks/ | grep -i bonus` → пусто
+- [ ] `grep -rn "apply_catch_bonus\|expire_bonus_points\|integrity_check_bonus" apps/` → 0 совпадений
+- [ ] `celery_app.py` `include=[]` без bonus-задач
+- [ ] `make test` (worker) проходит (384+ тестов, без bonus-тестов)
+
+## Task 8.4: удалить frontend bonus-ссылки
+
+**Файлы:**
+- `apps/frontend/src/shared/types/index.ts` (line 25) — **удалить** `bonus_points: number;`
+- `apps/frontend/src/shared/utils/format.ts` (lines 61-63) — **удалить** 3 метки
+  (`bonus_catch: "Бонус за поимку"`, `bonus_subscription: "Бонус за подписку"`,
+  `bonus_points: "Бонусные баллы"`)
+
+### Возможно, в LeaderboardPage:
+- Удалить таб/ссылку на `bonus_points` (если есть)
+- Заменить на новый таб «💰 Заработал на ловлях» (опционально, отдельная задача)
+- `catches_count` лидерборд — ОСТАЁТСЯ
+
+### Критерий «готово»
+- [ ] `grep -rn "bonus_points\|bonus_catch\|bonus_subscription" apps/frontend/src/` → 0 совпадений
+- [ ] `make lint` чистый (vitest + eslint)
+- [ ] Если был отдельный таб в LeaderboardPage — он удалён или переименован
+
+## Task 8.5: обновить документацию
+
+**Файлы:**
+- `docs/archive/2026-summer-fixes/4_finansovaya_mehanika_shtrafov_i_prizov.md` —
+  добавить секцию "Снимок 2026-08-21: ловец получает реальные деньги"
+- `docs/06-data-model.md` §6 — удалить раздел про `bonus_points`, добавить раздел
+  про `Habit.catcher_amount_kopecks` и `TransactionType.CATCHER_DEPOSIT`
+- `apps/frontend/docs/STATUS.md` — удалить упоминания bonus_points (если есть)
+- `docs/AGENT_BOOTSTRAP.md` §9 — удалить "🟡 Manual catch bonus" из известных ограничений
+
+### Критерий «готово»
+- [ ] По всем перечисленным файлам — расхождений с реальным кодом нет
+- [ ] Per `AGENTS.md §12` — точечные правки, не переписывание
+
+## Task 8.6: интеграционный тест — полный сценарий с деньгами
+
+**Файл:** новый `apps/backend/tests/integration/test_catcher_deposit_e2e.py`
+
+### Что сделать
+
+Полный сценарий от конца до конца:
+1. Создать клуб с `penalty_amount=30000, catcher_amount_kopecks=10000` (штраф 300₽, ловцу 100₽)
+2. Юзер A вступает, кладёт депозит 1000₽
+3. Юзер B вступает, кладёт депозит 1000₽
+4. B не делает чек-ин, A ловит B
+5. **Проверить:**
+   - B.deposit_balance -= 300� (30000 копеек)
+   - A.deposit_balance += 100₽ (10000 копеек)
+   - Habit.prize_pool += 200₽ (20000 копеек)
+   - Penalty.amount = 30000, catcher_amount = 10000, fund_amount = 20000
+   - Transaction(type=PENALTY, amount=-30000) для B
+   - Transaction(type=CATCHER_DEPOSIT, amount=+10000) для A
+
+### Критерий «готово»
+- [ ] Тест проходит локально
+- [ ] Тест **падает** если `catcher_amount_kopecks=0` (старое поведение, всё в фонд) → 0₽ ловцу
+- [ ] Тест **падает** если `catcher_amount_kopecks >= penalty_amount` (всё ловцу) → фонд=0
+- [ ] **Тест с suspicious_pairs:** деньги ВСЁ РАВНО переводятся (variant A), но
+        `Penalty.is_suspicious_pair=true` для лидерборда
+- [ ] CI зелёный
+
+---
+
 # Фаза 7 — Growth (2-3 недели)
 
 **Цель:** cold start. Без пользователей продукт мёртв.
@@ -1021,7 +1480,11 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 > Из `AGENTS.md` + `docs/04-code-standards.md` + `docs/06-data-model.md`:
 
-1. **Деньги — `int` копейки** (`Penalty.amount`, `Transaction.amount`, `Habit.price_month`, `Habit.penalty_amount`, `UserStats.value` — отдельная ось, не деньги, но тоже `BIGINT`).
+1. **Деньги — `int` копейки** (`Penalty.amount`/`Penalty.catcher_amount`/`Penalty.fund_amount`,
+   `Transaction.amount`, `Habit.price_month`/`Habit.penalty_amount`/`Habit.catcher_amount_kopecks`,
+   `User.deposit_balance`, `UserStats.value` — отдельная ось, не деньги, но тоже `BIGINT`).
+   Basis points (`percentage_bp` в `prize_rules_snapshot`) — `int` в диапазоне `[0, 10_000]`.
+   `catcher_amount_kopecks` — НЕ basis points, это фиксированная сумма в копейках (`ge=0`).
 2. **`user_id`** — только из `request.state.telegram_user` (после initData-валидации). Никогда параметром.
 3. **Сервис НЕ вызывает `session.commit()`** (исключение — admin endpoint `/admin/v1/habits`, помечено комментарием). DI через конструктор.
 4. **Бизнес-логика НЕ в роутах** — только в `services/`. Роут = тонкая обёртка.
@@ -1070,45 +1533,60 @@ function FrozenStatBanner({ stats }: { stats: UserStats[] }) {
 
 ---
 
-# Карта задач (быстрый обзор)
+# Карта задач (быстрый обзор, rebuild 2 от 2026-08-21)
 
-| Фаза | Задач | Время | Блокирует прод? |
-|---|---|---|---|
-| 0 | ~~1~~ (Task 0.1 — закрыт до создания плана) | — | — |
-| 1 | 3 (Tasks 1.1-1.3) | 1-2 дня | нет, но лидерборд мёртвый |
-| 2 | 4 (Tasks 2.1-2.4) | 1 неделя | нет (сезонов нет) |
-| 3 | 12 (Tasks 3.1-3.12) | 2-3 недели | нет, но это центральная ТЗ-фича |
-| 4 | 11 (Tasks 4.1-4.11) | 3-5 дней | да — без UI продукт не работает |
-| 5 | 6 (Tasks 5.1-5.6) | 1-2 дня | нет |
-| 6 | 4 (Tasks 6.1-6.4) | по 1 дню | нет (для soft-launch) |
-| 7 | 3 (Tasks 7.1-7.3) | 2-3 недели | нет, но без роста нет пользователей |
-| **Всего** | **~43 задачи** (после удаления Task 0.1) | **5-6 недель** | |
+| Фаза | Задач | Время | Блокирует прод? | Порядок |
+|---|---|---|---|---|
+| 0 | ~~1~~ (Task 0.1 — закрыт до создания плана) | — | ✅ закрыт `9c32d6f` | — |
+| 1 | **5 (Tasks 1.1-1.5)** | **2-3 дня** | нет, но финансовая логика неполная | **🔜 первый** |
+| 8 | **7 (Tasks 8.1-8.6) — NEW** | **1-2 дня** | нет (косметика кода) | **после Phase 1** |
+| 2 | 4 (Tasks 2.1-2.4) + **2.5 (prize → deposit)** | **3-4 дня** | нет (сезонов нет) | после Phase 3 |
+| 3 | 12 (Tasks 3.1-3.12) | 2-3 недели | нет, но это центральная ТЗ-фича | **главный** |
+| 4 | **4 (Tasks 4.8-4.11)** | **1-2 дня** | нет — хвост за Phase 3 | параллельно Phase 3 |
+| 5 | 6 (Tasks 5.1-5.6) | 1-2 дня | нет | после Phase 2 |
+| 6 | 4 (Tasks 6.1-6.4) | по 1 дню | нет (для soft-launch) | после Phase 5 |
+| 7 | 3 (Tasks 7.1-7.3) | 2-3 недели | нет, но без роста нет пользователей | последний |
+| **Всего** | **~45 задач** | **5-6 недель** | |
 
 ---
 
-# С чего начать СЕГОДНЯ (после верификации 2026-08-20)
+# С чего начать СЕГОДНЯ (rebuild 2 от 2026-08-21)
 
-**Task 0.1 удалён** (закрыт до создания плана). Первая реальная задача — **Task 1.1** (register `apply_catch_bonus` в `_TASK_NAMES`).
+**Пересобранный порядок:** Phase 1 (Catcher deposit share) → **Phase 8 (Cleanup bonus)** → **Phase 3 + хвост Phase 4 параллельно** → Phase 2 (призы → депозит) → Phase 5 → Phase 6 → Phase 7.
+
+**Первая задача сегодня — Task 1.1** (миграция 016 — `Habit.catcher_amount_kopecks` + новая транзакция `CATCHER_DEPOSIT`).
 
 ```bash
 # 1. Создать ветку для Task 1.1
-git checkout -b fix/bonus-wiring-task-1-1
+git checkout -b feat/catcher-deposit-share-task-1-1
 
-# 2. Правка celery_producer.py — добавить в _TASK_NAMES:
-#    "apply_catch_bonus": "worker.tasks.apply_catch_bonus.run",
+# 2. Создать файл apps/backend/alembic/versions/016_habit_catcher_share.py:
+#    - ALTER TABLE habits ADD COLUMN catcher_amount_kopecks INTEGER NOT NULL DEFAULT 0
+#    - ALTER TYPE transaction_type ADD VALUE IF NOT EXISTS 'catcher_deposit'
 
-# 3. Тест (хотя бы sanity check что import работает)
-make test
+# 3. Тест миграции:
+make migrate-test
 
 # 4. Commit
-git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "fix(bonus): register apply_catch_bonus in celery _TASK_NAMES"
+git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "feat(penalty): add Habit.catcher_amount_kopecks + CATCHER_DEPOSIT transaction (Task 1.1)"
 
 # 5. Push + deploy (по отдельному "ок" пользователя)
 ```
 
-**Первая задача = Task 1.1** (3 строки, 5 мин). Затем **Task 1.2** (send_task в process_penalty, 30 мин). И **Task 1.3** (rewrite теста через broker, 2-3 часа).
+**Phase 1 целиком** (Tasks 1.1+1.2+1.3+1.4+1.5, 2-3 дня):
+- 1.1: миграция (1-2 ч)
+- 1.2: модель + константы (30 мин)
+- 1.3: рефактор `apply_catch` (4-6 ч, основная работа)
+- 1.4: миграция для `Penalty.catcher_amount`/`fund_amount` (1 ч)
+- 1.5: admin endpoint с `catcher_amount_kopecks` (2-3 ч)
 
-После Фазы 1 — **Фаза 5** (техдолг, 1-2 дня) → **Фаза 3** (Фаза B, 2-3 недели).
+**После Phase 1 — Phase 8 (Cleanup bonus)** (1-2 дня). Удаляем всю старую бонусную механику. Новая уже работает.
+
+**После Phase 8 — Phase 3** (Character & Stats, 2-3 недели). Это самая длинная и важная фаза, в ней же делаются Tasks 4.8/4.9/4.10/4.11 параллельно (всё равно они требуют API из Phase 3).
+
+**После Phase 3 — Phase 2** (призовой фонд + зачисление на депозит победителей, 3-4 дня). Метрика `stat_value` для топ-5 победителей сезона появится только с Phase 3, поэтому Phase 2 логичнее делать после.
+
+**После Phase 2 — Phase 5** (техдолг, 1-2 дня). После Phase 5 — **Phase 6** (deploy ops, по 1 дню) и **Phase 7** (growth, 2-3 недели).
 
 ---
 
