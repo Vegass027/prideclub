@@ -21,8 +21,8 @@ class FakeUserRepo:
     """Замена UserRepository. Тест задаёт пользователей через `add(user)`.
 
     Покрывает контракт:
-    - get(user_id) — T3 BonusService
-    - lock_for_update(user_id) — PenaltyService/PaymentService (PR #1, Z-2.4)
+    - get(user_id) — PenaltyService/PaymentService
+    - lock_for_update(user_id) — PenaltyService (Phase 1 Task 1.3, ASC deadlock-free locks)
     - add_balance(user_id, amount) — утилита для тестов recompute_pause_status
 
     В фейке блокировка не нужна — возвращаем объект как есть.
@@ -514,19 +514,6 @@ class FakePenaltyRepo:
             if str(p.membership_id) == str(membership_id) and p.date == club_date:
                 total += int(p.amount)
         return total
-
-
-class FakeBonusRuleRepo:
-    """Замена BonusRuleRepository. Тест задаёт правила через `set(event, threshold, rule)`."""
-
-    def __init__(self) -> None:
-        self._rules: dict[tuple[str, int], Any] = {}
-
-    def set(self, event_type: str, threshold: int, rule: Any) -> None:
-        self._rules[(event_type, threshold)] = rule
-
-    async def find(self, event_type: str, *, threshold: int) -> Any:
-        return self._rules.get((event_type, threshold))
 
 
 class FakeSession:

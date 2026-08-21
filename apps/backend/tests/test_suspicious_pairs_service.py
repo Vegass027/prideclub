@@ -67,7 +67,6 @@ async def _add_penalty(
             fund_share=100,
             reason=PenaltyReason.CAUGHT.value,
             date=on_date,
-            bonus_applied=False,
         )
     )
     await session.flush()

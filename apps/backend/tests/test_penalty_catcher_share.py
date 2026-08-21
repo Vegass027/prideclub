@@ -585,7 +585,7 @@ async def test_apply_catch_deposit_exhausted_no_mutation() -> None:
     """deposit=0 → PenaltyAlreadyProcessedError(code='deposit_exhausted'),
     без списания/зачисления, без Penalty insert.
     """
-    service, _, _, _, _, _, catcher_membership = await _setup_apply_catch(
+    service, _, _, _, _, _, _susp, catcher_membership = await _setup_apply_catch(
         catcher_amount_kopecks=10000,
         violator_deposit=0,
     )

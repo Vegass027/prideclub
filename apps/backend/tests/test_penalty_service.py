@@ -333,10 +333,8 @@ async def test_apply_catch_rejected_when_existing_caught_penalty() -> None:
         catcher_membership_id=str(uuid4()),
         amount=habit.penalty_amount,
         fund_share=habit.penalty_amount,
-        catcher_bonus_points=1,
         reason=PenaltyReason.CAUGHT,
         date=date(2026, 1, 1),
-        bonus_applied=False,
     )
     session.add(existing_caught)
 

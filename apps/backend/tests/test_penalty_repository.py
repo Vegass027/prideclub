@@ -29,10 +29,8 @@ def _make_penalty(*, membership_id: str, day: date, amount: int, reason: str = "
         catcher_membership_id=None,
         amount=amount,
         fund_share=amount,
-        catcher_bonus_points=0,
         reason=reason,
         date=day,
-        bonus_applied=False,
     )
 
 

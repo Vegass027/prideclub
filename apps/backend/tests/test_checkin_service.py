@@ -564,10 +564,8 @@ async def test_get_today_status_penalty_for_today_kopecks_reflects_today_penalti
             catcher_membership_id=None,
             amount=12500,  # = 125₽
             fund_share=12500,
-            catcher_bonus_points=0,
             reason="caught",
             date=date.today(),
-            bonus_applied=False,
         )
     )
     # Penalty за ВЧЕРА (НЕ должно попадать)
@@ -581,10 +579,8 @@ async def test_get_today_status_penalty_for_today_kopecks_reflects_today_penalti
             catcher_membership_id=None,
             amount=99999,
             fund_share=99999,
-            catcher_bonus_points=0,
             reason="caught",
             date=yesterday,
-            bonus_applied=False,
         )
     )
 

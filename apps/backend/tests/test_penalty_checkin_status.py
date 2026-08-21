@@ -254,10 +254,8 @@ async def test_penalty_repo_fake_has_any_penalty_today_filters_correctly() -> No
         catcher_membership_id="c1",
         amount=100,
         fund_share=100,
-        catcher_bonus_points=1,
         reason=PenaltyReason.CAUGHT,
         date=date(2026, 1, 1),
-        bonus_applied=False,
     )
     p1_other_day = Penalty(
         id=str(uuid4()),
@@ -265,10 +263,8 @@ async def test_penalty_repo_fake_has_any_penalty_today_filters_correctly() -> No
         catcher_membership_id="c2",
         amount=100,
         fund_share=100,
-        catcher_bonus_points=1,
         reason=PenaltyReason.CAUGHT,
         date=date(2026, 1, 2),  # ← другой день, не должен попасть
-        bonus_applied=False,
     )
     p2_today_window = Penalty(
         id=str(uuid4()),
@@ -276,10 +272,8 @@ async def test_penalty_repo_fake_has_any_penalty_today_filters_correctly() -> No
         catcher_membership_id=None,
         amount=100,
         fund_share=100,
-        catcher_bonus_points=0,
         reason=PenaltyReason.WINDOW_CLOSED_NO_CATCH,
         date=date(2026, 1, 1),
-        bonus_applied=False,
     )
     repo.add(p1_today_caught)
     repo.add(p1_other_day)
@@ -334,10 +328,8 @@ async def test_window_closed_no_catch_with_deposit_remaining_allows_subsequent_c
         catcher_membership_id=None,
         amount=100,
         fund_share=100,
-        catcher_bonus_points=0,
         reason=PenaltyReason.WINDOW_CLOSED_NO_CATCH,
         date=date(2026, 1, 1),
-        bonus_applied=False,
     )
     repo.add(p_window)
 

@@ -99,10 +99,8 @@ def _build_fake_penalty() -> Penalty:
         catcher_membership_id=str(uuid4()),
         amount=1000,
         fund_share=1000,
-        catcher_bonus_points=1,
         reason="caught",
         date=datetime.now(tz=UTC).date(),
-        bonus_applied=False,
     )
 
 

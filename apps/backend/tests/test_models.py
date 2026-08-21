@@ -13,7 +13,6 @@ from app.models import (
     User,
 )
 from app.models.auxiliary import (
-    BonusRule,
     OfferVersion,
     PricingRule,
     SeasonPrizeRule,
@@ -35,7 +34,6 @@ def test_models_importable() -> None:
 def test_auxiliary_models_importable() -> None:
     assert DailyStreakSnapshot.__tablename__ == "daily_streak_snapshots"
     assert SuspiciousPair.__tablename__ == "suspicious_pairs"
-    assert BonusRule.__tablename__ == "bonus_rules"
     assert SeasonPrizeRule.__tablename__ == "season_prize_rules"
     assert PricingRule.__tablename__ == "pricing_rules"
     assert OfferVersion.__tablename__ == "offer_versions"

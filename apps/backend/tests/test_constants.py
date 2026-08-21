@@ -17,7 +17,6 @@ def test_membership_status_values() -> None:
 
 def test_penalty_fund_share_full() -> None:
     assert PenaltyConfig.FUND_SHARE == 1.0
-    assert PenaltyConfig.CATCHER_BONUS_POINTS == 1
 
 
 def test_proof_types() -> None:
