@@ -274,33 +274,47 @@ Phase 1 (Catcher deposit share) → **Phase 8 (Cleanup bonus)** → Phase 3 + х
 - **Одна транзакция** под user-lock'ами ОБОИХ user'ов (lock по возрастанию user_id — избежание deadlock'а)
 - Антифрод (variant A, подтверждено Дмитрием 2026-08-21): `suspicious_pairs` (см. `SUSPICIOUS_ASYMMETRY_THRESHOLD = 3`) — НЕ блокирует деньги (сговор финансово невыгоден в текущей модели), но пишет флаг `Penalty.is_suspicious_pair=true` для лидерборда (метрики фейковых поимок фильтруются).
 
-## Task 1.1: миграция 016 — `Habit.catcher_amount_kopecks` + новая транзакция `CATCHER_DEPOSIT`
+## Task 1.1: миграция 016 — `Habit.catcher_amount_kopecks`
 
 **Файл:** новый `apps/backend/alembic/versions/016_habit_catcher_amount.py` (revises `015`)
 
 ### Что сделать
 
 ```sql
--- 1. Добавить поле в habits (фиксированная сумма в копейках, не процент!)
+-- Добавить поле в habits (фиксированная сумма в копейках, не процент!)
+-- DEFAULT 0 = для существующих клубов работает по-старому (всё в фонд).
 ALTER TABLE habits ADD COLUMN catcher_amount_kopecks INTEGER NOT NULL DEFAULT 0
   CHECK (catcher_amount_kopecks >= 0);
-
--- 2. Значение для существующих клубов = 0 (старое поведение "100% в фонд")
--- (DEFAULT 0 уже покрывает)
-
--- 3. Enum для TransactionType (если используется PostgreSQL ENUM):
---   ALTER TYPE transaction_type ADD VALUE IF NOT EXISTS 'catcher_deposit';
--- Или, если используется VARCHAR + CHECK — просто добавить в app-side enum.
--- Проверить по apps/backend/app/core/constants.py:TransactionType.
 ```
 
+> **⚠️ Snapshot 2026-08-21 — критично для деплоя (review от Дмитрия):**
+> **`transactions.type` — это `String(64)` (VARCHAR), НЕ Postgres ENUM.**
+> Подтверждение:
+> - `001_initial_schema.py:105` — `sa.Column("type", sa.String(length=64), nullable=False)`
+> - `apps/backend/app/models/transaction.py:25` — `Mapped[str] = mapped_column(String(64))`
+> - В БД нет Postgres TYPE с именем `transaction_type`. Валидация значений —
+>   только Python-side через `TransactionType(StrEnum)` в `core/constants.py`.
+>
+> **Следствие:** в этой миграции НЕТ и НЕ ДОЛЖНО БЫТЬ
+> `ALTER TYPE transaction_type ADD VALUE 'catcher_deposit'` — такого типа не существует,
+> команда упадёт с `type "transaction_type" does not exist`.
+>
+> **Дополнительно:** баг из `docs/10-deploy.md §9.2` (alembic не выполняет
+> `ALTER TYPE ADD VALUE` внутри транзакции, нужен workaround через `psql +
+> UPDATE alembic_version`) к этой миграции **НЕ применим**, потому что
+> `transaction_type` не Postgres ENUM.
+>
+> **Python-side добавление** нового значения `catcher_deposit` — отдельной задачей
+> **Task 1.2** (правка `core/constants.py`: добавить `TransactionType.CATCHER_DEPOSIT = "catcher_deposit"`).
+
 > **Snapshot 2026-08-21:** миграция **НЕ** удаляет `bonus_points`/`bonus_applied`/etc —
-> это делает Phase 8. Здесь только ADDITIVE changes (новое поле, новая транзакция).
+> это делает Phase 8. Здесь только ADDITIVE changes (новое поле).
 
 ### Критерий «готово»
 - [ ] `make migrate-test` (upgrade → downgrade → upgrade) проходит
 - [ ] `SELECT catcher_amount_kopecks FROM habits` на проде даёт 0 для всех 3 клубов
-- [ ] `TransactionType.CATCHER_DEPOSIT` импортируется из constants
+- [ ] Существующие тесты не сломались (`make test`)
+- [ ] `make lint` чистый
 
 ## Task 1.2: модель `Habit.catcher_amount_kopecks` + константы
 
@@ -1314,11 +1328,10 @@ ALTER TABLE penalties DROP COLUMN bonus_applied;
 -- 4. DROP TABLE bonus_rules (если больше никто не ссылается)
 DROP TABLE IF EXISTS bonus_rules;
 
--- 5. DROP TYPE для TransactionType (если PostgreSQL ENUM):
---   ALTER TYPE transaction_type DROP VALUE 'bonus_catch';
---   ALTER TYPE transaction_type DROP VALUE 'bonus_subscription';
---   ALTER TYPE transaction_type DROP VALUE 'bonus_points';
--- (или оставить значения в VARCHAR — безвредно для старых транзакций в истории)
+-- 5. Удалить значения BONUS_* из TransactionType StrEnum в Python (Task 8.2):
+--    В БД `transactions.type` — VARCHAR(64), Postgres ENUM не используется.
+--    Никаких ALTER TYPE ... DROP VALUE не нужно — старые значения остаются
+--    в истории (но в Python-коде больше не используются и не валидируются).
 ```
 
 > **Snapshot 2026-08-21:** на проде сейчас 4 транзакции, все типа SUBSCRIPTION/DEPOSIT_TOPUP.
@@ -1560,15 +1573,18 @@ DROP TABLE IF EXISTS bonus_rules;
 # 1. Создать ветку для Task 1.1
 git checkout -b feat/catcher-deposit-share-task-1-1
 
-# 2. Создать файл apps/backend/alembic/versions/016_habit_catcher_share.py:
+# 2. Создать файл apps/backend/alembic/versions/016_habit_catcher_amount.py:
 #    - ALTER TABLE habits ADD COLUMN catcher_amount_kopecks INTEGER NOT NULL DEFAULT 0
-#    - ALTER TYPE transaction_type ADD VALUE IF NOT EXISTS 'catcher_deposit'
+#      CHECK (catcher_amount_kopecks >= 0)
+#    ВАЖНО: НЕ добавлять ALTER TYPE transaction_type ADD VALUE — transactions.type
+#    это VARCHAR(64), а не Postgres ENUM. См. snapshot в Task 1.1.
+#    Python-сторона (TransactionType.CATCHER_DEPOSIT) добавляется в Task 1.2.
 
 # 3. Тест миграции:
 make migrate-test
 
 # 4. Commit
-git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "feat(penalty): add Habit.catcher_amount_kopecks + CATCHER_DEPOSIT transaction (Task 1.1)"
+git -c user.name=Vegass -c user.email=dmitriy@vegass.dev commit -am "feat(penalty): add Habit.catcher_amount_kopecks (Task 1.1)"
 
 # 5. Push + deploy (по отдельному "ок" пользователя)
 ```
