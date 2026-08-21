@@ -11,7 +11,11 @@ export interface AdminHabit {
   checkin_window_end: string;
   timezone: string;
   penalty_amount: number;
-price_month: number;
+  // Pravki-catcher-deposit (Phase 1 Task 1.6, 2026-08-21): сумма ловцу
+  // от штрафа в копейках. Backend (apps/backend/app/models/habit.py:
+  // catcher_amount_kopecks, миграция 016).
+  catcher_amount_kopecks: number;
+  price_month: number;
   proof_type: AdminHabitProofType;
   proof_types: AdminHabitProofType[];
   prize_pool: number;
@@ -103,6 +107,7 @@ export interface AdminHabitCreatePayload {
   proof_types: AdminHabitProofType[];
   price_month: number;
   penalty_amount: number;
+  catcher_amount_kopecks: number;
   stat_gain_per_checkin: number;
   stat_loss_per_miss: number;
   member_limit: number | null;
@@ -125,6 +130,10 @@ export interface AdminHabitUpdatePayload {
   proof_types?: AdminHabitProofType[];
   price_month?: number;
   penalty_amount?: number;
+  // Pravki-catcher-deposit (Phase 1 Task 1.6): опционально в Update —
+  // как и другие финансовые поля (penalty_amount/price_month). Если форма
+  // Edit не отправляет поле при edge-кейсе, типизация не должна ломаться.
+  catcher_amount_kopecks?: number;
   stat_gain_per_checkin?: number;
   stat_loss_per_miss?: number;
   member_limit?: number | null;

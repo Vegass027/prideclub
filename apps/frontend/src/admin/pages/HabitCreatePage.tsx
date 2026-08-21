@@ -59,6 +59,7 @@ interface FormState {
   proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
+  catcher_amount_rub: string;
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
@@ -82,6 +83,7 @@ timezone: "Europe/Moscow",
   proof_types: ["video_note"],
   price_month_rub: "299",
   penalty_amount_rub: "100",
+  catcher_amount_rub: "0",
   stat_gain_per_checkin: "2",
   stat_loss_per_miss: "1",
   member_limit: "",
@@ -119,6 +121,7 @@ interface RawForm {
   proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
+  catcher_amount_rub: string;
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
@@ -199,6 +202,12 @@ const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
   if (!Number.isFinite(priceRub) || priceRub <= 0) errors.price_month_rub = "> 0 ₽";
   const penaltyRub = Number(state.penalty_amount_rub.replace(",", "."));
   if (!Number.isFinite(penaltyRub) || penaltyRub <= 0) errors.penalty_amount_rub = "> 0 ₽";
+  // Pravki-catcher-deposit (Task 1.6): >= 0 (default 0 = старое поведение,
+  // всё в фонд). Не строго > 0 как penalty — default 0 допустим.
+  const catcherRub = Number(state.catcher_amount_rub.replace(",", "."));
+  if (!Number.isFinite(catcherRub) || catcherRub < 0) {
+    errors.catcher_amount_rub = ">= 0 ₽";
+  }
 
   if (state.member_limit.trim()) {
     const ml = Number(state.member_limit);
@@ -266,6 +275,8 @@ export function HabitCreatePage() {
     if (errorList.length > 0) return;
     const priceKop = rubToKopecks(state.price_month_rub);
     const penaltyKop = rubToKopecks(state.penalty_amount_rub);
+    // Pravki-catcher-deposit (Task 1.6): копейки для API, default 0 OK.
+    const catcherKop = rubToKopecks(state.catcher_amount_rub);
     if (priceKop <= 0 || penaltyKop <= 0) return;
 
     create.mutate(
@@ -283,6 +294,7 @@ export function HabitCreatePage() {
         proof_types: state.proof_types,
         price_month: priceKop,
         penalty_amount: penaltyKop,
+        catcher_amount_kopecks: catcherKop,
         stat_gain_per_checkin: toIntOrNull(state.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(state.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(state.member_limit),
@@ -695,6 +707,25 @@ export function HabitCreatePage() {
             value={state.penalty_amount_rub}
             onChange={(e) => set("penalty_amount_rub", e.target.value)}
             onBlur={() => markTouched("penalty_amount_rub")}
+            inputMode="decimal"
+          />
+        </FieldRow>
+
+        {/* Pravki-catcher-deposit (Phase 1 Task 1.6, 2026-08-21): сумма ловцу
+            от штрафа. Default 0 = всё в призовой фонд клуба (старое поведение).
+            Если сумма >= штрафа — на бэкенде clamp в apply_catch к фактическому
+            списанию. */}
+        <FieldRow
+          label="Сумма ловцу (₽)"
+          hint="0 = всё идёт в призовой фонд клуба. Если сумма ≥ штрафа — всё уходит ловцу."
+          error={
+            touched.catcher_amount_rub ? errors.catcher_amount_rub : undefined
+          }
+        >
+          <TextInput
+            value={state.catcher_amount_rub}
+            onChange={(e) => set("catcher_amount_rub", e.target.value)}
+            onBlur={() => markTouched("catcher_amount_rub")}
             inputMode="decimal"
           />
         </FieldRow>

@@ -55,6 +55,7 @@ interface FormState {
   proof_types: ProofType[];
   price_month_rub: string;
   penalty_amount_rub: string;
+  catcher_amount_rub: string;
   stat_gain_per_checkin: string;
   stat_loss_per_miss: string;
   member_limit: string;
@@ -76,6 +77,7 @@ const EMPTY: FormState = {
   proof_types: ["video_note"],
   price_month_rub: "299",
   penalty_amount_rub: "100",
+  catcher_amount_rub: "0",
   stat_gain_per_checkin: "2",
   stat_loss_per_miss: "1",
   member_limit: "",
@@ -117,6 +119,7 @@ function habitToForm(h: AdminHabit): FormState {
       : [h.proof_type]) as ProofType[],
     price_month_rub: kopToRubStr(h.price_month),
     penalty_amount_rub: kopToRubStr(h.penalty_amount),
+    catcher_amount_rub: kopToRubStr(h.catcher_amount_kopecks),
     stat_gain_per_checkin: String(h.stat_gain_per_checkin),
     stat_loss_per_miss: String(h.stat_loss_per_miss),
     member_limit: h.member_limit === null ? "" : String(h.member_limit),
@@ -283,6 +286,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         proof_types: form.proof_types,
         price_month: rubToKopecks(form.price_month_rub),
         penalty_amount: rubToKopecks(form.penalty_amount_rub),
+        catcher_amount_kopecks: rubToKopecks(form.catcher_amount_rub),
         stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
         stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
         member_limit: toIntOrNull(form.member_limit),
@@ -671,6 +675,23 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         />
         <p className="mt-1 text-xs text-muted">
           Применяется к будущим штрафам. Прошлые штрафы не пересчитываются.
+        </p>
+      </FieldRow>
+
+      {/* Pravki-catcher-deposit (Phase 1 Task 1.6, 2026-08-21): сумма ловцу
+          от штрафа. Можно менять БЕЗ заморозки после первого участника —
+          не финансовое обязательство, только правило для будущих поимок.
+          Уже оплаченные транзакции не затрагиваются (catcher_amount
+          кэшируется в Penalty на момент поимки). */}
+      <FieldRow label="Сумма ловцу (₽)">
+        <TextInput
+          value={form.catcher_amount_rub}
+          onChange={(e) => set("catcher_amount_rub", e.target.value)}
+          inputMode="decimal"
+        />
+        <p className="mt-1 text-xs text-muted">
+          0 = всё идёт в призовой фонд клуба. Если сумма ≥ штрафа —
+          всё уходит ловцу (clamp на бэкенде).
         </p>
       </FieldRow>
 
