@@ -23,11 +23,6 @@ class User(Base):
         String(64), nullable=False, server_default="Europe/Moscow"
     )
 
-    bonus_points: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    bonus_points_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
     # Pravki-deposit-sse.md §Z-2.1: глобальный депозит на пользователя (в копейках).
     # Общий для всех клубов. Списание и пополнение — через этот баланс, не через
     # memberships.deposit_balance (то поле удалено миграцией 014b).

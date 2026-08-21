@@ -50,18 +50,6 @@ class SuspiciousPair(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="flagged")
 
 
-class BonusRule(Base):
-    __tablename__ = "bonus_rules"
-
-    id: Mapped[str] = mapped_column(
-        UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    threshold: Mapped[int] = mapped_column(Integer, nullable=False)
-    reward_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    reward_value: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
 class SeasonPrizeRule(Base):
     __tablename__ = "season_prize_rules"
     __table_args__ = (

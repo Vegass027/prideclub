@@ -59,11 +59,6 @@ class TransactionType(StrEnum):
     # Сумма = +catcher_amount (копейки, int). Связана с Penalty через related_penalty_id.
     # Удалить в Phase 8 НЕЛЬЗЯ — это часть новой механики, не бонусная миграция.
     CATCHER_DEPOSIT = "catcher_deposit"
-    # Phase 8 (cleanup bonus, после Phase 1+2+3): удалить BONUS_CATCH, BONUS_SUBSCRIPTION,
-    # BONUS_POINTS (вся виртуальная механика bonus_points уходит).
-    BONUS_CATCH = "bonus_catch"
-    BONUS_SUBSCRIPTION = "bonus_subscription"
-    BONUS_POINTS = "bonus_points"
 
 
 class SeasonStatus(StrEnum):
@@ -183,8 +178,10 @@ class PenaltyConfig:
     """Константы механики штрафов."""
 
     # Штраф всегда 100% уходит в призовой фонд клуба.
+    # DEPRECATED 2026-08-21 (Phase 1 Task 1.3 — Pravki-catcher-deposit):
+    # больше не используется — деньги делятся между ловцом и фондом через
+    # Habit.catcher_amount_kopecks. Оставлено для совместимости старого кода.
     FUND_SHARE = 1.0
-    CATCHER_BONUS_POINTS = 1
 
     # Техническая комиссия при возврате депозита.
     DEPOSIT_WITHDRAW_FEE_PERCENT = 5
@@ -207,10 +204,6 @@ class PenaltyConfig:
     # Пример: окно 22:00-06:00 Europe/Moscow → catch до next day 20:00 MSK (14ч).
     # Pravki-manual-catch-2026-08-18.
     CATCH_WINDOW_BUFFER_HOURS = 2
-
-    # Сгорание бонусных поинтов.
-    BONUS_POINTS_EXPIRY_DAYS = 90
-    BONUS_POINTS_EXPIRY_NOTIFY_DAYS = 7
 
     # Антифрод-эвристика: если один catcher ловит один и тот же violator
     # N+ раз за сезон И violator ни разу не поймал catcher'а — флаг.

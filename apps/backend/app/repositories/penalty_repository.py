@@ -7,10 +7,11 @@ from app.models.penalty import Penalty
 
 
 class PenaltyRepository:
-    """Доступ к таблице penalties для bonus_service и других read-only потребителей.
+    """Доступ к таблице penalties для read-only потребителей.
 
-    BonusService исторически брал Penalty через коллбэк `penalty_lookup` —
-    рефакторинг T3 выносит это в репозиторий (sql только в repositories/, не в services/).
+    После Phase 8 (cleanup bonus mechanics) PenaltyRepository обслуживает
+    только новую механику (Pravki-catcher-deposit, Phase 1 Task 1.3) —
+    виртуальная бонусная механика полностью удалена.
     """
 
     def __init__(self, session: AsyncSession) -> None:

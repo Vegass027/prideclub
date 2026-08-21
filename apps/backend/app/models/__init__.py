@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from app.models.auxiliary import (
-    BonusRule,
     DailyStreakSnapshot,
     OfferVersion,
     PricingRule,
@@ -28,7 +27,6 @@ __all__ = [
     "SeasonStats",
     "DailyStreakSnapshot",
     "SuspiciousPair",
-    "BonusRule",
     "SeasonPrizeRule",
     "PricingRule",
     "OfferVersion",
