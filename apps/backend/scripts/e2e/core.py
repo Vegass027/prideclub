@@ -351,6 +351,44 @@ class E2EDatabase:
         )
         return int(row["s"] or 0)
 
+    # Pravki-catcher-deposit (Phase 1 Task 1.3, 2026-08-21): детали Penalty
+    # после разделения на catcher_amount / fund_share.
+    async def penalty_detail(
+        self,
+        conn: Any,
+        *,
+        membership_id: str,
+        on_date: date,
+        reason: str = "caught",
+    ) -> dict[str, Any] | None:
+        row = await conn.fetchrow(
+            "SELECT amount, catcher_amount, fund_share, is_suspicious_pair, "
+            "       reason::text AS reason "
+            "FROM penalties "
+            "WHERE membership_id = $1::uuid AND date = $2 AND reason = $3 "
+            "LIMIT 1",
+            membership_id,
+            on_date,
+            reason,
+        )
+        if row is None:
+            return None
+        return {
+            "amount": int(row["amount"]),
+            "catcher_amount": int(row["catcher_amount"]),
+            "fund_share": int(row["fund_share"]),
+            "is_suspicious_pair": bool(row["is_suspicious_pair"]),
+            "reason": row["reason"],
+        }
+
+    async def prize_pool(self, conn: Any, *, habit_id: str) -> int:
+        """Текущий накопленный prize_pool клуба (копейки)."""
+        row = await conn.fetchrow(
+            "SELECT prize_pool FROM habits WHERE id = $1::uuid",
+            habit_id,
+        )
+        return int(row["prize_pool"]) if row else 0
+
     async def penalty_count(
         self,
         conn: Any,

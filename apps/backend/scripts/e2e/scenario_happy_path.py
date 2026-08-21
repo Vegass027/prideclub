@@ -55,9 +55,16 @@ USERS: list[FakeUser] = [
 
 # Суммы в копейках (int — НЕ float).
 PENALTY_A: int = 5_000   # 50 ₽
-PENALTY_B: int = 5_000   # 50 ₽
-PRICE_MONTH_A: int = 50_000  # 500 ₽
+PENALTY_B: int = 10_000  # 100 ₽ (Phase B для catcher deposit share)
+PENALTY_B_CLAMPED: int = 100_000  # 100 ₽ penalty с маленьким deposit (клэмп)
+PRICE_MONTH_A: int = 50_000  # 500 �
 DEPOSIT_TOPUP_KOPEKS: int = 200_00  # 200 ₽ на каждого
+# Pravki-catcher-deposit (Phase 1 Task 1.3, 2026-08-21): доля ловцу.
+# 30₽ из штрафа 100₽ — нормальный split (catcher_amount=3000, fund_share=7000).
+CATCHER_B: int = 3_000   # 30 ₽
+# Edge case: catcher > penalty → clamp к penalty на бэкенде в apply_catch
+# (catcher_amount=10000, fund_share=0).
+CATCHER_B_CLAMPED: int = 15_000  # 150 ₽ (>penalty)
 
 RUN_TAG: str = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
 
@@ -295,6 +302,9 @@ async def run_phase_b(
         "proof_types": ["video_note"],
         "price_month": PRICE_MONTH_A,
         "penalty_amount": PENALTY_B,
+        # Pravki-catcher-deposit (Phase 1 Task 1.3): доля ловцу 30₽ из 100₽
+        # штрафа. catcher_amount_kopecks=3000 (нормальный split, не clamp).
+        "catcher_amount_kopecks": CATCHER_B,
         "stat_gain_per_checkin": 2,
         "stat_loss_per_miss": 1,
         "checkin_topic_link": checkin_link_b,
@@ -355,8 +365,90 @@ async def run_phase_b(
             on_date=datetime.now(tz=timezone.utc).date(),
         )
         _check_in(v_status, {"caught"}, "victim checkin.status after catch")
-    print("  [10] DB: Penalty(reason='caught') ✓ "
-          "Checkin(status='caught') ✓")
+
+        # Pravki-catcher-deposit (Phase 1 Task 1.3): детали Penalty — split.
+        # penalty=10000 (100₽), catcher_amount_kopecks=3000 (30₽) →
+        # catcher_amount=3000, fund_share=7000.
+        p = await db.penalty_detail(
+            conn, membership_id=victim_membership,
+            on_date=datetime.now(tz=timezone.utc).date(),
+        )
+        if p is None:
+            raise AssertionError("penalty_detail returned None (no caught penalty)")
+        assert p["amount"] == PENALTY_B, (
+            f"Penalty.amount expected {PENALTY_B}, got {p['amount']}"
+        )
+        assert p["catcher_amount"] == CATCHER_B, (
+            f"Penalty.catcher_amount expected {CATCHER_B}, "
+            f"got {p['catcher_amount']}"
+        )
+        assert p["fund_share"] == PENALTY_B - CATCHER_B, (
+            f"Penalty.fund_share expected {PENALTY_B - CATCHER_B} "
+            f"({PENALTY_B} - {CATCHER_B}), got {p['fund_share']}"
+        )
+        assert p["is_suspicious_pair"] is False, (
+            f"Penalty.is_suspicious_pair expected False, "
+            f"got {p['is_suspicious_pair']} (новые FakeUser не должны быть flagged)"
+        )
+        # Инвариант CHECK ck_penalties_amount_equals_sum (миграция 017):
+        # amount = catcher_amount + fund_share
+        if p["amount"] != p["catcher_amount"] + p["fund_share"]:
+            raise AssertionError(
+                f"CHECK violation: amount({p['amount']}) != "
+                f"catcher_amount({p['catcher_amount']}) + "
+                f"fund_share({p['fund_share']})"
+            )
+
+        # Pravki-catcher-deposit: deposit_balance ловца вырос на catcher_amount.
+        catcher_balance = await db.deposit_balance(conn, user_id=catcher.id)
+        victim_balance = await db.deposit_balance(conn, user_id=victim.id)
+        expected_catcher = DEPOSIT_TOPUP_KOPEKS + CATCHER_B
+        if catcher_balance != expected_catcher:
+            raise AssertionError(
+                f"catcher.deposit_balance expected {expected_catcher} "
+                f"({DEPOSIT_TOPUP_KOPEKS} initial + {CATCHER_B} catcher reward), "
+                f"got {catcher_balance}"
+            )
+        expected_victim = DEPOSIT_TOPUP_KOPEKS - PENALTY_B
+        if victim_balance != expected_victim:
+            raise AssertionError(
+                f"victim.deposit_balance expected {expected_victim} "
+                f"({DEPOSIT_TOPUP_KOPEKS} initial - {PENALTY_B} penalty), "
+                f"got {victim_balance}"
+            )
+
+        # Pravki-catcher-deposit: prize_pool вырос на fund_share.
+        prize = await db.prize_pool(conn, habit_id=habit_id_b)
+        # Phase B — единственный catch в этом клубе, prize_pool должен быть
+        # ровно fund_share (= PENALTY_B - CATCHER_B).
+        expected_prize = PENALTY_B - CATCHER_B
+        if prize != expected_prize:
+            raise AssertionError(
+                f"Habit.prize_pool expected {expected_prize} "
+                f"({PENALTY_B} penalty - {CATCHER_B} catcher), "
+                f"got {prize}"
+            )
+
+        # Печать фактических значений для верификации (как просил Дмитрий)
+        print("  [10] DB: Penalty(reason='caught') ✓ "
+              "Checkin(status='caught') ✓")
+        print(f"       Penalty.amount          = {p['amount']:>6} коп "
+              f"({p['amount'] / 100:>5.2f}₽)")
+        print(f"       Penalty.catcher_amount   = {p['catcher_amount']:>6} коп "
+              f"({p['catcher_amount'] / 100:>5.2f}�)  [expected {CATCHER_B}]")
+        print(f"       Penalty.fund_share       = {p['fund_share']:>6} коп "
+              f"({p['fund_share'] / 100:>5.2f}₽)  "
+              f"[expected {PENALTY_B - CATCHER_B}]")
+        print(f"       Penalty.is_suspicious_pair = {p['is_suspicious_pair']}  "
+              f"[expected False]")
+        print(f"       catcher.deposit_balance = {catcher_balance:>6} коп "
+              f"({catcher_balance / 100:>5.2f}₽)  "
+              f"[expected {expected_catcher}]")
+        print(f"       victim.deposit_balance  = {victim_balance:>6} коп "
+              f"({victim_balance / 100:>5.2f}₽)  "
+              f"[expected {expected_victim}]")
+        print(f"       Habit.prize_pool        = {prize:>6} коп "
+              f"({prize / 100:>5.2f}₽)  [expected {expected_prize}]")
 
     # 11. Victim пытается video_note — bot prefilter должен REJECT caught_today.
     # Бот шлёт в фейк-чат send_message → fail, но HTTP 200 от webhook всё равно.
