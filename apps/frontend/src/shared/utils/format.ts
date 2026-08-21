@@ -58,9 +58,7 @@ export const transactionTypeLabel = (type: string): string => {
     deposit_withdraw: "Вывод депозита",
     penalty: "Штраф",
     prize: "Приз",
-    bonus_catch: "Бонус за поимку",
-    bonus_subscription: "Бонус за подписку",
-    bonus_points: "Бонусные баллы",
+    catcher_deposit: "Доля за поимку",
   };
   return labels[type] ?? type;
 };
