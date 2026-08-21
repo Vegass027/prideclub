@@ -53,6 +53,14 @@ class TransactionType(StrEnum):
     DEPOSIT_WITHDRAW = "deposit_withdraw"
     PENALTY = "penalty"
     PRIZE = "prize"
+    # Pravki-catcher-deposit (Phase 1 Task 1.2, 2026-08-21): новая механика штрафов
+    # — штраф делится на 2 части: часть в призовой фонд клуба + часть на депозит ловца.
+    # Эта транзакция пишется при apply_catch для зачисления доли ловцу на User.deposit_balance.
+    # Сумма = +catcher_amount (копейки, int). Связана с Penalty через related_penalty_id.
+    # Удалить в Phase 8 НЕЛЬЗЯ — это часть новой механики, не бонусная миграция.
+    CATCHER_DEPOSIT = "catcher_deposit"
+    # Phase 8 (cleanup bonus, после Phase 1+2+3): удалить BONUS_CATCH, BONUS_SUBSCRIPTION,
+    # BONUS_POINTS (вся виртуальная механика bonus_points уходит).
     BONUS_CATCH = "bonus_catch"
     BONUS_SUBSCRIPTION = "bonus_subscription"
     BONUS_POINTS = "bonus_points"
@@ -212,5 +220,5 @@ class PenaltyConfig:
 class HttpRateLimitConfig:
     """Общий HTTP rate limit (на пользователя / сервисный caller)."""
 
-    RATE_LIMIT_API_V1 = "60/60s"   # 60 запросов в минуту на /api/v1/*
+    RATE_LIMIT_API_V1 = "60/60s"  # 60 запросов в минуту на /api/v1/*
     RATE_LIMIT_INTERNAL = "120/60s"  # 120 на /internal/* (бот шлёт чаще)
