@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import traceback
 from datetime import date
 from typing import Protocol
 
@@ -191,9 +192,16 @@ async def _process(
                         session_factory=factory,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # Pravki-de-risk-2026-08-21: добавлен traceback для
+                    # диагностики — раньше notification_failed мог тихо
+                    # проглотить любую ошибку без возможности понять причину.
                     log.warning(
                         "worker_penalty_notification_failed",
-                        extra={"err": str(exc)},
+                        extra={
+                            "err": str(exc),
+                            "err_type": type(exc).__name__,
+                            "stack": traceback.format_exc(),
+                        },
                     )
 
             return {"ok": True, "penalty_id": str(penalty.id)}
@@ -212,8 +220,20 @@ async def _process(
             log.info("worker_penalty_integrity", extra={"err": str(exc)})
             return {"ok": True, "duplicate": True}
         except Exception as exc:  # noqa: BLE001
+            # Pravki-de-risk-2026-08-21: traceback обязателен для диагностики.
+            # Без него worker_penalty_failed возвращал {"ok": False, "err": str(exc)}
+            # и терял причину (например, TypeError при несовпадении сигнатуры
+            # конструктора — реальный инцидент Z-2.5 с penalty_repo в
+            # CheckinService.__init__). Теперь полный стек в логах.
             await session.rollback()
-            log.error("worker_penalty_failed", extra={"err": str(exc)})
+            log.error(
+                "worker_penalty_failed",
+                extra={
+                    "err": str(exc),
+                    "err_type": type(exc).__name__,
+                    "stack": traceback.format_exc(),
+                },
+            )
             return {"ok": False, "err": str(exc)}
 
 
