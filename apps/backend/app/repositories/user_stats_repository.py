@@ -1,13 +1,31 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import MembershipStatus
 from app.core.logging import get_logger
+from app.models.membership import Membership
+from app.models.user import User
 from app.models.user_stats import UserStats
+
+
+@dataclass(frozen=True, slots=True)
+class HabitLeaderboardRow:
+    """Одна строка per-membership для /habits/{id}/leaderboard (Task 3.6).
+
+    Immutable DTO. Repository возвращает готовые dataclass-инстансы —
+    API-слой маппит в Pydantic без SQLAlchemy-mapping.
+    """
+    membership_id: str
+    user_id: int
+    first_name: str
+    value: int
+    is_frozen: bool
 
 
 class UserStatsRepository:
@@ -359,3 +377,76 @@ class UserStatsRepository:
         )
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)
+
+    # ── Read (Task 3.6: /habits/{habit_id}/leaderboard) ────────
+
+    async def list_for_habit_leaderboard(
+        self,
+        *,
+        habit_id: str,
+        stat_definition_id: str,
+        limit: int,
+    ) -> list[HabitLeaderboardRow]:
+        """Single read-query для GET /api/v1/habits/{habit_id}/leaderboard.
+
+        SQL-shape (в одном запросе, без post-filter):
+            SELECT membership.id, user.id, user.first_name,
+                   user_stats.value, user_stats.is_frozen
+            FROM memberships  AS membership
+                 JOIN user_stats ON user_stats.user_id = membership.user_id
+                 JOIN "user"      ON "user".id      = membership.user_id
+            WHERE  membership.habit_id = :habit_id
+              AND  membership.status = 'active'
+              AND  user_stats.stat_definition_id = :sd
+            ORDER BY user_stats.value DESC,
+                     membership.id ASC    -- tie-breaker
+            LIMIT :limit
+
+        ⚠️ Активный фильтр (status='active') ВСЕГДА в WHERE — в Python
+        не фильтруется. Иначе повторяется прежняя pagination-ошибка
+        (Task 3.5 fix 3 — общая риск-зона).
+
+        ⚠️ Frozen stats ОСТАЮТСЯ в выдаче (UI рисует ❄ через is_frozen).
+        Заморозка — это механизм «за что-то», не «от чего-то».
+
+        Args:
+            habit_id: UUID str.
+            stat_definition_id: UUID str (из habit.stat_definition_id).
+            limit: <= LEADERBOARD_LIMIT (cap enforcement в API layer).
+
+        Returns:
+            Список HabitLeaderboardRow, len <= limit, order:
+            value DESC, затем membership_id ASC (tie-breaker).
+        """
+        stmt = (
+            select(
+                Membership.id,
+                User.id,
+                User.first_name,
+                UserStats.value,
+                UserStats.is_frozen,
+            )
+            .join(UserStats, UserStats.user_id == Membership.user_id)
+            .join(User, User.id == Membership.user_id)
+            .where(
+                Membership.habit_id == habit_id,
+                Membership.status == MembershipStatus.ACTIVE,
+                UserStats.stat_definition_id == stat_definition_id,
+            )
+            .order_by(
+                UserStats.value.desc(),
+                Membership.id.asc(),
+            )
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [
+            HabitLeaderboardRow(
+                membership_id=str(m_id),
+                user_id=int(u_id),
+                first_name=first_name,
+                value=int(value),
+                is_frozen=bool(is_frozen),
+            )
+            for m_id, u_id, first_name, value, is_frozen in rows
+        ]

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +12,27 @@ from sqlalchemy.orm import aliased
 
 from app.api.v1.users import TelegramUserDbDep
 from app.core.deps import SessionDep
+from app.core.exceptions import (
+    HabitArchivedError,
+    HabitNotFoundError,
+)
 from app.models.checkin import Checkin
 from app.models.membership import Membership
 from app.models.penalty import Penalty
 from app.models.user import User
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.user_stats_repository import (
+    HabitLeaderboardRow,
+    UserStatsRepository,
+)
+from app.schemas import (
+    CharacterResponse,
+    CharacterStatOut,
+    CharacterStatusInfo,
+    StatLeaderboardEntry,
+    StatLeaderboardResponse,
+)
 
 router = APIRouter()
 
@@ -654,3 +670,75 @@ async def leaderboard_clubs(
         )
 
     return LeaderboardClubsResponse(tab=tab, metric_label=metric_label, clubs=clubs)
+
+
+# ── Phase 3 v2 Task 3.6: per-habit stat-leaderboard ──────────────────
+
+@router.get(
+    "/habits/{habit_id}/leaderboard",
+    response_model=StatLeaderboardResponse,
+)
+async def stat_leaderboard(
+    habit_id: str,
+    _: TelegramUserDbDep,
+    session: SessionDep,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=LEADERBOARD_LIMIT,
+            description=(
+                f"Макс. {LEADERBOARD_LIMIT}. Запрос выше кэппится 422 (Pydantic)."
+            ),
+        ),
+    ] = LEADERBOARD_LIMIT,
+) -> StatLeaderboardResponse:
+    """Глобальный лидерборд по характеристике клуба (Phase 3 v2).
+
+    Один read-query в UserStatsRepository.list_for_habit_leaderboard:
+    фильтр membership.status='active' и stat_definition_id в WHERE
+    ДО ORDER BY и LIMIT (per Task 3.5 fix-3-pattern). Frozen stats
+    остаются в выдаче (UI рисует ❄).
+
+    Errors:
+      - habit not found → HabitNotFoundError → 404
+      - habit archived  → HabitArchivedError → 404
+      - habit.stat_definition_id IS NULL → 200 + items=[]
+        (клуб существует, feature не активирована админом).
+
+    Total семантика (как у существующих 3 leaderboard handlers):
+      None = обрезки не было (len < limit),
+      иначе = len(items) = limit.
+    """
+    habit_repo = HabitRepository(session)
+    user_stats_repo = UserStatsRepository(session)
+
+    habit = await habit_repo.get(habit_id)
+    if habit is None:
+        raise HabitNotFoundError(habit_id=habit_id)
+    if habit.archived_at is not None:
+        raise HabitArchivedError(habit_id=habit_id)
+
+    stat_def_id = habit.stat_definition_id
+    if stat_def_id is None:
+        # Клуб без выбранной характеристики → пустой лидерборд (200 OK).
+        # Не ошибка: фича просто не активирована админом.
+        return StatLeaderboardResponse(items=[], total=None)
+
+    rows = await user_stats_repo.list_for_habit_leaderboard(
+        habit_id=habit_id,
+        stat_definition_id=stat_def_id,
+        limit=limit,
+    )
+    items = [
+        StatLeaderboardEntry(
+            membership_id=r.membership_id,
+            user_id=r.user_id,
+            first_name=r.first_name,
+            value=r.value,
+            is_frozen=r.is_frozen,
+        )
+        for r in rows
+    ]
+    total = len(items) if len(items) >= LEADERBOARD_LIMIT else None
+    return StatLeaderboardResponse(items=items, total=total)

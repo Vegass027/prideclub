@@ -14,6 +14,7 @@ from app.api.admin import api_router as admin_api_router
 from app.api.v1 import (
     admin_suspicious_pairs,
     balance,
+    character,                # NEW (Phase 3 v2 Task 3.6)
     events,
     habits,
     health,
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
     app.include_router(balance.router, prefix="/api/v1", tags=["balance"])
     app.include_router(payments.router, prefix="/api/v1", tags=["payments"])
     app.include_router(leaderboard.router, prefix="/api/v1", tags=["leaderboard"])
+    app.include_router(character.router, prefix="/api/v1", tags=["character"])  # NEW (Phase 3 v2)
     app.include_router(events.router, prefix="/api/v1", tags=["events"])
     app.include_router(internal_checkins.router, prefix="/internal", tags=["internal"])
     app.include_router(internal_bot.router, prefix="/internal", tags=["internal"])

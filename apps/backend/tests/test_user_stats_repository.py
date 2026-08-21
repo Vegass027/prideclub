@@ -510,3 +510,96 @@ async def test_try_get_for_update_returns_existing_row_without_creating() -> Non
         "try_get_for_update должен быть SELECT — decrement/apply_freeze "
         "запрещают create"
     )
+
+
+# ─── 10. list_for_habit_leaderboard — SQL-contract (Task 3.6) ───
+
+
+@pytest.mark.asyncio
+async def test_list_for_habit_leaderboard_uses_single_join_with_active_filter_and_tiebreaker() -> None:
+    """SQL-contract для list_for_habit_leaderboard (Task 3.6).
+
+    Проверяет:
+    - один SELECT с JOIN user_stats+user;
+    - WHERE membership.status='active' + user_stats.stat_definition_id=:sd;
+    - ORDER BY: user_stats.value DESC, затем membership.id ASC (tie-breaker);
+    - LIMIT :limit;
+    - ни OFFSET, ни INSERT;
+    - active-фильтр ДО ORDER BY/LIMIT (защита от прежней pagination-ошибки).
+    """
+    fake_row_1 = ("mem-uuid-1", 42, "Alice", 100, False)
+    fake_row_2 = ("mem-uuid-2", 43, "Bob", 50, True)
+    fake_result = SimpleNamespace(all=lambda: [fake_row_1, fake_row_2])
+    sess = _ScriptedSession([fake_result])
+    repo = UserStatsRepository(sess)  # type: ignore[arg-type]
+
+    rows = await repo.list_for_habit_leaderboard(
+        habit_id="habit-uuid-1",
+        stat_definition_id="sd-intelligence",
+        limit=100,
+    )
+
+    # Поведение: возвращаются dataclass-инстансы.
+    assert len(rows) == 2
+    assert rows[0].membership_id == "mem-uuid-1"
+    assert rows[0].user_id == 42
+    assert rows[0].first_name == "Alice"
+    assert rows[0].value == 100
+    assert rows[0].is_frozen is False
+    assert rows[1].membership_id == "mem-uuid-2"
+    assert rows[1].user_id == 43
+    assert rows[1].first_name == "Bob"
+    assert rows[1].value == 50
+    assert rows[1].is_frozen is True  # ⚠️ frozen stats в выдаче
+
+    # SQL контракт.
+    sql = _sql_of(sess.execute_calls[0])
+    sql_upper = sql.upper()
+    sql_lower = sql.lower()
+
+    # Тип операции.
+    assert sql_upper.startswith("SELECT")
+    assert "INSERT" not in sql_upper
+
+    # SELECT поля.
+    assert "memberships.id" in sql_lower
+    assert "users.id" in sql_lower
+    assert "user_stats.value" in sql_lower
+    assert "user_stats.is_frozen" in sql_lower
+
+    # JOIN: user_stats + user.
+    assert "user_stats" in sql_lower and "user_id" in sql_lower  # JOIN user_stats ON user_id
+    assert "from memberships" in sql_lower, (
+        f"Expected FROM memberships as base table, got SQL: {sql}"
+    )
+    assert "join users" in sql_lower, (
+        f"Expected JOIN users, got SQL: {sql}"
+    )
+
+    # WHERE:
+    #   - habit_id
+    #   - status = 'active' (НЕ membership.status = ACTIVE-somethingelse; строгий)
+    assert "habit_id" in sql_lower
+    assert "active" in sql_lower
+
+    # ORDER BY (Через хелпер из Task 3.5: exact sequence).
+    # ORDER BY exact sequence: user_stats.value DESC, затем memberships.id ASC.
+    # Проверяем exact substrings в rendered SQL — проще и robust, чем
+    # parse через _extract_order_by_keys (который ломает qualified id's).
+    assert "order by user_stats.value desc" in sql_lower, (
+        f"ORDER BY должен начинаться с user_stats.value DESC. "
+        f"Full SQL: {sql}"
+    )
+    assert "memberships.id asc" in sql_lower, (
+        f"ORDER BY должен заканчиваться tie-breaker memberships.id ASC. "
+        f"Full SQL: {sql}"
+    )
+
+    # LIMIT.
+    assert "limit" in sql_lower
+
+    # ⚠️ CRITICAL: NO OFFSET (worker-driven pagination pattern).
+    assert "offset" not in sql_lower, (
+        "list_for_habit_leaderboard не должен использовать OFFSET — "
+        "active-status ДО LIMIT фильтрует правильно"
+    )

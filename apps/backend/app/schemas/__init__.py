@@ -153,6 +153,78 @@ class SubscribeResponse(BaseModel):
     charged_subscription: bool
 
 
+# ── Phase 3 v2: Character (Phase 3 Task 3.6) ──────────────────────
+
+class CharacterStatusInfo(BaseModel):
+    """Текущий уровень глобального статуса персонажа.
+
+    next_threshold: None — юзер уже на максимальной ступени
+    («Режим зверя»); UI скрывает прогресс-бар.
+    next_status: None → same reason.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str          # «На старте», «В потоке», ..., «Режим зверя»
+    icon: str          # 🐣 / 🌊 / ⚡ / 🔥 / 🐺
+    # ⚠️ None если текущая ступень — максимальная.
+    next_threshold: int | None
+    next_status: str | None
+
+
+class CharacterStatOut(BaseModel):
+    """Одна характеристика в payload GET /character/me.
+
+    last_checkin_at сериализуется Pydantic как ISO datetime (или null).
+    frozen_reason_text — текст заморозки для UI-баннера.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    stat_definition_id: str
+    stat_slug: str          # «intelligence», «strength», и т.д.
+    stat_name: str          # «Интеллект»
+    stat_icon: str          # 🧠
+    value: int
+    is_frozen: bool
+    frozen_reason_text: str | None
+    last_checkin_at: datetime | None
+
+
+class CharacterResponse(BaseModel):
+    """Глобальная карточка персонажа для ProfilePage / CharacterPage.
+
+    total_value = сумма value по всем stats (включая zero/frozen).
+    Возвращается 0 при отсутствии stats — минимальная ступень
+    «На старте» гарантируется через threshold=0 статуса.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    total_value: int
+    status: CharacterStatusInfo
+    stats: list[CharacterStatOut]
+
+
+class StatLeaderboardEntry(BaseModel):
+    """Одна строка лидерборда по характеристике клуба (Task 3.6).
+
+    Frozen stats остаются в рейтинге (UI рисует ❄ через is_frozen).
+    Tie-breaker: membership_id ASC при равных value.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    membership_id: str
+    user_id: int
+    first_name: str          # full first_name (ФЗ-152 first_name_initial — отдельная задача)
+    value: int
+    is_frozen: bool
+
+
+class StatLeaderboardResponse(BaseModel):
+    items: list[StatLeaderboardEntry]
+    # Семантика total та же, что у существующего LeaderboardResponse:
+    # None = обрезки не было (len < limit), иначе = len(items).
+    total: int | None = None
+
+
 class CheckinStatusOut(BaseModel):
     """Статус чек-ина пользователя в клубе + сводная статистика.
 
