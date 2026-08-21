@@ -40,10 +40,7 @@ celery_app = Celery(
         "worker.tasks.close_catch_window",
         "worker.tasks.process_penalty",
         "worker.tasks.process_payment",
-        "worker.tasks.apply_catch_bonus",
-        "worker.tasks.expire_bonus_points",
         "worker.tasks.close_season",
-        "worker.tasks.integrity_check_bonus_transactions",
         "worker.tasks.update_user_photos",
         # Pravki-bug-fixes §Z-21 (Item 6): broadcast catch_event
         # в habit-stream через EventPublisher.publish_to_habit.
@@ -72,14 +69,6 @@ celery_app.conf.beat_schedule = {
         # Каждый час в :05 — после типичного окончания окон чек-ина.
         # Сама таска skip'ает клубы с ещё-открытым окном (защита от раннего штрафа).
         "schedule": crontab(minute=5),
-    },
-    "expire_bonus_points_daily": {
-        "task": "worker.tasks.expire_bonus_points.run",
-        "schedule": crontab(hour=3, minute=0),
-    },
-    "integrity_bonus_daily": {
-        "task": "worker.tasks.integrity_check_bonus_transactions.run",
-        "schedule": crontab(hour=4, minute=0),
     },
     "close_season_daily": {
         "task": "worker.tasks.close_season.run",
