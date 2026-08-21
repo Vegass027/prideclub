@@ -30,8 +30,6 @@
 | username | VARCHAR | @username (NULL возможен) |
 | first_name | VARCHAR | Имя из Telegram |
 | timezone | VARCHAR | Часовой пояс (для отображения, не для бизнес-логики) |
-| bonus_points | BIGINT | Накопительные бонусы (переживают смену клубов) |
-| bonus_points_updated_at | TIMESTAMPTZ | Для cron сгорания через 90 дней |
 | notifications_enabled | BOOLEAN | Сделал ли пользователь `/start` боту |
 | accepted_offer_at | TIMESTAMPTZ | Согласие с офертой (последней версии) |
 | deleted_at | TIMESTAMPTZ | Право на удаление по ФЗ-152 |
@@ -97,10 +95,10 @@
 | membership_id | UUID | FK → memberships (кто нарушил) |
 | catcher_membership_id | UUID | FK → memberships (кто спалил, NULL если никто) |
 | amount | INT | Сумма штрафа |
-| fund_share | INT | Сумма в призовой фонд (= amount) |
-| catcher_bonus_points | INT | Бонусы охотнику |
+| fund_share | INT | Сумма в призовой фонд (после разделения, Phase 1 Task 1.3) |
+| catcher_amount | INT | Сумма на депозит ловцу (Phase 1 Task 1.3) |
+| is_suspicious_pair | BOOLEAN | Флаг для лидерборда (variant A, Phase 1 Task 1.3) |
 | reason | VARCHAR | `caught` / `window_closed_no_catch` / `waived_unable_to_pay` |
-| bonus_applied | BOOLEAN | Начислен ли бонус за этот улов |
 | date | DATE | Для уникального индекса |
 | idempotency_key | VARCHAR UNIQUE | `penalty:{membership_id}:{date}` |
 | created_at | TIMESTAMPTZ | |
@@ -130,7 +128,7 @@
 |---|---|---|
 | id | UUID | |
 | user_id | BIGINT | FK → users |
-| type | VARCHAR | `subscription` / `deposit_topup` / `deposit_withdraw` / `penalty` / `prize` / `bonus_catch` / `bonus_subscription` / `bonus_points` |
+| type | VARCHAR | `subscription` / `deposit_topup` / `deposit_withdraw` / `penalty` / `prize` / `catcher_deposit` |
 | amount | INT | Может быть отрицательным |
 | balance_after | BIGINT | Баланс депозита после операции (для аудита) |
 | related_penalty_id | UUID | FK → penalties |
@@ -186,13 +184,19 @@ PRIMARY KEY: `(membership_id_a, membership_id_b)`.
 
 **Автоматическое поведение при `status = 'flagged'`:**
 - Штраф нарушителя списывается как обычно (дисциплина не ослабляется).
-- `catcher_bonus_points` для этой пары **не начисляется**, улов не идёт в лидерборд.
+- Деньги ловцу **всё равно зачисляются** на депозит (variant A, Phase 1 Task 1.3 — сговор финансово невыгоден в текущей модели).
+- Улов **скрывается из лидерборда** через `Penalty.is_suspicious_pair=true`.
 - Пользователи **не уведомляются** о метке.
 
-Администратору доступны два действия: `cleared` (бонусы включаются) / `banned`
-(membership → paused).
+Администратору доступны два действия: `cleared` (улов вернётся в лидерборд) /
+`banned` (membership → paused).
 
 ### bonus_rules
+*DEPRECATED 2026-08-21 (Phase 8):* таблица и весь связанный код удалены миграцией 018
+(см. EXECUTION-PLAN-2026-08-19.md §Phase 8). Виртуальные очки больше не
+начисляются — ловец получает реальные деньги на свой депозит (Phase 1 Task 1.3).
+Миграция 018 downgrade восстанавливает пустую структуру (только для rollback).
+
 ```sql
 event_type VARCHAR, -- catch / streak_7 / streak_30
 threshold INT,
@@ -247,7 +251,7 @@ PRIMARY KEY (user_id, offer_version_id)
 |---|---|---|
 | `000_extensions` | `000_extensions.py` | `pgcrypto`, `pg_stat_statements` |
 | `001_initial_schema` | `001_initial_schema.py` | Все таблицы раздела 1 + правильные типы и индексы |
-| `002_bonus_and_penalty_fixes` | `002_bonus_and_penalty_fixin.py` | `penalties.{bonus_applied, reason, date}` + UNIQUE `(membership_id, date, reason)`, `users.bonus_points`, `memberships.auto_renew_enabled`, `seasons.prize_rules_snapshot`, таблицы `daily_streak_snapshots`, `suspicious_pairs`, `bonus_rules`, `season_prize_rules`, `pricing_rules`, `offer_versions`, `user_consents` |
+| `002_bonus_and_penalty_fixes` | `002_bonus_and_penalty_fixin.py` | `penalties.{bonus_applied, reason, date}` + UNIQUE `(membership_id, date, reason)`, `users.bonus_points`, `memberships.auto_renew_enabled`, `seasons.prize_rules_snapshot`, таблицы `daily_streak_snapshots`, `suspicious_pairs`, `bonus_rules`, `season_prize_rules`, `pricing_rules`, `offer_versions`, `user_consents` (**DEPRECATED 2026-08-21**: колонки и таблица bonus_rules удалены миграцией 018) |
 | `003_migrate_bonus_points` | `003_migrate_bonus_points.py` | Sanity-check + перенос `memberships.bonus_points` → `users.bonus_points` |
 | `004_notifications_and_offer` | `004_notifications_and_offer.py` | `users.notifications_enabled`, `accepted_offer_at`, `deleted_at`, `data_anonymized`; `habits.timezone='Europe/Moscow'` default |
 | `005_users_gdpr_columns` | `005_users_gdpr_columns.py` | GDPR-специфичные колонки (расширение 004) |
@@ -539,43 +543,28 @@ None для General). Бот прокидывает поле в `/internal/check
 Перед rollback стоит убедиться, что в колонках нет ценных данных (для существующих
 клубов до миграции все три `thread_id` остаются NULL — режим «без топиков»).
 
+Миграция 018 (Phase 8 cleanup bonus, destructive):
+- DROP `users.bonus_points`, `users.bonus_points_updated_at`
+- DROP `memberships.bonus_points`
+- DROP `penalties.catcher_bonus_points`, `penalties.bonus_applied`
+- DROP TABLE `bonus_rules`
+- Потеря: 2 строки `catcher_bonus_points=1` для юзера 𝔭𝖗𝖎𝖓𝖙 (виртуальные, не финансовые).
+- Downgrade — restore ТОЛЬКО структуры (колонки с DEFAULT, пустая таблица), данные не восстанавливаются.
+
 ---
 
 ## 7. BonusService
 
-```python
-class BonusService:
-    def __init__(self, membership_repo, transaction_repo, bonus_rules_repo, user_repo):
-        self._membership_repo = membership_repo
-        self._transaction_repo = transaction_repo
-        self._bonus_rules_repo = bonus_rules_repo
-        self._user_repo = user_repo
+*REMOVED 2026-08-21 (Phase 8):* виртуальная бонусная механика полностью удалена
+(EXECUTION-PLAN-2026-08-19.md §Phase 8). Ловец теперь получает **реальные деньги**
+на свой депозит через `Penalty.catcher_amount` (Phase 1 Task 1.3, Pravki-catcher-deposit).
+BonusService, BonusRuleRepository, BonusRule модель, 3 worker tasks
+(apply_catch_bonus / expire_bonus_points / integrity_check_bonus_transactions)
+и 5 констант (TransactionType.BONUS_*, PenaltyConfig.CATCHER_BONUS_POINTS,
+BONUS_POINTS_EXPIRY_*) — всё удалено.
 
-    async def apply_catch_bonus(self, catcher_membership_id: UUID, penalty_id: UUID):
-        # ... (см. п. 5.3)
-        pass
-
-    async def _grant_reward(self, membership, rule):
-        user = await self._user_repo.get(membership.user_id)
-        if membership.auto_renew_enabled:
-            # Автоподписка покрывает продление — копим в points
-            user.bonus_points += rule.reward_value
-            await self._transaction_repo.create(
-                user_id=user.id, type="bonus_points",
-                amount=0, related_membership_id=membership.id,
-            )
-        else:
-            membership.subscription_until += timedelta(days=rule.reward_value)
-            await self._transaction_repo.create(
-                user_id=user.id, type="bonus_subscription",
-                amount=0, related_membership_id=membership.id,
-                balance_after=membership.deposit_balance,
-            )
-```
-
-`bonus_points` хранится на **`users.id`** (не на membership) — переживает выход из клуба,
-сгорает через 90 дней неактивности (cron `expire_stale_bonus_points`).
-Уведомление за 7 дней до сгорания — через бота (если `notifications_enabled = true`).
+Ранее (pre-Phase 8) bonus_points хранились на **`users.id`** (не на membership) и
+сгорали через 90 дней неактивности через cron `expire_bonus_points`.
 
 ---
 
@@ -636,11 +625,12 @@ def validate_prize_rules(rules: list[PrizeRule]):
 | Задача | Расписание | Действие |
 |---|---|---|
 | `close_catch_window` | Per-habit в `checkin_window_end + 1h` | INSERT штрафов без улова, обновление streak, снапшот |
-| `expire_stale_bonus_points` | Ежедневно | Сгорание бонусов старше 90 дней |
-| `notify_bonus_expiring` | Ежедневно за 7 дней до сгорания | Уведомления в Telegram |
 | `close_season` | В `season.ends_at` | Распределение призов |
-| `integrity_check_bonus_transactions` | Ежедневно | Алерт если `bonus_applied=true` без связанной транзакции |
 | `heartbeat_backup_check` | Внешний, ежечасно | Алерт если `heartbeat/last_success.txt` старше 26 часов |
+
+*REMOVED 2026-08-21 (Phase 8):* `expire_bonus_points`, `notify_bonus_expiring`,
+`integrity_check_bonus_transactions` — удалены вместе с бонусной механикой
+(см. миграцию 018 и §7 выше). |
 
 ---
 

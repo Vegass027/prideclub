@@ -214,11 +214,13 @@ worker/
 │   │   ├── process_checkin.py           # ad-hoc: от backend через send_task("checkin", ...)
 │   │   ├── process_penalty.py           # ad-hoc: от backend через send_task("penalty", ...)
 │   │   ├── process_payment.py           # ad-hoc: подготовлен, контракт сломан, в MVP не вызывается
-│   │   ├── apply_catch_bonus.py         # ad-hoc: после process_penalty, проверяет suspicious_pairs
 │   │   ├── close_catch_window.py        # cron: crontab(minute=5) каждый час
-│   │   ├── expire_bonus_points.py       # cron: crontab(hour=3, minute=0) — сгорание 90+ дней
-│   │   ├── integrity_check_bonus_transactions.py  # cron: crontab(hour=4, minute=0)
 │   │   └── close_season.py              # cron: crontab(hour=5, minute=0)
+│   │
+│   │   # REMOVED Phase 8 (cleanup bonus mechanics, 2026-08-21):
+│   │   # - apply_catch_bonus.py
+│   │   # - expire_bonus_points.py
+│   │   # - integrity_check_bonus_transactions.py
 │   │
 │   └── beat_schedule.py
 │
@@ -310,9 +312,9 @@ infra/
    - "Сегодня" с таймером и статусом.
    - "Участники" с кнопкой "Спалить".
 
-6. **BonusService и сезоны** (2 дня):
-   - Бонусные поинты за уловы, продление подписки.
-   - `season_prize_rules`, `close_season` с автоматическим распределением.
+6. *DONE/REMOVED Phase 8:* BonusService (бонусные поинты) и сезоны.
+   - Виртуальные бонусы удалены в Phase 8 (2026-08-21).
+   - `season_prize_rules`, `close_season` остаются как часть сезонной механики.
 
 7. **Платежи** (2–3 дня):
    - Telegram Payments с `idempotency_key` на `telegram_payment_charge_id`.

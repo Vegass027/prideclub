@@ -68,8 +68,8 @@
 | Задача | Cron | Что делает |
 |---|---|---|
 | `close_catch_window` | `crontab(minute=5)` каждый час | Штрафы без улова (`INSERT ... ON CONFLICT DO NOTHING`) для клубов с закрывшимся окном |
-| `expire_bonus_points` | `crontab(hour=3, minute=0)` | Сгорание бонусов старше 90 дней |
-| `integrity_check_bonus_transactions` | `crontab(hour=4, minute=0)` | Аудит `bonus_applied=true` без связанной `transactions` |
+| `close_season` | `crontab(hour=5, minute=0)` | Распределение призов в конце сезона |
+| *REMOVED Phase 8:* `expire_bonus_points`, `integrity_check_bonus_transactions` — удалены вместе с бонусной механикой (см. EXECUTION-PLAN-2026-08-19.md §Phase 8). |
 | `close_season` | `crontab(hour=5, minute=0)` | Распределение призов в конце сезона |
 
 - Воркеры также обрабатывают ad-hoc задачи, положенные backend'ом через
@@ -156,12 +156,10 @@
                  │     │     ┌────────────────────────┐
                  │     │     │   Worker (Celery)      │ ← process_checkin,
                  │     │     │   --pool=solo          │   process_penalty,
-                 │     │     │   8 tasks + 4 cron     │   process_payment,
-                 │     │     └────┬───────────────────┘   apply_catch_bonus,
-                 │     │          │                       close_catch_window,
-                 │     │          │ asyncpg               close_season,
-                 │     │          │                       expire_bonus_points,
-                 │     │          │                       integrity_check_*_tx
+                 │     │     │   5 tasks + 1 cron     │   process_payment,
+                 │     │     └────┬───────────────────┘   close_catch_window,
+                 │     │          │                       close_season
+                 │     │          │ asyncpg
                  │     │          ▼
                  │     │     ┌────────────────────────┐
                  │     │     │   PostgreSQL 16        │ ← users, habits, memberships,
@@ -209,24 +207,31 @@ Nginx на хосте проксирует на 127.0.0.1 → 5173 (frontend), 8
 1. **Cron `close_catch_window`** каждый час в `:05` помечает всех, кто не отправил
    доказательство, статусом `missed` и **создаёт `penalties` с
    `reason = 'window_closed_no_catch'`** через `INSERT ... ON CONFLICT (membership_id,
-   date, reason) DO NOTHING` (идемпотентно). Это происходит **внутри cron-таски**,
-   а не в отдельной `expire_penalties` (такого имени в коде нет — есть
-   `expire_bonus_points` для протухания бонусов).
+    date, reason) DO NOTHING` (идемпотентно). Это происходит **внутри cron-таски**,
+    а не в отдельной `expire_penalties` (такого имени в коде нет — Phase 8
+    удалил бонусную механику, см. EXECUTION-PLAN-2026-08-19.md §Phase 8).
 2. Участники клуба видят нарушителей в Mini App (экран "Участники") с кнопкой
    "Спалить".
 3. Другой участник нажимает "Спалить" → `POST /internal/penalties/catch` на
    backend. Rate-limit: 10/10s на пользователя (`catch_rate_limiter.py`).
 4. Backend кладёт задачу в Celery (`send_task("penalty", payload)`).
 5. **Worker `worker.tasks.process_penalty.run`** в **одной транзакции PostgreSQL**
-   (`SELECT ... FOR UPDATE` на membership нарушителя):
-   - списывает `amount` с `deposit_balance` (или остаток, если депозит меньше);
-   - зачисляет в `prize_pool` клуба;
-   - создаёт запись в `penalties` с `idempotency_key = penalty:{membership_id}:{date}`;
-   - создаёт запись в `transactions` с `balance_after`;
-   - если депозит опустился до 0 — `membership.status = paused`.
-6. **Отдельная таска `apply_catch_bonus`** (вызывается после `process_penalty`)
-   начисляет бонусные поинты ловцу, проверяя `suspicious_pairs` — если пара
-   в списке, бонус не начисляется и в лидерборд улов не идёт.
+   (`SELECT ... FOR UPDATE` на обоих user'ов в ASC-порядке — deadlock-free,
+   Phase 1 Task 1.3):
+   - списывает `amount` (клэмп ДО = `min(penalty, deposit)`) с `deposit_balance`;
+   - зачисляет `catcher_amount` (ловцу на депозит) и `fund_share` (в `prize_pool` клуба);
+   - создаёт запись в `penalties` с `idempotency_key`, `catcher_amount`, `fund_share`,
+     `is_suspicious_pair`;
+   - создаёт 2 записи в `transactions`: `type=penalty` (для жертвы) и
+     `type=catcher_deposit` (для ловца);
+   - если депозит опустился до 0 — `membership.status = paused` через
+     `recompute_pause_status` (централизованный пересчёт).
+6. *REMOVED Phase 8:* отдельная таска `apply_catch_bonus` для начисления
+   виртуальных бонусных поинтов ловцу удалена. Ловец теперь получает
+   **реальные деньги** на свой депозит через `Penalty.catcher_amount` (Phase 1 Task 1.3,
+   `TransactionType.CATCHER_DEPOSIT`). Suspicious_pairs: деньги всё равно идут,
+   но улов скрывается из лидерборда через `Penalty.is_suspicious_pair=true`
+   (variant A, Дмитрий 2026-08-21).
 
 **Окно спаливания = окно чек-ина клуба + 1 час после.** Все нарушители видны
 всем одновременно. Защита от сговора — `suspicious_pairs` (см.

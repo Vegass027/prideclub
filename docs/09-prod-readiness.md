@@ -67,7 +67,7 @@
 | 3 | **Кэтчер-механика** через worker | ✅ Работает | `process_penalty` через `/internal/penalties/catch` → penalty + transaction в БД. T2: `_is_suspicious` в репо. T5: fail-closed без Redis. |
 | 4 | **Telegram Payments webhook** | ⏸ Код готов, не вызывается | `process_payment` идемпотентен через `charge_id`, но `bot.send_invoice` в коде отсутствует, фронт использует мок `PaymentModal`; в БД `transactions=0` |
 | 5 | **Депозит + штрафы** | ✅ Работает | FK-фикс (penalty → transaction в одной транзакции) |
-| 6 | **Bonus-система** (catch bonus, expire) | ✅ Работает | `apply_catch_bonus`, `expire_bonus_points`. T3: fakes-based DI вместо lookup-коллбэков. |
+| 6 | ~~**Bonus-система** (catch bonus, expire)~~ | ❌ **REMOVED Phase 8 (2026-08-21)** | Виртуальные очки удалены миграцией 018 — см. EXECUTION-PLAN-2026-08-19.md §Phase 8. Ловец теперь получает реальные деньги через `Penalty.catcher_amount` (Phase 1 Task 1.3). |
 | 7 | **Celery Beat** (close_catch_window в :05 каждого часа) | ✅ Работает | `crontab(minute=5)` в `celery_app.py:64` |
 | 8 | **Sentry + Prometheus** | ✅ Инициализируются (no-op без DSN) | `/metrics` endpoint отдаёт метрики |
 | 9 | **PostgreSQL** (12 миграций, расширения) | ✅ Работает | `000_extensions` → `012_proof_types` (миграции 010/011 — topic-scoped чек-ины и третий топик; 012 — `proof_types JSONB` для multi-proof_types в админке) |

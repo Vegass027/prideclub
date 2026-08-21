@@ -510,9 +510,8 @@ celery_app = Celery(
         "worker.tasks.process_checkin",
         "worker.tasks.process_penalty",
         "worker.tasks.process_payment",
-        "worker.tasks.apply_catch_bonus",
         "worker.tasks.close_catch_window",
-        "worker.tasks.expire_bonus_points",
+        # REMOVED Phase 8 (2026-08-21): apply_catch_bonus, expire_bonus_points
     ],
 )
 ```

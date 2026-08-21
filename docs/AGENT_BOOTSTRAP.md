@@ -79,10 +79,11 @@ apps/
 │   └── tests/               # 161 тест
 ├── bot/            # aiogram 3.30 + aiohttp 3.13 (webhook на :8080)
 │   └── bot/handlers/        # start, checkin, payments, chat_member
-├── worker/         # Celery 5.4 + Redis, --pool=solo, 8 tasks + 4 cron
+├── worker/         # Celery 5.4 + Redis, --pool=solo, 5 tasks + 1 cron (после Phase 8 cleanup)
 │   └── worker/tasks/        # process_checkin, process_penalty, process_payment,
-│                            # apply_catch_bonus, close_catch_window, close_season,
-│                            # expire_bonus_points, integrity_check_*
+│                            # close_catch_window, close_season
+│                            # REMOVED Phase 8 (2026-08-21):
+│                            # apply_catch_bonus, expire_bonus_points, integrity_check_*
 └── frontend/       # React 18 + Vite 6 + Tailwind 3 + RQ 5 + Zustand 5
     ├── src/{pages,widgets,shared,admin}/
     │   admin/               # Admin Mini App (отдельный роутер)
@@ -736,10 +737,14 @@ React 18 + TypeScript 5 + Vite 6 → multi-stage Docker (nginx 1.27) — фро�
 asyncpg, Pydantic 2.10) через `/api/v1/*` (initData JWT) и `/admin/v1/*` (initData
 + owner-gate), плюс `/internal/*` (service-token JWT) для бота и воркера. Bot =
 aiogram 3.30 + aiohttp 3.13 webhook на :8080, лёгкие POST'ы на backend.
-Worker = Celery 5.4 (--pool=solo, async внутри), 8 ad-hoc тасок + 4 cron-таски
-(close_catch_window, expire_bonus_points, integrity_check, close_season),
-обрабатывает задачи, положенные backend'ом через `send_task` по имени. БД =
-PostgreSQL 16 (9 миграций, 16 таблиц). Кэш + очереди = Redis 7 (AOF, 256MB cap).
+Worker = Celery 5.4 (--pool=solo, async внутри), 5 ad-hoc тасок + 1 cron-таска
+после Phase 8 (2026-08-21). Бонусная механика (apply_catch_bonus,
+expire_bonus_points, integrity_check_bonus_transactions) удалена.
+Оставшиеся: process_checkin, process_penalty, process_payment,
+close_catch_window (cron), close_season (cron), publish_catch_event,
+publish_you_were_caught. Обрабатывает задачи, положенные backend'ом
+через `send_task` по имени. БД = PostgreSQL 16 (18 миграций после
+Phase 8, 16 таблиц). Кэш + очереди = Redis 7 (AOF, 256MB cap).
 Всё в Docker Compose, на одной bridge-сети `habit-club_default`. Сервер — Contabo
 VPS 4 (Германия, не РФ), nginx на хосте как reverse proxy. Деплой — rsync +
 `docker compose build` + `up -d`. Деньги — `int` копейки. Auth — двухконтурная
