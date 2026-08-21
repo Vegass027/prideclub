@@ -338,6 +338,17 @@ async def run_phase_b(
     catcher, victim = USERS[0], USERS[1]
     victim_membership = membership_ids_b[1]
     catch_payload = {"violator_membership_id": victim_membership}
+    # Pravki-catcher-deposit (Phase 1 Этап 5): снимок deposit ДО catch
+    # (юзеры 99001+ переиспользуются между прогонами, deposit накапливается —
+    # проверяем ДЕЛЬТУ, а не абсолютное значение).
+    async with db.session() as conn:
+        catcher_balance_before = await db.deposit_balance(
+            conn, user_id=catcher.id
+        )
+        victim_balance_before = await db.deposit_balance(
+            conn, user_id=victim.id
+        )
+        prize_before = await db.prize_pool(conn, habit_id=habit_id_b)
     status, resp = await http.api_post(
         f"/api/v1/habits/{habit_id_b}/catch",
         user=catcher,
@@ -399,34 +410,35 @@ async def run_phase_b(
                 f"fund_share({p['fund_share']})"
             )
 
-        # Pravki-catcher-deposit: deposit_balance ловца вырос на catcher_amount.
+        # Pravki-catcher-deposit: дельта deposit_balance (юзеры 99001+
+        # переиспользуются, deposit накапливается — проверяем дельту, а не
+        # абсолют).
         catcher_balance = await db.deposit_balance(conn, user_id=catcher.id)
         victim_balance = await db.deposit_balance(conn, user_id=victim.id)
-        expected_catcher = DEPOSIT_TOPUP_KOPEKS + CATCHER_B
-        if catcher_balance != expected_catcher:
+        catcher_delta = catcher_balance - catcher_balance_before
+        victim_delta = victim_balance - victim_balance_before
+        if catcher_delta != CATCHER_B:
             raise AssertionError(
-                f"catcher.deposit_balance expected {expected_catcher} "
-                f"({DEPOSIT_TOPUP_KOPEKS} initial + {CATCHER_B} catcher reward), "
-                f"got {catcher_balance}"
+                f"catcher.deposit_balance delta expected +{CATCHER_B}, "
+                f"got {catcher_delta} ({catcher_balance_before} → {catcher_balance})"
             )
-        expected_victim = DEPOSIT_TOPUP_KOPEKS - PENALTY_B
-        if victim_balance != expected_victim:
+        if victim_delta != -PENALTY_B:
             raise AssertionError(
-                f"victim.deposit_balance expected {expected_victim} "
-                f"({DEPOSIT_TOPUP_KOPEKS} initial - {PENALTY_B} penalty), "
-                f"got {victim_balance}"
+                f"victim.deposit_balance delta expected -{PENALTY_B}, "
+                f"got {victim_delta} ({victim_balance_before} → {victim_balance})"
             )
 
         # Pravki-catcher-deposit: prize_pool вырос на fund_share.
         prize = await db.prize_pool(conn, habit_id=habit_id_b)
-        # Phase B — единственный catch в этом клубе, prize_pool должен быть
-        # ровно fund_share (= PENALTY_B - CATCHER_B).
-        expected_prize = PENALTY_B - CATCHER_B
-        if prize != expected_prize:
+        prize_delta = prize - prize_before
+        # Phase B — единственный catch в этом клубе за прогон,
+        # prize_pool должен вырасти на fund_share (= PENALTY_B - CATCHER_B).
+        expected_prize_delta = PENALTY_B - CATCHER_B
+        if prize_delta != expected_prize_delta:
             raise AssertionError(
-                f"Habit.prize_pool expected {expected_prize} "
+                f"Habit.prize_pool delta expected +{expected_prize_delta} "
                 f"({PENALTY_B} penalty - {CATCHER_B} catcher), "
-                f"got {prize}"
+                f"got {prize_delta} ({prize_before} → {prize})"
             )
 
         # Печать фактических значений для верификации (как просил Дмитрий)
@@ -435,20 +447,21 @@ async def run_phase_b(
         print(f"       Penalty.amount          = {p['amount']:>6} коп "
               f"({p['amount'] / 100:>5.2f}₽)")
         print(f"       Penalty.catcher_amount   = {p['catcher_amount']:>6} коп "
-              f"({p['catcher_amount'] / 100:>5.2f}�)  [expected {CATCHER_B}]")
+              f"({p['catcher_amount'] / 100:>5.2f}₽)  [expected {CATCHER_B}]")
         print(f"       Penalty.fund_share       = {p['fund_share']:>6} коп "
               f"({p['fund_share'] / 100:>5.2f}₽)  "
               f"[expected {PENALTY_B - CATCHER_B}]")
         print(f"       Penalty.is_suspicious_pair = {p['is_suspicious_pair']}  "
               f"[expected False]")
-        print(f"       catcher.deposit_balance = {catcher_balance:>6} коп "
-              f"({catcher_balance / 100:>5.2f}₽)  "
-              f"[expected {expected_catcher}]")
-        print(f"       victim.deposit_balance  = {victim_balance:>6} коп "
-              f"({victim_balance / 100:>5.2f}₽)  "
-              f"[expected {expected_victim}]")
-        print(f"       Habit.prize_pool        = {prize:>6} коп "
-              f"({prize / 100:>5.2f}₽)  [expected {expected_prize}]")
+        print(f"       catcher.deposit_balance = {catcher_balance_before:>6} → "
+              f"{catcher_balance:>6} коп "
+              f"(Δ +{catcher_delta}, expected +{CATCHER_B})")
+        print(f"       victim.deposit_balance  = {victim_balance_before:>6} → "
+              f"{victim_balance:>6} коп "
+              f"(Δ {victim_delta}, expected -{PENALTY_B})")
+        print(f"       Habit.prize_pool        = {prize_before:>6} → "
+              f"{prize:>6} коп "
+              f"(Δ +{prize_delta}, expected +{expected_prize_delta})")
 
     # 11. Victim пытается video_note — bot prefilter должен REJECT caught_today.
     # Бот шлёт в фейк-чат send_message → fail, но HTTP 200 от webhook всё равно.
