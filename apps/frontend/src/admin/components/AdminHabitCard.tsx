@@ -95,6 +95,25 @@ export function AdminHabitCard({
           <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Доказательство:</span> <strong className="text-text">{habit.proof_types.map((t) => t === "video_note" ? "видео-кружок" : t === "photo" ? "фото" : "текст").join(" или ")}</strong></li>
           <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Цена в месяц:</span> <strong className="text-text">{formatRub(habit.price_month)}</strong></li>
           <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Штраф за пропуск:</span> <strong className="text-text">{formatRub(habit.penalty_amount)}</strong></li>
+          {/* Pravki-catcher-deposit (Phase 1 Task 1.6b, 2026-08-21): сумма ловцу
+              отображается только если > 0 (default = всё в фонд — старая логика,
+              владельцу незачем видеть неактивную настройку). Warning если
+              >= штрафа — clamp на бэкенде в apply_catch. */}
+          {habit.catcher_amount_kopecks > 0 && (
+            <li className="flex gap-2">
+              <span aria-hidden="true">•</span>
+              <span className="text-muted">Ловцу за поимку:</span>
+              <strong className="text-text">{formatRub(habit.catcher_amount_kopecks)}</strong>
+              {habit.catcher_amount_kopecks >= habit.penalty_amount && (
+                <span
+                  className="text-warning"
+                  title="Если баланс нарушителя меньше штрафа, доли считаются от фактически списанной суммы"
+                >
+                  ⚠️ вся сумма штрафа уходит ловцу
+                </span>
+              )}
+            </li>
+          )}
           <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Призовой фонд:</span> <strong className="text-text">{formatRub(habit.prize_pool)}</strong></li>
           <li className="flex gap-2"><span aria-hidden="true">•</span><span className="text-muted">Участников:</span> <strong className="text-text">{habit.active_members_count}</strong>{habit.member_limit !== null && (<span className="text-muted"> / {habit.member_limit}</span>)}</li>
           {habit.stat_gain_per_checkin > 0 && (
