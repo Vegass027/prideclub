@@ -10,6 +10,7 @@ import pytest
 from app.core.constants import (
     MembershipStatus,
     PenaltyConfig,
+    ProofType,
     TransactionType,
 )
 from app.core.exceptions import (
@@ -17,6 +18,7 @@ from app.core.exceptions import (
     CatchWindowClosedError,
     PenaltyAlreadyProcessedError,
 )
+from app.models.habit import Habit
 from app.models.penalty import Penalty
 from app.models.transaction import Transaction
 from app.services.penalty_service import PenaltyService
@@ -958,3 +960,241 @@ async def test_mark_waived_unable_to_pay_no_op_returns_none_no_side_effects() ->
     violator_user = await user_repo.get(1)
     assert violator_user is not None
     assert violator_user.deposit_balance == initial_deposit
+
+
+# ── НОВОЕ: stat-decrement integration (Phase 3 Task 3.4) ────────
+
+
+class _EventsRecordingSession(_NoStreakSession):
+    """Расширяет _NoStreakSession events-log для order-assertion.
+
+    Контракт events (list[str], общий между session и recording service):
+    - "session_flush_<N>" — N-й вызов flush() (все вызовы).
+    - "penalty_flushed" — первый flush() ПОСЛЕ add(Penalty). Используется
+      как маркер для order-assertion.
+    - "stat_decremented" — _RecordingCharacterService.decrement_on_penalty
+      вызван.
+
+    Tests:
+    - test_apply_catch_decrements_stat_after_flush — events.index("penalty_flushed")
+      < events.index("stat_decremented").
+    """
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+        self._flush_count = 0
+        self._penalty_added = False
+
+    def add(self, obj: Any) -> None:
+        if isinstance(obj, Penalty):
+            self._penalty_added = True
+        super().add(obj)
+
+    async def flush(self) -> None:
+        self._flush_count += 1
+        self.events.append(f"session_flush_{self._flush_count}")
+        if self._penalty_added:
+            self.events.append("penalty_flushed")
+            self._penalty_added = False  # только один раз
+
+
+class _RecordingCharacterService:
+    """Узкий stub для boundary-контракта decrement_on_penalty.
+
+    Append'ит "stat_decremented" в shared events list — нужно для
+    test_apply_catch_decrements_stat_after_flush (order-assertion).
+    apply_freeze/increment_on_checkin удалены за ненадобностью
+    (per Dmitry 21.08.2026).
+    """
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.decrement_calls: list[tuple[int, str, int]] = []
+
+    async def decrement_on_penalty(
+        self, *, user_id: int, stat_definition_id: str, loss: int,
+    ) -> int | None:
+        self.events.append("stat_decremented")
+        self.decrement_calls.append((user_id, stat_definition_id, loss))
+        return 0
+
+
+def _make_penalty_habit(
+    *, stat_definition_id: str | None = "intel", gain: int = 2, loss: int = 1,
+) -> Habit:
+    """Habit для penalty-тестов с настраиваемой stat_definition_id."""
+    return Habit(
+        id=str(uuid4()),
+        title="Test",
+        chat_id=100,
+        checkin_window_start=time(9, 0),
+        checkin_window_end=time(21, 0),
+        timezone="Europe/Moscow",
+        penalty_amount=100,
+        price_month=1000,
+        prize_pool=0,
+        proof_type=ProofType.VIDEO_NOTE,
+        proof_types=["video_note"],
+        catcher_amount_kopecks=0,
+        stat_definition_id=stat_definition_id,
+        stat_gain_per_checkin=gain,
+        stat_loss_per_miss=loss,
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_decrements_stat_after_flush() -> None:
+    """ORDER ASSERTION: stat-decrement ВСЕГДА после flush(Penalty).
+
+    Контракт транзакционных границ (Phase 3 Task 3.4, per Dmitry
+    21.08.2026): decrement-on-penalty идёт ПОСЛЕ первого
+    flush(penalty) И ДО upsert_status(Checkin='caught')/Commit.
+
+    Если кто-то в будущем перенесёт decrement перед flush —
+    тест сломается (events.index отражает порядок).
+    """
+    events: list[str] = []
+    session = _EventsRecordingSession(events)
+
+    habit = _make_penalty_habit(stat_definition_id="intel", loss=1)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    catcher = membership_repo.add_for(user_id=2, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+    user_repo.add(_make_user(id=2, deposit_balance=0))
+
+    checkin_repo = FakeCheckinRepo()
+    char_service = _RecordingCharacterService(events)
+    limiter = _NoopLimiter()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=limiter,
+        character_service=char_service,
+    )
+
+    penalty = await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+        catcher_membership_id=str(catcher.id),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
+    )
+
+    # Sanity: метод реально вызвался с правильными args.
+    assert char_service.decrement_calls == [
+        (1, "intel", 1),  # (user_id, stat_definition_id, loss)
+    ]
+    assert penalty.amount == habit.penalty_amount
+
+    # ── ORDER ASSERTION ──
+    assert "penalty_flushed" in events, f"expected penalty_flushed: {events}"
+    assert "stat_decremented" in events, f"expected stat_decremented: {events}"
+    assert events.index("penalty_flushed") < events.index(
+        "stat_decremented"
+    ), (
+        "stat-decrement ДОЛЖЕН идти после flush(penalty) — иначе "
+        "нарушаются транзакционные границы catch-flow. "
+        f"events={events}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_skips_stat_when_habit_has_no_stat_definition() -> None:
+    """habit.stat_definition_id IS NULL → decrement НЕ зовётся."""
+    events: list[str] = []
+    session = _EventsRecordingSession(events)
+
+    habit = _make_penalty_habit(stat_definition_id=None)  # NULL
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    catcher = membership_repo.add_for(user_id=2, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+    user_repo.add(_make_user(id=2, deposit_balance=0))
+
+    checkin_repo = FakeCheckinRepo()
+    char_service = _RecordingCharacterService(events)
+    limiter = _NoopLimiter()
+
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=limiter,
+        character_service=char_service,
+    )
+
+    await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+        catcher_membership_id=str(catcher.id),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
+    )
+
+    # Guard 1 (habit IS NULL) сработал — decrement не звался.
+    assert char_service.decrement_calls == []
+    # Order irrelevant: stat_decremented не в events вовсе.
+    assert "stat_decremented" not in events
+
+
+@pytest.mark.asyncio
+async def test_apply_catch_skips_stat_when_character_service_is_none() -> None:
+    """DI guard 2: character_service=None → silent no-op."""
+    events: list[str] = []
+    session = _EventsRecordingSession(events)
+
+    habit = _make_penalty_habit(stat_definition_id="intel", loss=1)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+
+    membership_repo = FakeMembershipRepo()
+    violator = membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    catcher = membership_repo.add_for(user_id=2, habit_id=str(habit.id))
+
+    user_repo = FakeUserRepo()
+    user_repo.add(_make_user(id=1, deposit_balance=500))
+    user_repo.add(_make_user(id=2, deposit_balance=0))
+
+    checkin_repo = FakeCheckinRepo()
+    limiter = _NoopLimiter()
+
+    # character_service: default None
+    service = PenaltyService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        suspicious_repo=FakeSuspiciousPairsRepository(),
+        user_repo=user_repo,
+        redis_port=limiter,
+    )
+
+    await service.apply_catch(
+        catcher_user_id=2,
+        violator_membership_id=str(violator.id),
+        club_date=date(2026, 1, 1),
+        catcher_membership_id=str(catcher.id),
+        now_utc=datetime(2026, 1, 1, 22, 0, tzinfo=ZoneInfo("UTC")),
+    )
+
+    # character_service=None → silent no-op; "stat_decremented" нет.
+    assert "stat_decremented" not in events

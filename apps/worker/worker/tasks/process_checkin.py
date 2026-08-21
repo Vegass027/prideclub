@@ -24,6 +24,7 @@ from app.schemas import CheckinStatusOut, HabitOut, MembershipOut, TodayResponse
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage, ProofValidationError
 from db.session import async_session_factory  # type: ignore[import-not-found]
+from worker.services.character_factory import _build_character_service
 from worker.services.event_publisher import CheckinEvent, EventPublisher
 
 
@@ -51,15 +52,16 @@ async def _build_today_payload(
     """
     from app.core.exceptions import HabitArchivedError, MembershipNotFoundError
 
-    async with session_factory() as session:
-        service = CheckinService(
-            session=session,
-            habit_repo=HabitRepository(session),
-            membership_repo=MembershipRepository(session),
-            checkin_repo=CheckinRepository(session),
-            penalty_repo=PenaltyRepository(session),
-            cache=None,
-        )
+async with session_factory() as session:
+            service = CheckinService(
+                session=session,
+                habit_repo=HabitRepository(session),
+                membership_repo=MembershipRepository(session),
+                checkin_repo=CheckinRepository(session),
+                penalty_repo=PenaltyRepository(session),
+                cache=None,
+                character_service=_build_character_service(session),
+            )
         try:
             habit, membership, stats = await service.get_today_status(
                 user_id=user_id,
@@ -225,6 +227,7 @@ async def _process(
                 checkin_repo=CheckinRepository(session),
                 penalty_repo=PenaltyRepository(session),
                 cache=cache,
+                character_service=_build_character_service(session),
             )
             checkin, created = await service.process_checkin(
                 user_id=payload["user_id"],

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.users import TelegramUserDbDep
 from app.core.constants import CheckinStatus
-from app.core.deps import RedisDep, SessionDep
+from app.core.deps import RedisDep, SessionDep, get_character_service
 from app.core.exceptions import HabitArchivedError, PenaltyAlreadyProcessedError
 from app.core.logging import get_logger
 from app.models.checkin import Checkin
@@ -227,6 +227,7 @@ async def catch_violator(
         checkin_repo=checkin_repo,
         suspicious_repo=suspicious_repo,
         redis_port=RedisCatchRateLimiter(redis),
+        character_service=get_character_service(session),
     )
 
     catcher_membership = await membership_repo.get_for_user_in_habit(user.id, habit_id)

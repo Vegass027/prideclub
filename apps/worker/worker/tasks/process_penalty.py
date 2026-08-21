@@ -14,6 +14,7 @@ from app.repositories.membership_repository import MembershipRepository
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.services.penalty_service import PenaltyService
 from db.session import async_session_factory  # type: ignore[import-not-found]
+from worker.services.character_factory import _build_character_service
 
 
 async def _pause_violator(payload: dict, *, factory) -> None:
@@ -154,13 +155,14 @@ async def _process(
 
     async with factory() as session:
         try:
-            service = PenaltyService(
+service = PenaltyService(
                 session=session,
                 habit_repo=HabitRepository(session),
                 membership_repo=MembershipRepository(session),
                 checkin_repo=CheckinRepository(session),
-                suspicious_repo=SuspiciousPairsRepository(session),
+                suspicious_repo=SuspiciousPairsRepository(),
                 redis_port=redis_port,
+                character_service=_build_character_service(session),
             )
             penalty = await service.apply_catch(
                 catcher_user_id=payload["catcher_user_id"],

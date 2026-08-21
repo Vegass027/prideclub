@@ -10,6 +10,7 @@ from app.api.v1.users import TelegramUserDbDep
 from app.core.config import get_settings
 from app.core.deps import SessionDep
 from app.db.redis import get_redis
+from app.core.deps import get_character_service
 from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
@@ -23,6 +24,7 @@ from app.schemas import (
     MyHabitsListResponse,
     TodayResponse,
 )
+from app.services.character_service import CharacterService
 from app.services.checkin_service import CheckinService
 from app.services.today_cache import RedisTodayCache
 
@@ -39,7 +41,16 @@ def _redis_enabled() -> bool:
 
 async def get_checkin_service(
     session: SessionDep,
+    character_service: Annotated[
+        CharacterService, Depends(get_character_service)
+    ],
 ) -> CheckinService:
+    """DI provider для CheckinService — собирает 5 repos + char_service.
+
+    Phase 3 Task 3.4: добавлен character_service через Depends на
+    get_character_service (deps.py). Все мутации в одной
+    транзакции (одна session на handler).
+    """
     cache = RedisTodayCache(get_redis()) if _redis_enabled() else None
     return CheckinService(
         session=session,
@@ -48,6 +59,7 @@ async def get_checkin_service(
         checkin_repo=CheckinRepository(session),
         penalty_repo=PenaltyRepository(session),
         cache=cache,
+        character_service=character_service,
     )
 
 

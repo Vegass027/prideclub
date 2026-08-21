@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from uuid import uuid4
 
 import pytest
@@ -10,6 +10,7 @@ from app.core.exceptions import (
     CheckinWindowClosedError,
 )
 from app.models.checkin import Checkin
+from app.models.habit import Habit
 from app.models.penalty import Penalty
 from app.services.checkin_service import CheckinService
 from app.services.proof_validator import ProofMessage, ProofValidationError
@@ -601,3 +602,216 @@ async def test_get_today_status_penalty_for_today_kopecks_reflects_today_penalti
         f"Ожидали 12500 (только сегодняшний penalty), получили {stats.penalty_for_today_kopecks}. "
         f"Старый penalty за вчера НЕ должен попадать."
     )
+
+
+# ── НОВОЕ: stat-инкремент integration (Phase 3 Task 3.4) ────────
+
+
+class _RecordingCharacterService:
+    """Узкий stub для boundary-контракта increment_on_checkin.
+
+    Не полный fake — для каждого теста мы хотим ровно один
+    метод (чтобы детектировать лишние вызовы). Удаление
+    apply_freeze/decrement_on_penalty сделано намеренно
+    (per Dmitry 21.08.2026): неиспользуемые методы шумят
+    и затуманивают границу.
+    """
+    def __init__(self) -> None:
+        self.increment_calls: list[tuple[int, str, int]] = []
+
+    async def increment_on_checkin(
+        self, *, user_id: int, stat_definition_id: str, gain: int,
+    ) -> int:
+        self.increment_calls.append((user_id, stat_definition_id, gain))
+        return 7
+
+
+def _make_habit_with_stat(
+    *,
+    stat_definition_id: str = "intel",
+    gain: int = 2,
+    loss: int = 1,
+) -> Habit:
+    """Habit с установленным stat_definition_id (для тестов stat-integration).
+
+    make_habit() по умолчанию даёт stat_definition_id=None; для тестов,
+    которым нужна реальная характеристика, строим Habit напрямую.
+    """
+    return Habit(
+        id=str(uuid4()),
+        title="Test Habit",
+        chat_id=100,
+        checkin_window_start=time(9, 0),
+        checkin_window_end=time(21, 0),
+        timezone="Europe/Moscow",
+        penalty_amount=100,
+        price_month=1000,
+        prize_pool=0,
+        proof_type=ProofType.VIDEO_NOTE,
+        proof_types=["video_note"],
+        catcher_amount_kopecks=0,
+        stat_definition_id=stat_definition_id,
+        stat_gain_per_checkin=gain,
+        stat_loss_per_miss=loss,
+    )
+
+
+@pytest.mark.asyncio
+async def test_checkin_increments_stat_when_habit_has_stat_definition() -> None:
+    """Happy path: habit.stat_definition_id IS NOT NULL → increment зовётся."""
+    habit = _make_habit_with_stat(stat_definition_id="intel", gain=2)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+
+    char_service = _RecordingCharacterService()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+        character_service=char_service,
+    )
+
+    await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=42,
+        now_utc=datetime.now(tz=UTC),
+    ))
+
+    assert char_service.increment_calls == [
+        (1, "intel", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_checkin_skips_stat_when_habit_has_no_stat_definition() -> None:
+    """habit.stat_definition_id IS NULL → increment НЕ зовётся.
+
+    Guard 1 — даже если character_service передан, NULL stat
+    skip'ает (старые клубы без выбранной характеристики).
+    """
+    habit = make_habit()  # default: stat_definition_id=None
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+
+    char_service = _RecordingCharacterService()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+        character_service=char_service,
+    )
+
+    await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=42,
+        now_utc=datetime.now(tz=UTC),
+    ))
+
+    assert char_service.increment_calls == []
+
+
+@pytest.mark.asyncio
+async def test_checkin_skips_stat_when_character_service_is_none() -> None:
+    """DI guard 2: character_service=None (backward-compat) → silent no-op."""
+    habit = _make_habit_with_stat(stat_definition_id="intel", gain=2)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+        # character_service: default None — silent no-op
+    )
+
+    # Не должен поднять исключение.
+    await _wrap(service.process_checkin(
+        user_id=1,
+        habit_id=str(habit.id),
+        proof=_proof(),
+        proof_message_id=42,
+        now_utc=datetime.now(tz=UTC),
+    ))
+
+
+@pytest.mark.asyncio
+async def test_two_habits_share_stat_definition_via_increment() -> None:
+    """Два разных habit с одним stat_definition_id → один общий shared id
+    в CharacterService. Без race-claims — только service-boundary контракт.
+
+    Phase 3 Task 3.4: aggregation contract — оба чек-ина увеличивают
+    ОДИН общий счётчик для пользователя (один stat). Multi-club
+    aggregation проверяется на уровне CharacterService (Task 3.3),
+    здесь — только что SAME stat_definition_id передаётся в сервис.
+    """
+    habit_a = _make_habit_with_stat(stat_definition_id="intel", gain=2)
+    habit_b = _make_habit_with_stat(stat_definition_id="intel", gain=3)
+    habit_repo = FakeHabitRepo()
+    habit_repo.add(habit_a)
+    habit_repo.add(habit_b)
+    membership_repo = FakeMembershipRepo()
+    membership_repo.add_for(user_id=1, habit_id=str(habit_a.id))
+    membership_repo.add_for(user_id=1, habit_id=str(habit_b.id))
+    checkin_repo = FakeCheckinRepo()
+    penalty_repo = FakePenaltyRepo()
+
+    char_service = _RecordingCharacterService()
+    session = FakeSession(checkin_repo)
+
+    service = CheckinService(
+        session=session,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        checkin_repo=checkin_repo,
+        penalty_repo=penalty_repo,
+        character_service=char_service,
+    )
+
+    # Два чек-ина в разные клубы с одной stat.
+    now = datetime.now(tz=UTC)
+    await _wrap(service.process_checkin(
+        user_id=1, habit_id=str(habit_a.id),
+        proof=_proof(msg_date=now), proof_message_id=1, now_utc=now,
+    ))
+    await _wrap(service.process_checkin(
+        user_id=1, habit_id=str(habit_b.id),
+        proof=_proof(msg_date=now), proof_message_id=2, now_utc=now,
+    ))
+
+    # Оба вызова с тем же stat_definition_id="intel", разные gain'ы.
+    assert char_service.increment_calls == [
+        (1, "intel", 2),
+        (1, "intel", 3),
+    ]
+    # Конкретно: shared stat_id "intel" — одинаковый.
+    stat_ids = [c[1] for c in char_service.increment_calls]
+    assert len(set(stat_ids)) == 1
+    assert stat_ids[0] == "intel"

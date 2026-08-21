@@ -27,6 +27,7 @@ from app.repositories.checkin_repository import CheckinRepository
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.penalty_repository import PenaltyRepository
+from app.services.character_service import CharacterService
 from app.services.proof_validator import ProofMessage, validate_proof_media
 
 
@@ -68,6 +69,7 @@ class CheckinService:
         checkin_repo: CheckinRepository,
         penalty_repo: PenaltyRepository,
         cache: CachePort | None = None,
+        character_service: CharacterService | None = None,
     ) -> None:
         self._session = session
         self._habit_repo = habit_repo
@@ -75,6 +77,7 @@ class CheckinService:
         self._checkin_repo = checkin_repo
         self._penalty_repo = penalty_repo
         self._cache = cache
+        self._character_service = character_service
         self._logger = get_logger("checkin_service")
 
     async def process_checkin(
@@ -255,6 +258,9 @@ class CheckinService:
 
         if not created:
             # Уже был чек-ин сегодня — это идемпотентный ответ, не ошибка.
+            # ВАЖНО: stat-инкремент НЕ должен зваться для дубликатов —
+            # идемпотентность дня обеспечена локальной переменной `created`
+            # (НЕ полем Checkin.created, которого не существует).
             self._logger.info(
                 "checkin_duplicate",
                 extra={
@@ -262,6 +268,22 @@ class CheckinService:
                     "habit_id": habit_id,
                     "date": str(club_date),
                 },
+            )
+
+        # ── НОВОЕ: stat-инкремент (Phase 3 Task 3.4) ─────────────
+        # После `if not created:` branch, до cache invalidate. Только при
+        # freshly inserted (created=True) и только если char_service
+        # передан + habit имеет stat_definition_id (старые клубы без
+        # выбранной характеристики skip'аются).
+        if (
+            created
+            and self._character_service is not None
+            and habit.stat_definition_id is not None
+        ):
+            await self._character_service.increment_on_checkin(
+                user_id=user_id,
+                stat_definition_id=habit.stat_definition_id,
+                gain=habit.stat_gain_per_checkin,
             )
 
         if self._cache is not None:

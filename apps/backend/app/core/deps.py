@@ -49,6 +49,33 @@ def get_avatar_service(
     )
 
 
+from app.repositories.stat_definition_repository import StatDefinitionRepository
+from app.repositories.user_status_repository import UserStatusRepository
+from app.repositories.user_stats_repository import UserStatsRepository
+from app.services.character_service import CharacterService
+
+
+def get_character_service(session: SessionDep) -> CharacterService:
+    """DI provider для CharacterService (Phase 3 v2, Task 3.4).
+
+    Composes 3 repositories поверх session из FastAPI DI — НЕ
+    открывает свою. Это composition concern (не business logic):
+    CharacterService остаётся "clean" (только __init__ с 3 args).
+
+    Используется в get_checkin_service (habits.py) и напрямую в
+    catch_violator (members.py) для PenaltyService.
+
+    Pravki.md 2026-07-24: расположен рядом с get_avatar_service —
+    та же семантика (provider function, разные repos, один
+    AsyncSession на запрос).
+    """
+    return CharacterService(
+        user_stats_repo=UserStatsRepository(session),
+        user_status_repo=UserStatusRepository(session),
+        stat_definition_repo=StatDefinitionRepository(session),
+    )
+
+
 AvatarServiceDep = Annotated[AvatarService, Depends(get_avatar_service)]
 
 

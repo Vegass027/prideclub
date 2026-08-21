@@ -30,6 +30,7 @@ from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.suspicious_pairs_repository import SuspiciousPairsRepository
 from app.repositories.user_repository import UserRepository
+from app.services.character_service import CharacterService
 from app.services.membership_service import MembershipService
 
 
@@ -59,6 +60,7 @@ class PenaltyService:
         user_repo: UserRepository | None = None,
         membership_service: MembershipService | None = None,
         redis_port: RedisPort | None = None,
+        character_service: CharacterService | None = None,
     ) -> None:
         self._session = session
         self._habit_repo = habit_repo
@@ -73,6 +75,7 @@ class PenaltyService:
             user_repo=self._user_repo,
         )
         self._redis = redis_port
+        self._character_service = character_service
         self._logger = get_logger("penalty_service")
 
     async def apply_catch(
@@ -278,6 +281,22 @@ class PenaltyService:
         # не зафиксированный penalty → ForeignKeyViolationError.
         # Сначала flush'им penalty (INSERT + RETURNING), затем transaction.
         await self._session.flush()
+
+        # ── НОВОЕ: stat-decrement (Phase 3 Task 3.4) ─────────────
+        # Preserve catch mutation order: flush the new penalty first,
+        # then apply the character decrement in the same transaction.
+        # Rollback safety: исключение из character_service пропагируется
+        # наверх — worker process_penalty rollback'нет всю tx (Penalty +
+        # Transaction + user_stats — all-or-nothing).
+        if (
+            self._character_service is not None
+            and habit.stat_definition_id is not None
+        ):
+            await self._character_service.decrement_on_penalty(
+                user_id=violator.user_id,
+                stat_definition_id=habit.stat_definition_id,
+                loss=habit.stat_loss_per_miss,
+            )
 
         # Pravki-bug-fixes §Z-21 (caught badge): пишем Checkin(status='caught')
         # сразу после penalty, чтобы /members (can_catch=False) и /today
