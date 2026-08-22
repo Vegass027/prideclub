@@ -111,8 +111,12 @@ def _habit_to_out(habit: Habit, active_members_count: int = 0) -> AdminHabitOut:
         is_active=habit.is_active,
         photo_url=habit.photo_url,
         telegram_invite_link=habit.telegram_invite_link,
-        stat_name=habit.stat_name,
-        stat_icon=habit.stat_icon,
+        # Phase 3 v2 Task 3.7: free-text stat_name/stat_icon УБРАНЫ
+        # из response. UI берёт metadata из /admin/v1/stat-definitions
+        # list endpoint по stat_definition_id.
+        stat_definition_id=(
+            str(habit.stat_definition_id) if habit.stat_definition_id else None
+        ),
         stat_gain_per_checkin=habit.stat_gain_per_checkin,
         stat_loss_per_miss=habit.stat_loss_per_miss,
         # Pravki-catcher-deposit (Phase 1 Task 1.5): в response для UI.
@@ -148,8 +152,8 @@ async def create_habit(
         description=payload.description,
         photo_url=payload.photo_url,
         telegram_invite_link=payload.telegram_invite_link,
-        stat_name=payload.stat_name,
-        stat_icon=payload.stat_icon,
+        # Phase 3 v2 Task 3.7: stat_definition_id (UUID) вместо stat_name/stat_icon.
+        stat_definition_id=str(payload.stat_definition_id),
         chat_id=payload.chat_id,
         checkin_window_start=payload.checkin_window_start,
         checkin_window_end=payload.checkin_window_end,

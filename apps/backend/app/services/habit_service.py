@@ -33,6 +33,9 @@ from app.core.logging import get_logger
 from app.core.telegram_links import parse_telegram_topic_link
 from app.repositories.habit_repository import HabitRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.stat_definition_repository import (
+    StatDefinitionRepository,
+)
 
 _TELEGRAM_INVITE_RE = re.compile(r"^https://(t\.me|telegram\.me)/[A-Za-z0-9_+\-/]+$")
 
@@ -43,10 +46,18 @@ class HabitService:
         session,
         habit_repo: HabitRepository,
         membership_repo: MembershipRepository,
+        # Phase 3 v2 Task 3.7: stat_definition_repo optional с fallback
+        # для backward-compat с existing call sites (admin/v1/habits.py
+        # и test fixtures используют старую 3-arg форму).
+        stat_definition_repo: StatDefinitionRepository | None = None,
     ) -> None:
         self._session = session
         self._habit_repo = habit_repo
         self._membership_repo = membership_repo
+        # Fallback: read-only stateless repo может быть создан на лету.
+        self._stat_definition_repo = (
+            stat_definition_repo or StatDefinitionRepository(session)
+        )
         self._logger = get_logger("habit_service")
 
     async def create(
@@ -57,8 +68,9 @@ class HabitService:
         description: str | None,
         photo_url: str | None,
         telegram_invite_link: str | None,
-        stat_name: str,
-        stat_icon: str | None,
+        # Phase 3 v2 Task 3.7: stat_definition_id FK на stat_definitions,
+        # REQUIRED. Free-text stat_name/stat_icon УБРАНЫ.
+        stat_definition_id: str,
         chat_id: int,
         checkin_window_start: Any,
         checkin_window_end: Any,
@@ -89,11 +101,16 @@ class HabitService:
         из {"video_note", "photo", "text"}. `proof_type` в БД
         выставляется как `proof_types[0]` (для обратной совместимости
         со старыми клиентами Bot API).
+
+        Phase 3 v2 Task 3.7: stat_definition_id (UUID) обязателен,
+        валидация FK existence/active через StatDefinitionRepository.
         """
         _validate_title(title)
-        _validate_stat_name(stat_name)
-        if stat_icon is not None:
-            _validate_stat_icon(stat_icon)
+        # NEW: FK validation (через repository, без inline SQL).
+        await _validate_stat_definition_id_exists(
+            self._stat_definition_repo, stat_definition_id
+        )
+        # Удалены: _validate_stat_name, _validate_stat_icon (legacy free-text).
         _validate_telegram_invite_link(telegram_invite_link)
         _validate_timezone(timezone_str)
         _validate_checkin_window(checkin_window_start, checkin_window_end)
@@ -188,8 +205,8 @@ class HabitService:
             "is_active": False,
             "photo_url": photo_url,
             "telegram_invite_link": telegram_invite_link,
-            "stat_name": stat_name.strip(),
-            "stat_icon": stat_icon,
+            # Phase 3 v2 Task 3.7: FK вместо free-text stat_name/stat_icon.
+            "stat_definition_id": stat_definition_id,
             "stat_gain_per_checkin": stat_gain_per_checkin,
             "stat_loss_per_miss": stat_loss_per_miss,
             "member_limit": member_limit,
@@ -232,11 +249,18 @@ class HabitService:
         if "title" in fields:
             _validate_title(fields["title"])
             fields["title"] = fields["title"].strip()
-        if "stat_name" in fields:
-            _validate_stat_name(fields["stat_name"])
-            fields["stat_name"] = fields["stat_name"].strip()
-        if "stat_icon" in fields:
-            _validate_stat_icon(fields["stat_icon"])
+        # Phase 3 v2 Task 3.7: stat_definition_id PATCH handling.
+        # exclude_unset=True в handler различает: ключ отсутствует → skip,
+        # ключ=null → skip валидацию, значение не None → validate FK.
+        if (
+            "stat_definition_id" in fields
+            and fields["stat_definition_id"] is not None
+        ):
+            await _validate_stat_definition_id_exists(
+                self._stat_definition_repo,
+                str(fields["stat_definition_id"]),
+            )
+        # Удалены: stat_name / stat_icon валидация и strip (legacy free-text).
         if "telegram_invite_link" in fields:
             _validate_telegram_invite_link(fields["telegram_invite_link"])
         if "timezone" in fields:
@@ -601,34 +625,39 @@ def _validate_title(title: str | None) -> None:
         )
 
 
-def _validate_stat_name(name: str | None) -> None:
-    if not isinstance(name, str):
-        raise HabitValidationError(
-            "stat_name обязателен", code="habit_stat_name_required"
-        )
-    stripped = name.strip()
-    if len(stripped) == 0:
-        raise HabitValidationError(
-            "stat_name не может быть пустым", code="habit_stat_name_empty"
-        )
-    if len(stripped) > 64:
-        raise HabitValidationError(
-            "stat_name слишком длинный (макс. 64 символа)",
-            code="habit_stat_name_too_long",
-        )
+# Phase 3 v2 Task 3.7: _validate_stat_name и _validate_stat_icon УДАЛЕНЫ.
+# Free-text stat_name/stat_icon больше не принимаются (заменены на FK UUID
+# stat_definition_id). Эти helper'ы — мёртвый код; каталог 8 канонических
+# stat_definitions — единственный source of truth.
 
 
-def _validate_stat_icon(icon: str | None) -> None:
-    # None допустим — означает «нет иконки»
-    if icon is None:
-        return
-    if not isinstance(icon, str):
+async def _validate_stat_definition_id_exists(
+    sd_repo: StatDefinitionRepository, stat_definition_id: str,
+) -> None:
+    """Подтверждает, что stat_definition_id существует и активен.
+
+    Phase 3 v2 Task 3.7: FK validation через переданный sd_repo
+    (StatDefinitionRepository DI, не inline SQL). Repository boundary
+    сохранён.
+
+    Failure codes:
+    - habit_stat_definition_not_found: UUID не найден в справочнике.
+    - habit_stat_definition_inactive: найден, но is_active=false.
+
+    Module-level helper (как другие _validate_* в файле). Принимает
+    sd_repo явно, чтобы не зависеть от self (другие валидаторы тоже
+    module-level).
+    """
+    stat_def = await sd_repo.get_by_id(stat_definition_id)
+    if stat_def is None:
         raise HabitValidationError(
-            "stat_icon должен быть строкой", code="habit_stat_icon_type"
+            f"stat_definition_id={stat_definition_id} не найден в справочнике",
+            code="habit_stat_definition_not_found",
         )
-    if len(icon) == 0 or len(icon) > 16:
+    if not stat_def.is_active:
         raise HabitValidationError(
-            "stat_icon: 1–16 символов", code="habit_stat_icon_length"
+            f"stat_definition_id={stat_definition_id} неактивен (is_active=false)",
+            code="habit_stat_definition_inactive",
         )
 
 

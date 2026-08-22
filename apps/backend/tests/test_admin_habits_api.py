@@ -32,6 +32,7 @@ from app.db import session as session_module
 from app.main import create_app
 from app.models.habit import Habit
 from app.models.membership import Membership
+from app.models.stat_definition import StatDefinition  # NEW (Phase 3 v2 Task 3.7)
 from app.models.user import User
 
 # --- Postgres → SQLite compatibility (паттерн из apps/worker/tests/conftest.py) ----
@@ -80,7 +81,7 @@ def _remap_postgres_types_for_sqlite() -> None:
     from sqlalchemy import JSON, String
     from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 
-    models = [User, Habit, Membership]
+    models = [User, Habit, Membership, StatDefinition]
     for m in models:
         for col in m.__table__.columns:
             t = col.type
@@ -126,6 +127,7 @@ def _build_init_data(*, user_id: int, bot_token: str = "test-bot-token") -> str:
 async def _sqlite_engine(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OWNER_TELEGRAM_ID", "12345")
     monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+    monkeypatch.setenv("BOT_TOKEN_ADMIN", "")
     monkeypatch.setenv("SERVICE_SECRET", "test")
     monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://web.telegram.org")
     monkeypatch.setenv("REDIS_URL", "")
@@ -151,6 +153,18 @@ async def _sqlite_engine(monkeypatch: pytest.MonkeyPatch):
         await conn.run_sync(User.__table__.create)
         await conn.run_sync(Habit.__table__.create)
         await conn.run_sync(Membership.__table__.create)
+        await conn.run_sync(StatDefinition.__table__.create)
+        # Phase 3 v2 Task 3.7: seed 1 активный stat_definition для happy-path.
+        await conn.execute(
+            StatDefinition.__table__.insert().values(
+                id="11111111-1111-1111-1111-111111111111",
+                slug="intelligence",
+                name="Интеллект",
+                icon="🧠",
+                sort_order=1,
+                is_active=True,
+            )
+        )
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_module._engine = engine  # noqa: SLF001
@@ -175,14 +189,24 @@ def _owner_init_data() -> str:
     return _build_init_data(user_id=12345, bot_token="test-bot-token")
 
 
+def _seed_stat_definitions(engine: Any) -> None:
+    """No-op в текущей реализации (используется в фикстуре напрямую)."""
+    pass
+
+
 def _payload_chat(chat_id: int = -1001234567890) -> dict[str, Any]:
+    """Default payload для POST /admin/v1/habits.
+
+    Phase 3 v2 Task 3.7: stat_name/stat_icon УБРАНЫ, добавлен stat_definition_id.
+    Дефолтное значение stat_definition_id совпадает с seeded UUID из
+    _seed_stat_definitions(), чтобы happy-path tests работали out-of-box.
+    """
     return {
         "title": "Планка 30 мин",
         "description": "Держим планку каждый день",
         "photo_url": None,
         "telegram_invite_link": "https://t.me/+abc123",
-        "stat_name": "Эстетика тела",
-        "stat_icon": "💪",
+        "stat_definition_id": "11111111-1111-1111-1111-111111111111",
         "chat_id": chat_id,
         "checkin_window_start": "06:00:00",
         "checkin_window_end": "11:00:00",
@@ -194,6 +218,10 @@ def _payload_chat(chat_id: int = -1001234567890) -> dict[str, Any]:
         "stat_loss_per_miss": 1,
         "member_limit": None,
         "curator_id": None,
+        # Phase 1 / migration 010: обязательны ссылки на топики чек-инов
+        # и уведомлений (https://t.me/c/<chat_id>/<thread_id>).
+        "checkin_topic_link": "https://t.me/c/-1001234567890/1",
+        "notifications_topic_link": "https://t.me/c/-1001234567890/2",
     }
 
 
@@ -384,3 +412,127 @@ class TestAdminHabitEndpoints:
             r = client.post("/admin/v1/habits", json=_payload_chat())
         assert r.status_code == 401
         assert r.json()["code"] == "missing_init_data"
+
+
+# ── Phase 3 v2 Task 3.7: stat_definition_id contract ────────────
+
+
+class TestAdminHabitStatDefinitionContract:
+    """6 тестов для stat_definition_id FK contract (Task 3.7)."""
+
+    async def test_create_habit_with_stat_definition_id_succeeds(
+        self, app: Any, _sqlite_engine: Any,
+    ) -> None:
+        """POST с valid stat_definition_id UUID → 201; response содержит stat_definition_id."""
+        with TestClient(app) as client:
+            r = client.post(
+                "/admin/v1/habits",
+                json=_payload_chat(),
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        # Phase 3 v2 Task 3.7: FK в response (free-text stat_name/stat_icon УБРАНЫ).
+        assert body["stat_definition_id"] == "11111111-1111-1111-1111-111111111111"
+
+    async def test_create_habit_with_missing_stat_definition_returns_400(
+        self, app: Any,
+    ) -> None:
+        """POST с несуществующим stat_definition_id UUID → 400."""
+        payload = _payload_chat()
+        payload["stat_definition_id"] = "00000000-0000-0000-0000-000000000000"
+        with TestClient(app) as client:
+            r = client.post(
+                "/admin/v1/habits",
+                json=payload,
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 400, r.text
+        body = r.json()
+        assert body["code"] == "habit_stat_definition_not_found"
+
+    async def test_create_habit_without_stat_definition_id_returns_422(
+        self, app: Any,
+    ) -> None:
+        """POST без поля stat_definition_id → Pydantic 422."""
+        payload = _payload_chat()
+        del payload["stat_definition_id"]
+        with TestClient(app) as client:
+            r = client.post(
+                "/admin/v1/habits",
+                json=payload,
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 422
+
+    async def test_create_habit_with_inactive_stat_definition_returns_400(
+        self, app: Any, _sqlite_engine: Any,
+    ) -> None:
+        """POST с is_active=false → 400 habit_stat_definition_inactive."""
+        async with _sqlite_engine.begin() as conn:
+            await conn.execute(
+                StatDefinition.__table__.insert().values(
+                    id="22222222-2222-2222-2222-222222222222",
+                    slug="disabled",
+                    name="Отключенная",
+                    icon="⚡",
+                    sort_order=99,
+                    is_active=False,
+                )
+            )
+        payload = _payload_chat()
+        payload["stat_definition_id"] = "22222222-2222-2222-2222-222222222222"
+        with TestClient(app) as client:
+            r = client.post(
+                "/admin/v1/habits",
+                json=payload,
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 400, r.text
+        body = r.json()
+        assert body["code"] == "habit_stat_definition_inactive"
+
+    async def test_patch_habit_omitting_stat_definition_id_leaves_value_unchanged(
+        self, app: Any,
+    ) -> None:
+        """PATCH без stat_definition_id → exclude_unset=True исключает ключ
+        → service.update() не трогает колонку."""
+        with TestClient(app) as client:
+            created = client.post(
+                "/admin/v1/habits",
+                json=_payload_chat(),
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            ).json()
+            # PATCH с другим полем, но stat_definition_id НЕ упомянут.
+            r = client.patch(
+                f"/admin/v1/habits/{created['id']}",
+                json={"description": "Новое описание"},
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # stat_definition_id остаётся прежним.
+        assert body["stat_definition_id"] == "11111111-1111-1111-1111-111111111111"
+
+    async def test_patch_habit_stat_definition_id_null_clears_value(
+        self, app: Any,
+    ) -> None:
+        """PATCH {"stat_definition_id": null} → exclude_unset=True сохраняет ключ
+        с None → service.update() ставит колонку в NULL."""
+        with TestClient(app) as client:
+            created = client.post(
+                "/admin/v1/habits",
+                json=_payload_chat(),
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            ).json()
+            assert created["stat_definition_id"] is not None  # baseline
+            # Явный null в payload — exclude_unset=True СОХРАНЯЕТ ключ с None.
+            r = client.patch(
+                f"/admin/v1/habits/{created['id']}",
+                json={"stat_definition_id": None},
+                headers={"X-Telegram-Init-Data": _owner_init_data()},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # stat_definition_id очищен в NULL.
+        assert body["stat_definition_id"] is None

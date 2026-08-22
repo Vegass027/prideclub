@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -298,8 +299,8 @@ class AdminHabitCreateRequest(BaseModel):
     description: str | None = None
     photo_url: str | None = Field(default=None, max_length=512)
     telegram_invite_link: str | None = Field(default=None, max_length=512)
-    stat_name: str = Field(min_length=1, max_length=64)
-    stat_icon: str | None = Field(default=None, max_length=16)
+    # Phase 3 v2 Task 3.7: stat_definition_id REQUIRED, валидация в service.
+    stat_definition_id: UUID
     chat_id: int | None = Field(default=0)
     checkin_window_start: time
     checkin_window_end: time
@@ -378,8 +379,11 @@ class AdminHabitUpdateRequest(BaseModel):
     description: str | None = None
     photo_url: str | None = Field(default=None, max_length=512)
     telegram_invite_link: str | None = Field(default=None, max_length=512)
-    stat_name: str | None = Field(default=None, min_length=1, max_length=64)
-    stat_icon: str | None = Field(default=None, max_length=16)
+    # Phase 3 v2 Task 3.7: stat_definition_id nullable, optional.
+    # exclude_unset=True в handler различает: ключ отсутствует (не меняется)
+    # vs ключ=null (явно снимает характеристику). HabitService.update
+    # обрабатывает обе ситуации.
+    stat_definition_id: UUID | None = None
     chat_id: int | None = Field(default=None)
     checkin_window_start: time | None = None
     checkin_window_end: time | None = None
@@ -437,7 +441,17 @@ class AdminHabitToggleRequest(BaseModel):
 
 
 class AdminHabitOut(BaseModel):
-    """Полная карточка клуба для админки."""
+    """Полная карточка клуба для админки.
+
+    Phase 3 v2 Task 3.7: legacy free-text `stat_name`/`stat_icon`
+    УБРАНЫ из response. UI получает metadata (name/icon) из списка
+    `GET /admin/v1/stat-definitions` (Task 3.7 endpoint) и сопоставляет
+    по `stat_definition_id` в клиентском state.
+
+    `stat_definition_id: str | None` — FK на выбранную характеристику,
+    None для legacy-клубов без выбранной stat.
+    """
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     title: str
@@ -454,11 +468,11 @@ class AdminHabitOut(BaseModel):
     is_active: bool
     photo_url: str | None
     telegram_invite_link: str | None
-    stat_name: str
-    stat_icon: str | None
+    # Phase 3 v2 Task 3.7: stat_definition_id FK вместо stat_name/stat_icon.
+    stat_definition_id: str | None = None
     stat_gain_per_checkin: int
     stat_loss_per_miss: int
-    # Pravki-catcher-deposit (Phase 1 Task 1.5, 2026-08-21): в response.
+    # Pravki-catcher-deposit (Phase 1 Task 3.5, 2026-08-21): в response.
     catcher_amount_kopecks: int = 0
     member_limit: int | None
     curator_id: int | None
@@ -468,6 +482,9 @@ class AdminHabitOut(BaseModel):
     notifications_topic_link: str | None
     chat_topic_thread_id: int | None
     chat_topic_link: str | None
+    # ⚠️ Восстановлено из исходной AdminHabitOut (Task 3.7 не меняет contract).
+    # Используется в admin UI badges "X members".
+    members_count: int = 0
     archived_at: datetime | None
     created_at: datetime
     active_members_count: int = 0
@@ -628,3 +645,25 @@ class SubscribeResponse(BaseModel):
     subscription_until: date
     total_charged_kopecks: int
     charged_subscription: bool
+
+# ── Phase 3 v2 Task 3.7: admin stat-definitions list endpoint ──────
+
+
+class AdminStatDefinitionOut(BaseModel):
+    """Одна запись из справочника 8 канонических характеристик (Phase 3 v2).
+
+    Используется admin dropdown для выбора stat_definition_id в клубах.
+    Read-only endpoint GET /admin/v1/stat-definitions.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str                          # UUID str
+    slug: str                        # "intelligence", "strength", ...
+    name: str                        # "Интеллект", "Сила", ...
+    icon: str                        # "🧠", "💪", ...
+    sort_order: int                  # 1..8
+
+
+class AdminStatDefinitionsListResponse(BaseModel):
+    items: list[AdminStatDefinitionOut]
+    total: int                       # Фиксировано = 8 в MVP (8 canonical).

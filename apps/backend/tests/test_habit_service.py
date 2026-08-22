@@ -24,17 +24,51 @@ from app.core.exceptions import (
 from app.services.habit_service import HabitService
 from tests.fakes import FakeHabitRepo, FakeMembershipRepo, make_habit
 
+# Phase 3 v2 Task 3.7: inline FakeStatDefinitionRepo для тестов HabitService.
+# HabitService.create/update валидирует через StatDefinitionRepository;
+# в тестах HabitService мы НЕ хотим тянуть полный SQLAlchemy seed —
+# достаточно stub'а с одним методом.
+class _FakeStatDefinitionRepo:
+    """Минимальный stub StatDefinitionRepository для тестов HabitService.
+
+    Реализует только get_by_id (используется HabitService при create/update).
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[str, "_FakeStatDef"] = {}
+
+    def add(self, id: str, *, name: str = "Test", is_active: bool = True) -> None:
+        from types import SimpleNamespace
+
+        self._items[id] = SimpleNamespace(id=id, name=name, is_active=is_active)
+
+    async def get_by_id(self, id: str):
+        return self._items.get(id)
+
 
 def _make_service(
     habit_repo: FakeHabitRepo | None = None,
     membership_repo: FakeMembershipRepo | None = None,
 ) -> tuple[HabitService, FakeHabitRepo, FakeMembershipRepo]:
+    from uuid import uuid4
+
     habit_repo = habit_repo or FakeHabitRepo()
     membership_repo = membership_repo or FakeMembershipRepo()
+    # Phase 3 v2 Task 3.7: FakeStatDefinitionRepo с одним seeded entry
+    # по умолчанию. Большинство тестов передают stat_definition_id через
+    # _base_kwargs() — см. _DEFAULT_SD_ID ниже.
+    sd_repo = _FakeStatDefinitionRepo()
+    sd_repo.add(_DEFAULT_SD_ID)
     svc = HabitService(
-        session=None, habit_repo=habit_repo, membership_repo=membership_repo
+        session=None,
+        habit_repo=habit_repo,
+        membership_repo=membership_repo,
+        stat_definition_repo=sd_repo,
     )
     return svc, habit_repo, membership_repo
+
+
+_DEFAULT_SD_ID = str(uuid4())
 
 
 def _base_kwargs(**overrides) -> dict:
@@ -43,8 +77,8 @@ def _base_kwargs(**overrides) -> dict:
         description="Держим планку",
         photo_url=None,
         telegram_invite_link="https://t.me/+abc123",
-        stat_name="Эстетика тела",
-        stat_icon="💪",
+        # Phase 3 v2 Task 3.7: stat_definition_id (FK) вместо stat_name/stat_icon.
+        stat_definition_id=_DEFAULT_SD_ID,
         chat_id=-1001234567890,
         checkin_window_start=time(6, 0),
         checkin_window_end=time(11, 0),
@@ -73,8 +107,7 @@ class TestCreate:
         assert habit.is_active is False
         assert habit.archived_at is None
         assert habit.title == "Планка 30 мин"
-        assert habit.stat_name == "Эстетика тела"
-        assert habit.stat_icon == "💪"
+        assert habit.stat_definition_id == _DEFAULT_SD_ID
         assert habit.penalty_amount == 10_00
         assert habit.price_month == 100_00
         assert habit in (await repo.list_active()) or habit not in (
@@ -94,11 +127,15 @@ class TestCreate:
             await svc.create(admin_id=42, **_base_kwargs(title="x" * 129))
         assert exc_info.value.code == "habit_title_too_long"
 
-    async def test_rejects_empty_stat_name(self) -> None:
+    async def test_create_habit_with_missing_stat_definition_returns_400(self) -> None:
+        """Phase 3 v2 Task 3.7: HabitService.create валидирует FK существование."""
         svc, _, _ = _make_service()
         with pytest.raises(HabitValidationError) as exc_info:
-            await svc.create(admin_id=42, **_base_kwargs(stat_name="   "))
-        assert exc_info.value.code == "habit_stat_name_empty"
+            await svc.create(
+                admin_id=42,
+                **_base_kwargs(stat_definition_id="00000000-0000-0000-0000-000000000000"),
+            )
+        assert exc_info.value.code == "habit_stat_definition_not_found"
 
     async def test_rejects_invalid_invite_link(self) -> None:
         svc, _, _ = _make_service()
