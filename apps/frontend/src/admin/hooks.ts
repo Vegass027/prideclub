@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   adminHabitsApi,
+  adminStatDefinitionsApi,
   type AdminHabit,
   type AdminHabitCreatePayload,
+  type AdminHabitUpdatePayload,
 } from "./api";
 
 export function useAdminHabits() {
@@ -124,3 +126,38 @@ export function useDismissChat() {
 
 export type { AdminHabit };
 export type { AdminHabitCreatePayload };
+
+
+// Phase 3 v2 Task 3.8: каталог stat_definitions для AdminHabitForm.
+export function useStatDefinitions() {
+  return useQuery({
+    queryKey: ["admin", "stat-definitions"],
+    queryFn: () => adminStatDefinitionsApi.list(),
+    // Каталог 8 canonical меняется редко (только ручное обновление в БД).
+    // Кеш 60s + retry 2 для transient network errors.
+    staleTime: 60_000,
+    retry: 2,
+  });
+}
+
+
+// Phase 3 v2 Task 3.8: useUpdateHabit для HabitEditForm.
+export function useUpdateHabit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      habitId,
+      payload,
+    }: {
+      habitId: string;
+      payload: AdminHabitUpdatePayload;
+    }) => adminHabitsApi.update(habitId, payload),
+    onSuccess: (_, variables) => {
+      // Invalidate list + detail чтобы UI перезагрузил новое значение.
+      qc.invalidateQueries({ queryKey: ["admin", "habits"] });
+      qc.invalidateQueries({
+        queryKey: ["admin", "habits", variables.habitId],
+      });
+    },
+  });
+}

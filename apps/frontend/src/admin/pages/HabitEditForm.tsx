@@ -8,7 +8,8 @@ import {
   TextArea,
   TextInput,
 } from "../components/Form";
-import { useAvailableChats, useUploadPhoto } from "../hooks";
+import { StatDefinitionSelect } from "../components/StatDefinitionSelect";
+import { useAvailableChats, useStatDefinitions, useUpdateHabit, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
 
@@ -47,8 +48,8 @@ interface FormState {
   description: string;
   photo_url: string;
   telegram_invite_link: string;
-  stat_name: string;
-  stat_icon: string;
+  // Phase 3 v2 Task 3.8: stat_definition_id FK. Sentinel "" для null.
+  stat_definition_id: string;
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
@@ -69,8 +70,7 @@ const EMPTY: FormState = {
   description: "",
   photo_url: "",
   telegram_invite_link: "",
-  stat_name: "Дисциплина",
-  stat_icon: "🔥",
+  stat_definition_id: "",
   checkin_window_start: "09:00",
   checkin_window_end: "21:00",
   timezone: "Europe/Moscow",
@@ -109,8 +109,8 @@ function habitToForm(h: AdminHabit): FormState {
     description: h.description ?? "",
     photo_url: h.photo_url ?? "",
     telegram_invite_link: h.telegram_invite_link ?? "",
-    stat_name: h.stat_name,
-    stat_icon: h.stat_icon ?? "",
+    // Phase 3 v2 Task 3.8: stat_definition_id FK вместо stat_name/stat_icon.
+    stat_definition_id: h.stat_definition_id ?? "",
     checkin_window_start: h.checkin_window_start.slice(0, 5),
     checkin_window_end: h.checkin_window_end.slice(0, 5),
     timezone: h.timezone,
@@ -138,6 +138,12 @@ interface FormProps {
 export function HabitEditForm({ habit, loading, error }: FormProps) {
   const navigate = useNavigate();
   const [form, setForm] = useState<FormState>(EMPTY);
+  // Phase 3 v2 Task 3.8: originalForm = baseline при первой загрузке.
+  // Используется для diff-based stat_definition_id в handleSubmit:
+  // если значение не изменилось, НЕ отправляем ключ → backend (Task 3.7
+  // exclude_unset semantics) оставляет прежнее значение в БД →
+  // 400 не выскакивает для legacy-клубов со stale UUID.
+  const [originalForm, setOriginalForm] = useState<FormState>(EMPTY);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -145,10 +151,24 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
   const [currentChatTitle, setCurrentChatTitle] = useState<string>(habit?.title ?? "");
   const uploadPhoto = useUploadPhoto();
   const availableChatsQuery = useAvailableChats();
+  const statDefinitionsQuery = useStatDefinitions();
+  const updateHabit = useUpdateHabit();
+  const { data: statDefs } = statDefinitionsQuery;
+  // Phase 3 v2 Task 3.8: edge case — saved habit.stat_definition_id
+  // не в активном каталоге (был деактивирован или удалён).
+  // Показываем warning в StatDefinitionSelect, submit НЕ блокируем.
+  const deactivatedIdWarning = !!(
+    form.stat_definition_id &&
+    statDefs &&
+    !statDefs.items.some((sd) => sd.id === form.stat_definition_id)
+  );
 
   useEffect(() => {
     if (habit) {
-      setForm(habitToForm(habit));
+      const initial = habitToForm(habit);
+      setForm(initial);
+      // Phase 3 v2 Task 3.8: capture baseline для diff-based stat_definition_id.
+      setOriginalForm(initial);
       setTouched({});
       setCurrentChatId(habit.chat_id);
       const fromList = availableChatsQuery.data?.items.find(
@@ -201,11 +221,26 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
     if (state.title.trim().length < 3 || state.title.trim().length > 128) {
       errors.title = "От 3 до 128 символов";
     }
-    if (!state.stat_name.trim()) {
-      errors.stat_name = "Обязательно";
+    if (!state.description.trim()) {
+      errors.description = "Обязательно";
     }
-    if (!/^\d{2}:\d{2}$/.test(state.checkin_window_start)) {
-      errors.checkin_window_start = "HH:MM";
+    if (state.chat_id === 0) {
+      errors.chat_id = "Выбери группу Telegram, куда добавлен бот";
+    }
+    // Phase 3 v2 Task 3.8: stat_definition_id НЕ required в PATCH.
+    // Пустая "" sentinel ОК. Валидация только если явно введён невалидный UUID.
+    if (
+      state.stat_definition_id &&
+      state.stat_definition_id.length !== 36
+    ) {
+      errors.stat_definition_id = "Некорректный формат UUID";
+    }
+    const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
+    if (
+      state.checkin_topic_link.trim() &&
+      !topicLinkRe.test(state.checkin_topic_link.trim())
+    ) {
+      errors.checkin_topic_link = "Формат https://t.me/c/<chat_id>/<thread_id>";
     }
     if (!/^\d{2}:\d{2}$/.test(state.checkin_window_end)) {
       errors.checkin_window_end = "HH:MM";
@@ -223,8 +258,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
         errors.member_limit = "Целое > 0";
       }
     }
-    const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
-    if (
+        if (
       state.checkin_topic_link.trim() &&
       !topicLinkRe.test(state.checkin_topic_link.trim())
     ) {
@@ -273,32 +307,48 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
 
     setSubmitting(true);
     try {
-      await adminHabitsApi.update(habit.id, {
-        title: form.title.trim(),
-        description: form.description.trim() || null,
-        photo_url: form.photo_url.trim() || null,
-        telegram_invite_link: form.telegram_invite_link.trim() || null,
-        stat_name: form.stat_name.trim(),
-        stat_icon: form.stat_icon.trim() || null,
-        checkin_window_start: form.checkin_window_start,
-        checkin_window_end: form.checkin_window_end,
-        timezone: form.timezone,
-        proof_types: form.proof_types,
-        price_month: rubToKopecks(form.price_month_rub),
-        penalty_amount: rubToKopecks(form.penalty_amount_rub),
-        catcher_amount_kopecks: rubToKopecks(form.catcher_amount_rub),
-        stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
-        stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
-        member_limit: toIntOrNull(form.member_limit),
-        chat_id: currentChatId,
-        checkin_topic_link: form.checkin_topic_link.trim() || undefined,
-        notifications_topic_link:
-          form.notifications_topic_link.trim() || undefined,
-        chat_topic_link: form.chat_topic_link.trim() || undefined,
-      });
+    await adminHabitsApi.update(habit.id, {
+      title: form.title.trim(),
+      description: form.description.trim() || null,
+      photo_url: form.photo_url.trim() || null,
+      telegram_invite_link: form.telegram_invite_link.trim() || null,
+      checkin_window_start: form.checkin_window_start,
+      checkin_window_end: form.checkin_window_end,
+      timezone: form.timezone,
+      proof_types: form.proof_types,
+      price_month: rubToKopecks(form.price_month_rub),
+      penalty_amount: rubToKopecks(form.penalty_amount_rub),
+      catcher_amount_kopecks: rubToKopecks(form.catcher_amount_rub),
+      stat_gain_per_checkin: toIntOrNull(form.stat_gain_per_checkin) ?? 2,
+      stat_loss_per_miss: toIntOrNull(form.stat_loss_per_miss) ?? 1,
+      member_limit: toIntOrNull(form.member_limit),
+      chat_id: currentChatId,
+      checkin_topic_link: form.checkin_topic_link.trim() || undefined,
+      notifications_topic_link:
+        form.notifications_topic_link.trim() || undefined,
+      chat_topic_link: form.chat_topic_link.trim() || undefined,
+      // Phase 3 v2 Task 3.8: diff-based stat_definition_id.
+      // ⚠️ ВАЖНО: включаем ТОЛЬКО если admin явно изменил dropdown.
+      // Это критично для legacy-клубов со stale UUID: без проверки
+      // backend вызовет _validate_stat_definition_id_exists на stale
+      // ID → 400 → admin не сможет сохранить правку title.
+      // ⚠️⚠️ (BUG FIX #2) Task 3.8 — diff-based семантика противоположна
+      // "отдавай всегда" — здесь НЕ отдаём при отсутствии изменений.
+      ...(form.stat_definition_id !== originalForm.stat_definition_id && {
+        stat_definition_id: form.stat_definition_id || null,
+      }),
+    });
       navigate("/habits");
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : String(err));
+      // Phase 3 v2 Task 3.8: специальный маппинг для stat_definition_* кодов.
+      // Если backend вернул formatted error → выводим как inline field error.
+      // Иначе — generic toast в saveError.
+      const formatted = formatStatDefinitionApiError(err);
+      if (formatted) {
+        setSaveError(formatted.message);
+      } else {
+        setSaveError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -589,22 +639,19 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
       </FieldRow>
 
       <FieldRow label="Характеристика">
-        <div className="grid grid-cols-2 gap-2">
-          <TextInput
-            value={form.stat_name}
-            onChange={(e) => set("stat_name", e.target.value)}
-            onBlur={() => touchedFields("stat_name")}
-            maxLength={64}
-          />
-          <TextInput
-            value={form.stat_icon}
-            onChange={(e) => set("stat_icon", e.target.value)}
-            maxLength={16}
-          />
-        </div>
-        {touched.stat_name && errors.stat_name && (
+        <StatDefinitionSelect
+          value={form.stat_definition_id || null}
+          onChange={(v) => setForm({ ...form, stat_definition_id: v ?? "" })}
+          required={false}
+          disabled={updateHabit.isPending}
+          error={errors.stat_definition_id ?? null}
+          touched={!!touched.stat_definition_id}
+          label="Характеристика"
+          deactivatedIdWarning={deactivatedIdWarning}
+        />
+        {touched.stat_definition_id && errors.stat_definition_id && (
           <p className="mt-1 text-xs text-danger" role="alert">
-            {errors.stat_name}
+            {errors.stat_definition_id}
           </p>
         )}
       </FieldRow>

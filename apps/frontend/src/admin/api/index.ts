@@ -22,8 +22,8 @@ export interface AdminHabit {
   is_active: boolean;
   photo_url: string | null;
   telegram_invite_link: string | null;
-  stat_name: string;
-  stat_icon: string | null;
+  // Phase 3 v2 Task 3.8: stat_name/stat_icon УБРАНЫ, stat_definition_id вместо.
+  stat_definition_id: string | null;
   stat_gain_per_checkin: number;
   stat_loss_per_miss: number;
   member_limit: number | null;
@@ -98,8 +98,8 @@ export interface AdminHabitCreatePayload {
   description: string | null;
   photo_url: string | null;
   telegram_invite_link: string | null;
-  stat_name: string;
-  stat_icon: string | null;
+  // Phase 3 v2 Task 3.8: stat_definition_id FK вместо stat_name/stat_icon. REQUIRED.
+  stat_definition_id: string;
   chat_id: number;
   checkin_window_start: string;
   checkin_window_end: string;
@@ -122,8 +122,9 @@ export interface AdminHabitUpdatePayload {
   description?: string | null;
   photo_url?: string | null;
   telegram_invite_link?: string | null;
-  stat_name?: string;
-  stat_icon?: string | null;
+  // Phase 3 v2 Task 3.8: stat_definition_id опционально + null = explicit clear.
+  // Не включаем в payload, если admin НЕ трогал dropdown (diff-based).
+  stat_definition_id?: string | null;
   checkin_window_start?: string;
   checkin_window_end?: string;
   timezone?: string;
@@ -265,3 +266,29 @@ export interface AdminHabitDismissChatResponse {
   chat_id: number;
   removed_records: number;
 }
+
+
+// ── Phase 3 v2 Task 3.8: StatDefinition catalog endpoint ──
+
+
+export interface AdminStatDefinition {
+  id: string;          // UUID
+  slug: string;        // "intelligence", "strength", ...
+  name: string;        // "Интеллект", "Сила", ...
+  icon: string;        // "🧠", "💪", ...
+  sort_order: number;  // 1..8
+}
+
+export interface AdminStatDefinitionsListResponse {
+  items: AdminStatDefinition[];
+  total: number;  // = 8 в MVP (8 canonical)
+}
+
+export const adminStatDefinitionsApi = {
+  list: async (): Promise<AdminStatDefinitionsListResponse> => {
+    const { data } = await adminApi.get<AdminStatDefinitionsListResponse>(
+      "/stat-definitions",
+    );
+    return data;
+  },
+};

@@ -10,7 +10,8 @@ import {
   TextArea,
   TextInput,
 } from "../components/Form";
-import { useAvailableChats, useCreateHabit, useRefreshChat, useUploadPhoto } from "../hooks";
+import { StatDefinitionSelect } from "../components/StatDefinitionSelect";
+import { useAvailableChats, useCreateHabit, useRefreshChat, useStatDefinitions, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
 
@@ -51,8 +52,9 @@ interface FormState {
   telegram_invite_link: string;
   chat_id: number;
   chat_title: string;
-  stat_name: string;
-  stat_icon: string;
+  // Phase 3 v2 Task 3.8: stat_definition_id FK вместо stat_name/stat_icon.
+  // Sentinel "" для null-эквивалента (конвертируется в null при submit).
+  stat_definition_id: string;
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
@@ -75,8 +77,7 @@ const INITIAL_STATE: FormState = {
   telegram_invite_link: "",
   chat_id: 0,
   chat_title: "",
-  stat_name: "Дисциплина",
-  stat_icon: "🔥",
+  stat_definition_id: "",  // Phase 3 v2: admin выбирает из dropdown.
   checkin_window_start: "09:00",
   checkin_window_end: "21:00",
 timezone: "Europe/Moscow",
@@ -113,8 +114,7 @@ interface RawForm {
   telegram_invite_link: string;
   chat_id: number;
   chat_title: string;
-  stat_name: string;
-  stat_icon: string;
+  stat_definition_id: string;
   checkin_window_start: string;
   checkin_window_end: string;
   timezone: string;
@@ -142,8 +142,9 @@ const errorsOf = (state: RawForm): Partial<Record<keyof FormState, string>> => {
   if (state.chat_id === 0) {
     errors.chat_id = "Выбери группу Telegram, куда добавлен бот";
   }
-  if (!state.stat_name.trim()) {
-    errors.stat_name = "Обязательно";
+  // Phase 3 v2 Task 3.8: stat_definition_id REQUIRED на POST.
+  if (!state.stat_definition_id) {
+    errors.stat_definition_id = "Выбери характеристику";
   }
   const topicLinkRe = /^https?:\/\/t\.me\/c\/-?\d+\/\d+\/?$/;
   if (!topicLinkRe.test(state.checkin_topic_link.trim())) {
@@ -285,8 +286,8 @@ export function HabitCreatePage() {
         description: state.description.trim() || null,
         photo_url: state.photo_url.trim() || null,
         telegram_invite_link: state.telegram_invite_link.trim() || null,
-        stat_name: state.stat_name.trim(),
-        stat_icon: state.stat_icon.trim() || null,
+        // Phase 3 v2 Task 3.8: stat_definition_id FK (REQUIRED).
+        stat_definition_id: state.stat_definition_id,
         chat_id: state.chat_id,
         checkin_window_start: state.checkin_window_start,
         checkin_window_end: state.checkin_window_end,
@@ -618,24 +619,19 @@ export function HabitCreatePage() {
           </p>
         </FieldRow>
 
+        {/* Phase 3 v2 Task 3.8: stat_definition_id FK dropdown (REQUIRED для POST). */}
         <FieldRow label="Характеристика">
-          <div className="grid grid-cols-2 gap-2">
-            <TextInput
-              value={state.stat_name}
-              onChange={(e) => set("stat_name", e.target.value)}
-              onBlur={() => markTouched("stat_name")}
-              maxLength={64}
-              aria-invalid={Boolean(touched.stat_name && errors.stat_name)}
-            />
-            <TextInput
-              value={state.stat_icon}
-              onChange={(e) => set("stat_icon", e.target.value)}
-              maxLength={16}
-            />
-          </div>
-          {touched.stat_name && errors.stat_name && (
+          <StatDefinitionSelect
+            value={state.stat_definition_id || null}
+            onChange={(v) => set("stat_definition_id", v ?? "")}
+            required
+            error={errors.stat_definition_id ?? null}
+            touched={touched.stat_definition_id ?? false}
+            disabled={create.isPending}
+          />
+          {touched.stat_definition_id && errors.stat_definition_id && (
             <p className="mt-1 text-xs text-danger" role="alert">
-              {errors.stat_name}
+              {errors.stat_definition_id}
             </p>
           )}
         </FieldRow>
