@@ -126,7 +126,12 @@
 
 ### 4.5. Лидерборд
 
-- Три таба: "Стрики" / "Охотники" / "Доска позора".
+- **Четыре таба** (Phase 3 v2 Task 3.9, +📊 Характеристика): "Стрики" / "Охотники" /
+  "Доска позора" / "📊 Характеристика".
+- 4-й таб показывает per-habit лидерборд по характеристике клуба. Если клуб
+  не активировал фичу (`habit.stat_definition_id` null) — backend возвращает
+  пустой список, UI показывает empty state «Характеристика не активирована».
+  Frozen rows помечены ❄ с opacity-60.
 - Топ-3 — увеличенные карточки с золотой/серебряной/бронзовой окантовкой.
 - Остальные — компактный список с позицией, аватаром, именем, метрикой.
 - Своя позиция пользователя закреплена внизу, если он не в топе.
@@ -157,6 +162,26 @@
 - В каждом клубе: title + кол-во участников + **топ-3** с медалями + кнопка «Открыть клуб →».
 - Endpoint: `GET /leaderboard/{tab}/overview` → `{ tab, metric_label, clubs: [{ habit_id, title, members_count, top: [...] }] }`.
 - Empty state если нет клубов / нет активности.
+
+### 4.9. Мой персонаж (`/character`, Phase 3 v2 Task 3.9)
+
+- **StatusBadge** (top-card): иконка + название текущей ступени
+  («На старте» / «В потоке» / «На волне» / «В огне» / «Режим зверя»),
+  `total_value` крупно справа, прогресс-бар до `next_threshold` (или
+  «🏆 Максимальная ступень» если null).
+- **LevelUpToast**: ephemeral overlay 🎉 при повышении статуса, 4s auto-hide.
+  Срабатывает ТОЛЬКО при `currentTotal > previousTotal` — downgrade после
+  penalty не показывает (закрывает UX-баг «поздравляем с наказанием»).
+- **FrozenStatBanner**: ⚠ баннер о замороженных характеристиках (❄ + счётчик
+  «N характеристик заморожено» + список с датой + frozen_reason_text).
+- **StatCard × N**: список характеристик. Active (value>0) по value DESC,
+  frozen внизу (opacity-60, ❄ в подписи).
+- Empty state если stats пустой: «Сделай первый чек-ин, чтобы открыть характеристику».
+- Ссылка из `/profile` (link-card «Мой персонаж» → `/character`).
+- Backend контракт: `GET /api/v1/character/me` → `CharacterResponse{total_value,
+  status: CharacterStatusInfo, stats: CharacterStatOut[]}`. UI не дублирует
+  backend фильтрацию `MIN_STAT_VALUE_TO_SHOW=1` (zero + non-frozen сюда не
+  приходят).
 
 ---
 

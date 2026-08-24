@@ -10,6 +10,26 @@
 > (`PaymentModal.setTimeout`, `TopUpModal.alert`), бот не вызывает `bot.send_invoice`. См.
 > [09-prod-readiness.md](../../../docs/09-prod-readiness.md).
 
+> **Snapshot 2026-08-24 (Phase 3 v2 Task 3.9 — frontend, коммит `0860672`):**
+> UI для глобального персонажа и per-habit лидерборда по характеристике:
+> - Новая страница `/character` — `CharacterPage` со `StatusBadge` (прогресс-бар до
+>   следующей ступени), `FrozenStatBanner` (⚠ баннер о замороженных характеристиках
+>   с пояснением «30+ дней без чек-ина»), `StatCard`-лист (frozen внизу, active
+>   по value DESC), `LevelUpToast` (ephemeral 🎉 при повышении статуса, 4s auto-hide).
+> - `LeaderboardPage` — добавлен 4-й таб **«📊 Характеристика»** (per-habit лидерборд
+>   по характеристике клуба, ❄ для frozen rows).
+> - `ProfilePage` — новая link-card «Мой персонаж» → `/character`.
+> - **Direction-aware level-up** (`useLevelUpStatus` в `shared/hooks/levelUpTracker.ts`):
+>   хранит `{name, total}` в одном `useRef`, обновляет ТОЛЬКО в `acknowledgeLevelUp()`,
+>   haptic (`hapticImpact("medium")`) вынесен в `useEffect` (StrictMode safe).
+>   Условие toast: `currentTotal > previousTotal` — downgrade после penalty
+>   НЕ показывает 🎉 (закрывает UX-баг «празднуем наказание»). Тест на downgrade —
+>   обязательный, в `levelUpTracker.test.ts`.
+> - Backend контракт `/api/v1/character/me` и `/api/v1/habits/{id}/leaderboard` —
+>   уже в Phase 3 v2 Task 3.6 (не менялись). UI не дублирует backend фильтрацию
+>   `MIN_STAT_VALUE_TO_SHOW=1` — defensive fallback только для случая drift'а.
+> - Tests: +17 vitest (baseline 120 → **137**), 0 regressions.
+
 > Telegram Mini App для Habit Club (PrideClub). React 18 + TypeScript + Vite + Tailwind + React Query + Zustand.
 > **Production**:
 > - User Mini App: `https://app.prideclub.fun/`
@@ -59,9 +79,10 @@ apps/frontend/src/
 │   ├── MyHabits/
 │   ├── Today/
 │   ├── Members/
-│   ├── Leaderboard/      # внутри клуба (3 вкладки)
+│   ├── Leaderboard/      # внутри клуба (4 вкладки: streak/catches/shame/stat)
 │   ├── GlobalLeaderboard/ # рейтинг по всем клубам юзера
-│   └── Profile/
+│   ├── Profile/
+│   └── Character/         # Phase 3 v2 Task 3.9 — глобальный персонаж + LevelUp
 │
 ├── shared/
 │   ├── api/          # axios-клиент + типизированные endpoint'ы
@@ -91,9 +112,10 @@ apps/frontend/src/
 | `/my-habits` | (редирект) | Старый URL → `/profile`. Удалено как дубликат «Моих клубов» в `/profile` |
 | `/habits/:id/today` | TodayPage | Статус чек-ина на сегодня + секция «Клуб в Telegram» |
 | `/habits/:id/members` | MembersPage | Участники + кнопка «спалить» |
-| `/habits/:id/leaderboard/:tab` | LeaderboardPage | Лидерборд клуба (streak/catches/shame) |
-| `/leaderboards` | GlobalLeaderboardPage | Группированный по клубам рейтинг, топ-3 в каждом |
-| `/profile` | ProfilePage | Аватар + депозит + мои клубы + история |
+| `/habits/:id/leaderboard/:tab` | LeaderboardPage | Лидерборд клуба (streak/catches/shame/stat — Phase 3 v2 Task 3.9, 4 вкладки) |
+| `/leaderboards` | GlobalLeaderboardPage | Группированный по клубам юзера рейтинг, топ-3 в каждом |
+| `/profile` | ProfilePage | Аватар + депозит + мои клубы + история + link-card «Мой персонаж» (Phase 3 v2 Task 3.9) |
+| `/character` | CharacterPage | Phase 3 v2 Task 3.9 — глобальный статус, прогресс-бар, ❄ замороженные характеристики |
 
 Все переходы — `<Navigate>` / `useNavigate()` (без `history.back()`, чтобы не терять контекст).
 
@@ -162,9 +184,29 @@ apps/frontend/src/
 - Back → `/profile`.
 
 ### ✅ Leaderboard (внутри клуба)
-- 3 вкладки: 🔥 Серии / 🎯 Ловцы / 💀 Позор.
+- **4 вкладки** (Phase 3 v2 Task 3.9, +📊 Характеристика): 🔥 Серии / 🎯 Ловцы / 💀 Позор / 📊 Характеристика.
+- 4-й таб показывает per-habit лидерборд по характеристике клуба
+  (`GET /api/v1/habits/{id}/leaderboard` → `StatLeaderboardResponse`). Если клуб
+  не активировал фичу (`habit.stat_definition_id` null) — backend возвращает
+  `{items: [], total: null}`, UI показывает empty state «Характеристика не активирована».
+- ❄ для frozen stat-rows (opacity-60 + префикс «❄ » в имени).
 - Полный список участников с медалями (🥇🥈🥉).
 - Back → `/profile`.
+
+### ✅ Character (Phase 3 v2 Task 3.9, `/character`)
+- **StatusBadge**: top-card с иконкой текущей ступени («На старте» / «В потоке»
+  / «На волне» / «В огне» / «Режим зверя»), total_value крупно справа,
+  прогресс-бар до `next_threshold` (или «🏆 Максимальная ступень» если null).
+- **LevelUpToast**: ephemeral overlay 🎉 при повышении статуса, 4s auto-hide.
+  Срабатывает ТОЛЬКО при `currentTotal > previousTotal` — downgrade
+  после penalty не показывает (закрывает UX-баг «поздравляем с наказанием»).
+- **FrozenStatBanner**: ⚠ баннер о замороженных характеристиках (❄ + счётчик
+  «N характеристик заморожено» + список с датой + frozen_reason_text).
+- **StatCard × N**: список характеристик. Active (value>0) по value DESC,
+  frozen внизу (opacity-60, ❄ в подписи).
+- Backend фильтрует (value<1 AND !is_frozen) — UI не дублирует.
+- Empty state если stats пустой: «Сделай первый чек-ин, чтобы открыть характеристику».
+- Ссылка из `/profile` (link-card «Мой персонаж»).
 
 ### ✅ Global Leaderboard (рейтинг)
 - 3 вкладки: 🔥 Серии / 🎯 Ловцы / 💀 Позор.
@@ -180,6 +222,7 @@ apps/frontend/src/
   - Сумма + история транзакций (последние N).
   - Кнопка «+ Пополнить» → `TopUpModal` (**мок**, 4 пресета 299/599/999/1999 ₽,
     `alert("Пополнение на N ₽ скоро будет доступно")`).
+- **Link-card «Мой персонаж»** (Phase 3 v2 Task 3.9): tap → `/character`.
 - **Мои клубы**: карточки с описанием и кнопкой «Открыть клуб →».
 - **Все клубы →**: secondary кнопка → Marketplace.
 - Всегда отображается **BottomNav** (не HabitNav) — глобальный контекст.
@@ -331,12 +374,13 @@ pass-through). Общий test baseline: 68 frontend тестов (было 50, 
 | `ScreenLayout` | `mx-auto max-w-md px-4 pb-24 pt-4` |
 | `PageHeader` | title + subtitle + back (с `backTo`) |
 | `Avatar` | img + onError → инициалы (sm/md/lg) |
-| `Tabs` | 3 вкладки лидерборда |
-| `StatusBadge` / `StatusDot` | статус чек-ина |
+| `Tabs` | 4 вкладки лидерборда (Phase 3 v2 Task 3.9, +📊 Характеристика) |
+| `StatusBadge` / `StatusDot` | статус чек-ина (TodayPage) |
 | `EmptyState` | пустое состояние |
 | `Skeleton` | loading placeholder |
 | `PaymentModal` | bottom-sheet для оплаты (**мок**, `setTimeout(1200)`) |
 | `TopUpModal` | bottom-sheet для пополнения (**мок**, `alert()`) |
+| `StatusBadge` / `StatCard` / `FrozenStatBanner` / `LevelUpToast` (Phase 3 v2 Task 3.9) | карточки глобального персонажа (`CharacterPage`) |
 
 ---
 
@@ -352,8 +396,10 @@ pass-through). Общий test baseline: 68 frontend тестов (было 50, 
 - `marketplaceApi.list()`
 - `habitsApi.today(id)`, `habitsApi.mine()`, `habitsApi.join(id)`, `habitsApi.leave(id)`
 - `membersApi.list(id)`, `membersApi.catch(memberId)`
-- `leaderboardApi.global(tab)`, `leaderboardApi.overview(tab)`, `leaderboardApi.club(habitId, tab)`
+- `leaderboardApi.streaks(id)`, `.catchers(id)`, `.shame(id)`, `.stat(id)` (Phase 3 v2 Task 3.9),
+  `.global(tab)`, `.overview(tab)`, `.clubs(tab)`
 - `balanceApi.get()`
+- `characterApi.get()` (Phase 3 v2 Task 3.9 — для `/character/me`)
 
 ---
 
@@ -362,8 +408,13 @@ pass-through). Общий test baseline: 68 frontend тестов (было 50, 
 Все используют React Query (TanStack Query v5):
 - `useMarketplace`, `useToday(id)`, `useJoinHabit`, `useLeaveHabit`
 - `useMembers(id)`, `useCatch`
-- `useLeaderboard(tab, habitId?)`, `useGlobalLeaderboard`, `useLeaderboardOverview`
+- `useLeaderboard(id, tab, {enabled})` (Phase 3 v2 Task 3.9 — `options.enabled`
+  для гейтинга по активному табу), `useHabitStatLeaderboard(id, {enabled})`,
+  `useGlobalLeaderboard`, `useLeaderboardOverview`
 - `useMyHabits`, `useBalance`
+- `useCharacter()` (Phase 3 v2 Task 3.9 — для `/character/me`)
+- `useLevelUpStatus(name, total)` (Phase 3 v2 Task 3.9 — direction-aware ephemeral
+  detection, см. `shared/hooks/levelUpTracker.ts`; haptic в `useEffect`, не в render)
 - `useUser()` — текущий юзер из Telegram
 
 ---
@@ -424,12 +475,14 @@ CI:
 
 - **Bundle**: `index-*.js` ~310 KB (gzip ~102 KB), `admin-*.js` ~47 KB (gzip ~12 KB),
   `main-*.js` ~40 KB (gzip ~11 KB), `index-*.css` ~18 KB (gzip ~5 KB).
-- **Страниц user Mini App**: 7 (Onboarding, Marketplace, Today, Members, Leaderboard, GlobalLeaderboard, Profile). `MyHabitsPage` удалена 2026-07-23.
+- **Страниц user Mini App**: 9 (Onboarding, Balance, Marketplace, Today, Members, Leaderboard, GlobalLeaderboard, Profile, Character). `MyHabitsPage` удалена 2026-07-23.
 - **Страниц Admin Mini App**: 3 (HabitsListPage, HabitCreatePage, HabitEditForm).
-- **Компонентов UI**: ~13 (`shared/ui/`).
-- **Хуков**: ~11 (user) + 5 admin-хуков.
+- **Компонентов UI**: 18 в `shared/ui/` (без изменений в этой итерации) + 4 новых Character-компонента в `pages/Character/` (StatusBadge, StatCard, FrozenStatBanner, LevelUpToast).
+- **Хуков**: 19 (user: 16 → 19, +useCharacter / +useHabitStatLeaderboard / +useLevelUpStatus) + 5 admin-хуков.
 - **TS strict**: ✅.
 - **Lint (eslint)**: ✅.
+
+> ⚠️ **Расхождение с реальностью (pre-existing, не из Task 3.9):** `pages/Balance/BalancePage.tsx` существует в кодовой базе, но в этом STATUS.md ранее не упоминался. Фиксируется как drift — отдельная задача по инвентаризации страниц (Phase 3 v2 docs cleanup).
 
 ### Изменения этой итерации (2026-07-23)
 
