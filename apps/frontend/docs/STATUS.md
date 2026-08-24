@@ -484,6 +484,12 @@ CI:
 
 > ⚠️ **Расхождение с реальностью (pre-existing, не из Task 3.9):** `pages/Balance/BalancePage.tsx` существует в кодовой базе, но в этом STATUS.md ранее не упоминался. Фиксируется как drift — отдельная задача по инвентаризации страниц (Phase 3 v2 docs cleanup).
 
+> **Snapshot 2026-08-24 (post-build-fix, коммиты `d01691d` + `8a34a3d`):** «TS strict: ✅» выше относится к **пост-фикс состоянию**. На момент docs-коммита `12e8a1c` build был **красным** — `vitest` проходил (137/137), но `npm run build` (tsc --noEmit) падал на 19 TS-ошибках:
+> - 14 из 19 — Task 3.9 (коммит `0860672`): расширение `LeaderboardTabId`, `rowMetricValue()` для `LeaderboardEntry.metric_value` vs `StatLeaderboardEntry.value`, отсутствующий import `formatStatDefinitionApiError` в `HabitEditForm`, каскад от расширения типа (3 в `hooks/index.ts` + 1 в `GlobalLeaderboardPage.tsx`).
+> - 5 — pre-existing Task 3.8 (коммит `516509c`): `AdminHabitCard` использовал `stat_name`/`stat_icon` (убраны из `AdminHabit` в Task 3.8, но компонент не обновлён), тестовые фикстуры с `stat_name`/`stat_icon`, неиспользуемый `useStatDefinitions` import в `HabitCreatePage`.
+> - Каскадные 4 (после расширения `LeaderboardTabId`) — побочный эффект Task 3.9 fix, не отдельный класс багов.
+> Разделение обнаружилось только при попытке деплоя (vitest использует transpile-only, не делает полный type-check).
+
 ### Изменения этой итерации (2026-07-23)
 
 - **Topic-scoped чек-ины**: миграции 010, 011 → топики чек-инов, уведомлений, чата клуба.
