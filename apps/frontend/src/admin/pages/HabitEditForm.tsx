@@ -9,6 +9,7 @@ import {
   TextInput,
 } from "../components/Form";
 import { StatDefinitionSelect } from "../components/StatDefinitionSelect";
+import { formatStatDefinitionApiError } from "../utils/statDefinitionError";
 import { useAvailableChats, useStatDefinitions, useUpdateHabit, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
@@ -216,15 +217,16 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
 
   const validate = (
     state: FormState,
-  ): Partial<Record<keyof FormState, string>> => {
-    const errors: Partial<Record<keyof FormState, string>> = {};
+    currentChatId: number,
+  ): Partial<Record<keyof FormState | "chat_id", string>> => {
+    const errors: Partial<Record<keyof FormState | "chat_id", string>> = {};
     if (state.title.trim().length < 3 || state.title.trim().length > 128) {
       errors.title = "От 3 до 128 символов";
     }
     if (!state.description.trim()) {
       errors.description = "Обязательно";
     }
-    if (state.chat_id === 0) {
+    if (currentChatId === 0) {
       errors.chat_id = "Выбери группу Telegram, куда добавлен бот";
     }
     // Phase 3 v2 Task 3.8: stat_definition_id НЕ required в PATCH.
@@ -290,7 +292,7 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
     return errors;
   };
 
-  const errors = validate(form);
+  const errors = validate(form, currentChatId);
   const hasErrors = Object.keys(errors).length > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {

@@ -166,7 +166,13 @@ export function useMyHabits() {
   });
 }
 
-export function useGlobalLeaderboard(tab: LeaderboardTab) {
+/**
+ * Глобальные табы (не per-habit) — backend API принимает только
+ * streak/catches/shame. stat — per-habit, для него отдельный useHabitStatLeaderboard.
+ */
+export type GlobalLeaderboardTab = Exclude<LeaderboardTab, "stat">;
+
+export function useGlobalLeaderboard(tab: GlobalLeaderboardTab) {
   return useQuery({
     queryKey: ["global-leaderboard", tab],
     queryFn: () => leaderboardApi.global(tab),
@@ -174,7 +180,7 @@ export function useGlobalLeaderboard(tab: LeaderboardTab) {
   });
 }
 
-export function useLeaderboardOverview(tab: LeaderboardTab) {
+export function useLeaderboardOverview(tab: GlobalLeaderboardTab) {
   return useQuery({
     queryKey: ["leaderboard-overview", tab],
     queryFn: () => leaderboardApi.overview(tab),
@@ -182,7 +188,7 @@ export function useLeaderboardOverview(tab: LeaderboardTab) {
   });
 }
 
-export function useLeaderboardClubs(tab: LeaderboardTab) {
+export function useLeaderboardClubs(tab: GlobalLeaderboardTab) {
   return useQuery({
     queryKey: ["leaderboard-clubs", tab],
     queryFn: () => leaderboardApi.clubs(tab),

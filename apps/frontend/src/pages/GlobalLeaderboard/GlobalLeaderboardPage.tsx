@@ -83,7 +83,12 @@ function Accordion({
 
 function AccordionContent({ id }: { id: LeaderboardTab }) {
   const navigate = useNavigate();
-  const { data, isLoading, isError, error } = useLeaderboardClubs(id);
+  // Phase 3 v2 Task 3.9: GlobalLeaderboardPage не показывает stat таб
+  // (stat — per-habit фича). На runtime id приходит только из "streak|catches|shame",
+  // но компилятор не может это вывести — narrow явно.
+  const { data, isLoading, isError, error } = useLeaderboardClubs(
+    id as Exclude<LeaderboardTab, "stat">,
+  );
 
   if (isLoading) {
     return (

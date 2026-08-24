@@ -244,7 +244,7 @@ export interface LeaderboardResponse {
   total: number | null;
 }
 
-export type LeaderboardTabId = "streak" | "catches" | "shame";
+export type LeaderboardTabId = "streak" | "catches" | "shame" | "stat";
 
 export interface OverviewClub {
   habit_id: string;

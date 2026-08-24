@@ -68,6 +68,14 @@ function pluralRaz(n: number): "раз" | "раза" {
   return "раз";
 }
 
+// Phase 3 v2 Task 3.9: LeaderboardEntry.metric_value и
+// StatLeaderboardEntry.value — разные имена для одной семантики
+// (sortable score в строке рейтинга). Один <LeaderboardRow> используется
+// для всех табов, поэтому нормализуем через type-narrowing.
+function rowMetricValue(row: LeaderboardEntry | StatLeaderboardEntry): number {
+  return "metric_value" in row ? row.metric_value : row.value;
+}
+
 export function LeaderboardPage() {
   const { habitId } = useParams<{ habitId: string }>();
   const [searchParams] = useSearchParams();
@@ -139,7 +147,7 @@ export function LeaderboardPage() {
           <ol className="space-y-1.5">
             {data!.items.map((row) => (
               <li key={row.membership_id}>
-                <LeaderboardRow row={row} metricLabel={metricLabel(tab, row.metric_value)} />
+                <LeaderboardRow row={row} metricLabel={metricLabel(tab, rowMetricValue(row))} />
               </li>
             ))}
           </ol>
