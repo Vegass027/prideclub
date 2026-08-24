@@ -79,6 +79,26 @@ export function ProfilePage() {
         </div>
       </section>
 
+      {/* Phase 3 v2 Task 3.9: link на CharacterPage. */}
+      <section className="mt-4">
+        <button
+          type="button"
+          onClick={() => navigate("/character")}
+          className="flex w-full items-center justify-between rounded-card border border-white/5 bg-surface p-4 text-left shadow-card transition hover:border-white/20"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-2xl" aria-hidden="true">🌟</span>
+            <div>
+              <p className="text-sm font-semibold text-text">Мой персонаж</p>
+              <p className="text-xs text-muted">
+                Статус, прогресс и замороженные характеристики
+              </p>
+            </div>
+          </div>
+          <span aria-hidden="true" className="text-muted">→</span>
+        </button>
+      </section>
+
       <section className="mt-4">
         <div className="mb-2 flex items-center justify-between">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">

@@ -2,12 +2,14 @@ import { apiClient } from "@/shared/api/client";
 import type {
   BalanceResponse,
   CatchResponse,
+  CharacterResponse,
   LeaderboardClubsResponse,
   LeaderboardOverviewResponse,
   LeaderboardResponse,
   MarketplaceResponse,
   MembersResponse,
   MyHabitsList,
+  StatLeaderboardResponse,
   SubscribeResponse,
   TodayResponse,
   TopupResponse,
@@ -91,8 +93,29 @@ export const leaderboardApi = {
     apiClient
       .get<LeaderboardClubsResponse>(`/leaderboard/${tab}/clubs`)
       .then((r) => r.data),
+  /**
+    * Phase 3 v2 Task 3.9: per-habit лидерборд по характеристике клуба.
+    * Endpoint: GET /habits/{habit_id}/leaderboard (per-habit, НЕ /leaderboard/stat).
+    * Backend fallback: если habit.stat_definition_id IS NULL →
+    * { items: [], total: null } — не ошибка, фича не активирована админом.
+    */
+  stat: (habitId: string) =>
+    apiClient
+      .get<StatLeaderboardResponse>(`/habits/${habitId}/leaderboard`)
+      .then((r) => r.data),
 };
 
 export const usersApi = {
   me: () => apiClient.get<unknown>("/me").then((r) => r.data),
+};
+
+/**
+ * Phase 3 v2 Task 3.9: глобальная карточка персонажа.
+ * Источник для CharacterPage (status + frozen stats + LevelUp detection).
+ * Не сбрасываем кэш между рендерами — CharacterService на бэке фильтрует
+ * stats при каждом запросе (см. MIN_STAT_VALUE_TO_SHOW).
+ */
+export const characterApi = {
+  get: () =>
+    apiClient.get<CharacterResponse>("/character/me").then((r) => r.data),
 };

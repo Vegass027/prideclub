@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   balanceApi,
+  characterApi,
   habitsApi,
   leaderboardApi,
   marketplaceApi,
@@ -135,7 +136,11 @@ export function useJoinAndPay(
 
 export type LeaderboardTab = LeaderboardTabId;
 
-export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab) {
+export function useLeaderboard(
+  habitId: string | undefined,
+  tab: LeaderboardTab,
+  options?: { enabled?: boolean },
+) {
   const fn =
     tab === "streak"
       ? () => leaderboardApi.streaks(habitId!)
@@ -145,7 +150,10 @@ export function useLeaderboard(habitId: string | undefined, tab: LeaderboardTab)
   return useQuery({
     queryKey: ["leaderboard", tab, habitId],
     queryFn: fn,
-    enabled: Boolean(habitId),
+    // enabled: внешний гейт (опциональный) ∧ habitId truthy.
+    // LeaderboardPage передаёт { enabled: !isStatTab } чтобы не слать
+    // streak/catches/shame запрос когда активен таб stat.
+    enabled: Boolean(habitId) && (options?.enabled ?? true),
     staleTime: 60_000,
   });
 }
@@ -191,3 +199,39 @@ export { usePhotoBlob } from "./usePhotoBlob";
 export { useHabitSse } from "./useHabitSse";
 export { useTodayStream } from "./useTodayStream";
 export { useWallet } from "./useWallet";
+
+// Phase 3 v2 Task 3.9: character + per-habit stat leaderboard + level-up tracker.
+export { useLevelUpStatus } from "./levelUpTracker";
+
+/**
+ * Phase 3 v2 Task 3.9: глобальная карточка персонажа.
+ * staleTime=30s — данные меняются только при чек-ине/поимке (invalidate через SSE).
+ */
+export function useCharacter() {
+  return useQuery({
+    queryKey: ["character", "me"],
+    queryFn: characterApi.get,
+    staleTime: 30_000,
+  });
+}
+
+/**
+ * Phase 3 v2 Task 3.9: per-habit лидерборд по характеристике.
+ * Используется в LeaderboardPage на табе «📊 Характеристика».
+ * staleTime=30s — данные меняются при чек-инах участников.
+ *
+ * options.enabled позволяет гейтить запрос по активному табу —
+ * LeaderboardPage передаёт { enabled: isStatTab } чтобы не слать stat
+ * запрос когда активен streak/catches/shame.
+ */
+export function useHabitStatLeaderboard(
+  habitId: string | undefined,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ["leaderboard", "stat", habitId],
+    queryFn: () => leaderboardApi.stat(habitId!),
+    enabled: Boolean(habitId) && (options?.enabled ?? true),
+    staleTime: 30_000,
+  });
+}

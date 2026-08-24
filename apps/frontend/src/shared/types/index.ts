@@ -281,3 +281,63 @@ export interface CheckinEnqueueResponse {
   code: string;
   checkin_id: string | null;
 }
+
+// ── Phase 3 v2 Task 3.9: Character (frontend mirror of /api/v1/character/me) ──
+
+/**
+ * Текущая ступень глобального статуса персонажа.
+ * next_threshold / next_status = null → юзер на максимальной ступени
+ * («Режим зверя»); UI скрывает прогресс-бар.
+ */
+export interface CharacterStatusInfo {
+  name: string;
+  icon: string;
+  next_threshold: number | null;
+  next_status: string | null;
+}
+
+/**
+ * Одна характеристика в payload GET /character/me.
+ *
+ * last_checkin_at — ISO datetime или null (никогда не делал чек-ин).
+ * frozen_reason_text — текст заморозки для UI-баннера (null для active).
+ *
+ * Backend фильтрует: value < 1 AND !is_frozen сюда НЕ приходят
+ * (CharacterConfig.MIN_STAT_VALUE_TO_SHOW = 1). UI не делает
+ * собственной фильтрации — defensive fallback только для случая
+ * рассинхронизации с бэком.
+ */
+export interface CharacterStatOut {
+  stat_definition_id: string;
+  stat_slug: string;
+  stat_name: string;
+  stat_icon: string;
+  value: number;
+  is_frozen: boolean;
+  frozen_reason_text: string | null;
+  last_checkin_at: string | null;
+}
+
+export interface CharacterResponse {
+  /** Сумма value по ВСЕМ stats (включая отфильтрованные). */
+  total_value: number;
+  status: CharacterStatusInfo;
+  stats: CharacterStatOut[];
+}
+
+/**
+ * Одна строка лидерборда по характеристике клуба (Task 3.9).
+ * Frozen stats остаются в рейтинге (UI рисует ❄).
+ */
+export interface StatLeaderboardEntry {
+  membership_id: string;
+  user_id: number;
+  first_name: string;
+  value: number;
+  is_frozen: boolean;
+}
+
+export interface StatLeaderboardResponse {
+  items: StatLeaderboardEntry[];
+  total: number | null;
+}

@@ -6,6 +6,7 @@ import { LeaderboardPage } from "@/pages/Leaderboard/LeaderboardPage";
 import { GlobalLeaderboardPage } from "@/pages/GlobalLeaderboard/GlobalLeaderboardPage";
 import { ProfilePage } from "@/pages/Profile/ProfilePage";
 import { OnboardingPage } from "@/pages/Onboarding/OnboardingPage";
+import { CharacterPage } from "@/pages/Character";
 
 export function AppRouter() {
   return (
@@ -19,6 +20,7 @@ export function AppRouter() {
       <Route path="/habits/:habitId/leaderboard" element={<LeaderboardPage />} />
       <Route path="/leaderboards" element={<GlobalLeaderboardPage />} />
       <Route path="/profile" element={<ProfilePage />} />
+      <Route path="/character" element={<CharacterPage />} />
       <Route path="*" element={<Navigate to="/marketplace" replace />} />
     </Routes>
   );
