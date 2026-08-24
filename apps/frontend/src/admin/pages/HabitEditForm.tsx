@@ -648,7 +648,6 @@ export function HabitEditForm({ habit, loading, error }: FormProps) {
           disabled={updateHabit.isPending}
           error={errors.stat_definition_id ?? null}
           touched={!!touched.stat_definition_id}
-          label="Характеристика"
           deactivatedIdWarning={deactivatedIdWarning}
         />
         {touched.stat_definition_id && errors.stat_definition_id && (

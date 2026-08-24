@@ -338,11 +338,15 @@ describe("HabitEditForm — stat_definition_id (Phase 3 v2 Task 3.8)", () => {
     mockGet.mockResolvedValue(habit);
     renderForm(habit);
 
-    // Клик на select → выбрать "— Не выбрано —" (sentinel "").
-    const select = screen.getByTestId(
-      "stat-definition-select",
-    ) as HTMLSelectElement;
-    await userEvent.selectOptions(select, "");
+    // Клик на dropdown trigger → выбрать "— Не выбрано —" (sentinel null).
+    // Task 3.8 fix: trigger это <button>, не <select> — открываем и
+    // кликаем опцию.
+    const trigger = screen.getByTestId("stat-definition-select");
+    await userEvent.click(trigger);
+    const noneOption = await screen.findByTestId(
+      "stat-definition-option-none",
+    );
+    await userEvent.click(noneOption);
 
     const saveButton = screen.getByRole("button", { name: /Сохранить/ });
     await userEvent.click(saveButton);
