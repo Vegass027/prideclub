@@ -17,6 +17,10 @@ const { mockUpdate, mockGet } = vi.hoisted(() => ({
   mockGet: vi.fn(),
 }));
 
+// Phase 3 v2 Task 3.8 fix: shared UUID для fixture (бывший stat_name/stat_icon
+// удалены из AdminHabit, заменены на stat_definition_id FK).
+const STAT_UUID = "11111111-1111-1111-1111-111111111111";
+
 vi.mock("@/admin/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/admin/api")>();
   return {
@@ -60,8 +64,7 @@ function makeHabit(overrides: Partial<AdminHabit> = {}): AdminHabit {
     is_active: true,
     photo_url: null,
     telegram_invite_link: null,
-    stat_name: "Дисциплина",
-    stat_icon: "🔥",
+    stat_definition_id: STAT_UUID,
     stat_gain_per_checkin: 2,
     stat_loss_per_miss: 1,
     member_limit: null,

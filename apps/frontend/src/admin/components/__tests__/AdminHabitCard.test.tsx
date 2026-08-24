@@ -14,12 +14,57 @@
 //
 // Паттерн скопирован с MembersPage.test.tsx + HabitEditForm.test.tsx
 // (jsdom + vi.hoisted + vi.mock).
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AdminHabitCard } from "../AdminHabitCard";
 import type { AdminHabit } from "@/admin/api";
+
+// Phase 3 v2 Task 3.8 fix: AdminHabitCard резолвит stat через useStatDefinitions
+// (stat_name/stat_icon убраны из AdminHabit). Мокаем хук фабрикой с safe default
+// и override через mockReturnValue per-test.
+const STAT_UUID = "11111111-1111-1111-1111-111111111111";
+
+const { mockUseStatDefinitionsCard } = vi.hoisted(() => ({
+  mockUseStatDefinitionsCard: vi.fn(),
+}));
+
+vi.mock("../../hooks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../hooks")>();
+  return {
+    ...actual,
+    useStatDefinitions: () => {
+      const fn = mockUseStatDefinitionsCard();
+      if (fn && typeof fn === "object") {
+        return fn;
+      }
+      // Safe default: пустой каталог → компонент fallback'ит на "🔥 Характеристика".
+      return {
+        data: { items: [], total: 0 },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      };
+    },
+  };
+});
+
+beforeEach(() => {
+  mockUseStatDefinitionsCard.mockReset();
+  // Default: каталог с одной записью для тестов с заполненным stat_definition_id.
+  mockUseStatDefinitionsCard.mockReturnValue({
+    data: {
+      items: [
+        { id: STAT_UUID, slug: "endurance", name: "Выносливость", icon: "🔥", sort_order: 1 },
+      ],
+      total: 1,
+    },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+});
 
 function makeHabit(overrides: Partial<AdminHabit> = {}): AdminHabit {
   return {
@@ -39,8 +84,8 @@ function makeHabit(overrides: Partial<AdminHabit> = {}): AdminHabit {
     is_active: true,
     photo_url: null,
     telegram_invite_link: null,
-    stat_name: "Выносливость",
-    stat_icon: "🔥",
+    // Phase 3 v2 Task 3.8: stat_definition_id FK вместо stat_name/stat_icon.
+    stat_definition_id: STAT_UUID,
     stat_gain_per_checkin: 2,
     stat_loss_per_miss: 1,
     member_limit: null,

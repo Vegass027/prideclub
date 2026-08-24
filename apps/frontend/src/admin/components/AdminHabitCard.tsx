@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import type { AdminHabit } from "../api";
+import { useStatDefinitions } from "../hooks";
 
 interface AdminHabitCardProps {
   habit: AdminHabit;
@@ -28,7 +29,12 @@ export function AdminHabitCard({
   busy,
 }: AdminHabitCardProps) {
   const isArchived = habit.archived_at !== null;
-  const stat = `${habit.stat_icon ?? "🔥"} ${habit.stat_name}`;
+  // Phase 3 v2 Task 3.8: stat_name/stat_icon УБРАНЫ из AdminHabit. Резолвим
+  // через каталог stat_definitions (тот же хук, что в HabitCreate/Edit).
+  // Fallback "🔥 Характеристика" — null UUID или ещё не загружен каталог.
+  const { data: statsData } = useStatDefinitions();
+  const statDef = statsData?.items.find((s) => s.id === habit.stat_definition_id);
+  const stat = statDef ? `${statDef.icon ?? "🔥"} ${statDef.name}` : "🔥 Характеристика";
   const window = `${habit.checkin_window_start.slice(0, 5)}–${habit.checkin_window_end.slice(0, 5)}`;
 
   const handleArchive = () => {

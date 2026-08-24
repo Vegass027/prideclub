@@ -11,7 +11,7 @@ import {
   TextInput,
 } from "../components/Form";
 import { StatDefinitionSelect } from "../components/StatDefinitionSelect";
-import { useAvailableChats, useCreateHabit, useRefreshChat, useStatDefinitions, useUploadPhoto } from "../hooks";
+import { useAvailableChats, useCreateHabit, useRefreshChat, useUploadPhoto } from "../hooks";
 
 type ProofType = "video_note" | "photo" | "text";
 
